@@ -1,39 +1,91 @@
-# (ADD A SUITABLE TITLE FOR PROJECT)
+# maskproc
 
-A cleaned notebook-facing package for photomask image processing with a stable
-public API and internal CPU/GPU backend dispatch.
+Notebook-friendly photomask image-processing library with transparent CPU/GPU backend dispatch.
 
-## Goals
-- short task-based public API names
-- stable import paths
-- NumPy-first outputs for notebook use
-- legacy wrappers for old function names during migration
-- private `_cpu` / `_gpu` modules behind one public API
+Python 3.10+ | NumPy-only core | Optional GPU acceleration via CuPy
 
-## Current scope
-Implemented from the current working source plus the project chat history summary:
-- viewer module migrated from `gl_image_viewer.py`
-- center detection with CPU connected-components and optional GPU refinement
-- pitch estimation (global and per-line)
-- registration API with CPU or CuPy FFT backend
-- lightweight batch helpers and batch convenience wrappers
+## Features
 
-## Important note on GPU migration
-The historical GPU functions were not available here as verbatim source files, so the
-GPU layer was rebuilt under the new structure rather than copied verbatim. The public
-API is stable; internal kernels can keep evolving without changing notebook code.
+| Module | What it does |
+|---|---|
+| `detect_centers` | Otsu threshold, connected components, subpixel refinement (weighted / log-quadratic / edge gradient-moment) |
+| `estimate_pitch` | KNN or index-regression pitch estimation, global and per-line |
+| `estimate_shift` | Phase cross-correlation image registration |
+| `fft_pitch_error` | FFT-based periodic error / spectral analysis |
+| `fit_rowwise_distortion_field` | Row/column clustering, residual maps, distortion field fitting |
+| `build_tiff_index` | TIFF stripe/board parsing with global coordinate mapping |
+| `imshow_huge` | OpenGL tiled viewer for large images (PyQt5/6 + pyqtgraph) |
 
-## Install locally
+All functions return dataclass results (`CenterResult`, `PitchResult`, `ShiftResult`, etc.) with NumPy arrays and metadata. Coordinates are `(N, 2)` in `[x, y]` order.
+
+## Install
+
 ```bash
-pip install -e /path/to/maskproc_package
+pip install -e .
 ```
 
-## Example
-```python
-from maskproc import detect_centers, estimate_pitch, imshow_huge
+Optional dependencies for full functionality:
 
-viewer = imshow_huge(img)
-res = detect_centers(img, backend="gpu", refine="logquad")
-centers = res.centers_xy
+```bash
+pip install opencv-python scikit-image scipy tifffile matplotlib
+pip install cupy-cuda12x   # for GPU acceleration
+pip install PyQt5 pyqtgraph pyopengl  # for the viewer
+```
+
+## Quick start
+
+```python
+from maskproc import detect_centers, estimate_pitch, estimate_shift
+
+# Detect photomask feature centers with GPU-accelerated subpixel refinement
+result = detect_centers(img, backend="gpu", refine="logquad")
+centers = result.centers_xy          # (N, 2) array in [x, y] order
+
+# Estimate pitch along each row
 pitch = estimate_pitch(centers)
+
+# Register two images
+shift = estimate_shift(ref_img, mov_img)
+print(shift.shift_yx)                # [dy, dx] in pixels
+```
+
+### Tiled processing for large images
+
+```python
+from maskproc import detect_centers_tiled
+
+result = detect_centers_tiled(huge_image, tile_h=8192, overlap=128)
+```
+
+### Backend selection
+
+Every public function accepts `backend=`:
+- `"gpu"` — CuPy-accelerated (default for center detection and tiled functions)
+- `"cpu"` — OpenCV / scikit-image
+- `"auto"` — GPU if CuPy is available, else CPU
+
+## Tests
+
+```bash
+pytest tests/ -v
+```
+
+## Project structure
+
+```
+maskproc/
+  __init__.py          # Public API re-exports
+  centers.py           # Center detection (public API)
+  pitch.py             # Pitch estimation
+  registration.py      # Image registration
+  spectra.py           # FFT spectral analysis
+  calibration.py       # Distortion field fitting
+  mosaic.py            # TIFF stripe/board parsing
+  batch.py             # Stack processing wrappers
+  viewer.py            # OpenGL tiled image viewer
+  types.py             # Result dataclasses
+  backends.py          # CPU/GPU dispatch logic
+  legacy.py            # Deprecation wrappers for old API
+  _cpu/                # CPU implementations
+  _gpu/                # GPU implementations (hybrid CPU segmentation + GPU refinement)
 ```
