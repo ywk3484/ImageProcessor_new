@@ -112,21 +112,29 @@ def _logquadratic_from_batch_gpu(g_batch, m_batch, hs, ws, bg_batch, *, dtype):
 
 
 
-_OFF_CACHE = {}
+_OFF_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
 
 
 def _offsets_square(rad: int):
+    """Return (dy, dx) CuPy offset arrays for a square window.
+
+    Caches NumPy arrays to avoid holding GPU memory across calls.
+    """
     key = ("sq", int(rad))
     if key in _OFF_CACHE:
-        return _OFF_CACHE[key]
+        dy_np, dx_np = _OFF_CACHE[key]
+        return cp.asarray(dy_np), cp.asarray(dx_np)
     r = int(rad)
-    ys = cp.arange(-r, r + 1, dtype=cp.int32)
-    xs = cp.arange(-r, r + 1, dtype=cp.int32)
-    dy, dx = cp.meshgrid(ys, xs, indexing="ij")
-    dy = dy.ravel()
-    dx = dx.ravel()
-    _OFF_CACHE[key] = (dy, dx)
-    return dy, dx
+    ys = np.arange(-r, r + 1, dtype=np.int32)
+    xs = np.arange(-r, r + 1, dtype=np.int32)
+    dy, dx = np.meshgrid(ys, xs, indexing="ij")
+    _OFF_CACHE[key] = (dy.ravel(), dx.ravel())
+    return cp.asarray(_OFF_CACHE[key][0]), cp.asarray(_OFF_CACHE[key][1])
+
+
+def clear_offset_cache():
+    """Free cached offset arrays."""
+    _OFF_CACHE.clear()
 
 
 def _masked_median_lower(vals: cp.ndarray, mask: cp.ndarray) -> cp.ndarray:
@@ -188,10 +196,14 @@ def refine_centers_logquad_gpu_match_cpu(
     batch: int = 50_000,
     use_float64: bool = True,
 ):
-    assert g_gpu.ndim == 2 and g_gpu.dtype == cp.float32
-    assert lab_gpu.ndim == 2 and lab_gpu.dtype == cp.int32
-    assert stats_gpu.ndim == 2 and stats_gpu.shape[0] == lab_ids_gpu.shape[0]
-    assert stats_gpu.shape[1] in (4, 6)
+    if g_gpu.ndim != 2 or g_gpu.dtype != cp.float32:
+        raise ValueError(f"g_gpu must be 2D float32, got shape={g_gpu.shape} dtype={g_gpu.dtype}")
+    if lab_gpu.ndim != 2 or lab_gpu.dtype != cp.int32:
+        raise ValueError(f"lab_gpu must be 2D int32, got shape={lab_gpu.shape} dtype={lab_gpu.dtype}")
+    if stats_gpu.ndim != 2 or stats_gpu.shape[0] != lab_ids_gpu.shape[0]:
+        raise ValueError(f"stats_gpu rows ({stats_gpu.shape[0]}) must match lab_ids_gpu length ({lab_ids_gpu.shape[0]})")
+    if stats_gpu.shape[1] not in (4, 6):
+        raise ValueError(f"stats_gpu must have 4 or 6 columns, got {stats_gpu.shape[1]}")
 
     H, W = g_gpu.shape
     N = int(lab_ids_gpu.size)

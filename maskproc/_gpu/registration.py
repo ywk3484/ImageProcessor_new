@@ -24,7 +24,22 @@ def _parabolic_offset_1d(y_m1, y_0, y_p1):
 
 
 def estimate_shift_gpu(ref: np.ndarray, mov: np.ndarray, *, upsample_factor: int = 20, device: int = 0, use_float64: bool = True) -> ShiftResult:
+    """GPU phase cross-correlation with parabolic sub-pixel refinement.
+
+    .. warning::
+       *upsample_factor* is accepted for API compatibility but is **not used**.
+       Sub-pixel precision comes from a parabolic peak fit (~0.1 px typical),
+       not the iterative DFT refinement used by the CPU backend.
+    """
     _require_cupy()
+    import warnings
+    if upsample_factor > 1:
+        warnings.warn(
+            "GPU estimate_shift ignores upsample_factor; sub-pixel precision "
+            "comes from parabolic peak fit (~0.1 px). Use backend='cpu' for "
+            "iterative DFT refinement.",
+            stacklevel=2,
+        )
     dtype = cp.float64 if use_float64 else cp.float32
 
     with gpu_device(device):

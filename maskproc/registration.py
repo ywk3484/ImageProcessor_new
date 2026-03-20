@@ -27,6 +27,17 @@ def estimate_shift(
     device: int = 0,
     use_float64: bool = True,
 ):
+    """Estimate sub-pixel shift between *ref* and *mov* images.
+
+    Returns a :class:`ShiftResult` whose ``shift_yx`` is in **[y, x] order**
+    (row, column), which differs from the project-wide [x, y] convention used
+    for point arrays.  This matches the NumPy/image convention where axis-0 is
+    the row (y) direction.
+
+    Note: The GPU backend uses a parabolic peak fit for sub-pixel refinement and
+    does not honour *upsample_factor*.  The CPU backend (scikit-image) performs
+    iterative DFT refinement controlled by *upsample_factor*.
+    """
     if method != "phase_xcorr":
         raise ValueError("Currently supported method: 'phase_xcorr'")
 
