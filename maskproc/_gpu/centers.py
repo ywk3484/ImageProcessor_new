@@ -1,0 +1,662 @@
+from __future__ import annotations
+
+import numpy as np
+
+from ..types import CenterResult
+from ..backends import gpu_device
+from .._cpu.centers import _segment_binary, _bg_from_border, choose_refine_method_for_bbox
+from .components import connected_components_stats_gpu
+from .._cpu.components import connected_components_stats_cpu
+
+try:
+    import cupy as cp  # type: ignore
+except Exception:  # pragma: no cover
+    cp = None
+
+try:
+    import cupyx.scipy.ndimage as cndi  # type: ignore
+except Exception:  # pragma: no cover
+    cndi = None
+
+
+def _require_cupy():
+    if cp is None:
+        raise RuntimeError("CuPy is required for GPU center refinement.")
+
+
+def _pad_rois(rois: list[np.ndarray], masks: list[np.ndarray]):
+    B = len(rois)
+    hs = np.asarray([r.shape[0] for r in rois], dtype=np.int32)
+    ws = np.asarray([r.shape[1] for r in rois], dtype=np.int32)
+    Hm = int(hs.max()) if B else 0
+    Wm = int(ws.max()) if B else 0
+
+    rois_pad = np.zeros((B, Hm, Wm), dtype=np.float64)
+    masks_pad = np.zeros((B, Hm, Wm), dtype=bool)
+    bgs = np.zeros((B,), dtype=np.float64)
+    for i, (r, m) in enumerate(zip(rois, masks)):
+        h, w = r.shape
+        rois_pad[i, :h, :w] = r
+        masks_pad[i, :h, :w] = m
+        bgs[i] = _bg_from_border(r, border=2)
+    return rois_pad, masks_pad, hs, ws, bgs
+
+
+def _weighted_from_batch_gpu(g_batch, m_batch, hs, ws, bg_batch, *, dtype):
+    yy = cp.arange(g_batch.shape[1], dtype=dtype)[None, :, None]
+    xx = cp.arange(g_batch.shape[2], dtype=dtype)[None, None, :]
+
+    w = g_batch - bg_batch[:, None, None]
+    w = cp.where(m_batch, cp.maximum(w, 0), 0)
+    s = w.sum(axis=(1, 2))
+
+    cx = (w * xx).sum(axis=(1, 2)) / cp.maximum(s, dtype(1e-12))
+    cy = (w * yy).sum(axis=(1, 2)) / cp.maximum(s, dtype(1e-12))
+
+    msum = m_batch.sum(axis=(1, 2)).astype(dtype)
+    cx_m = (m_batch.astype(dtype) * xx).sum(axis=(1, 2)) / cp.maximum(msum, dtype(1e-12))
+    cy_m = (m_batch.astype(dtype) * yy).sum(axis=(1, 2)) / cp.maximum(msum, dtype(1e-12))
+
+    bad = (s <= dtype(0)) | ~cp.isfinite(cx) | ~cp.isfinite(cy)
+    cx = cp.where(bad, cx_m, cx)
+    cy = cp.where(bad, cy_m, cy)
+
+    valid_bounds = (cx >= 0) & (cy >= 0) & (cx < cp.asarray(ws, dtype=dtype)) & (cy < cp.asarray(hs, dtype=dtype))
+    cx = cp.where(valid_bounds, cx, cp.nan)
+    cy = cp.where(valid_bounds, cy, cp.nan)
+    return cx, cy
+
+
+def _logquadratic_from_batch_gpu(g_batch, m_batch, hs, ws, bg_batch, *, dtype):
+    B, Hm, Wm = g_batch.shape
+    yy = cp.arange(Hm, dtype=dtype)
+    xx = cp.arange(Wm, dtype=dtype)
+    Y, X = cp.meshgrid(yy, xx, indexing="ij")
+    ones = cp.ones_like(X, dtype=dtype)
+    A = cp.stack([X * X, Y * Y, X * Y, X, Y, ones], axis=-1)
+
+    v = g_batch - bg_batch[:, None, None]
+    valid = m_batch & (v > dtype(0))
+    z = cp.where(valid, cp.log(cp.maximum(v, dtype(1e-12))), dtype(0))
+
+    Av = A[None, ...] * valid[..., None].astype(dtype)
+    G = cp.einsum('bhwk,bhwl->bkl', Av, A[None, ...])
+    rhs = cp.einsum('bhwk,bhw->bk', Av, z)
+
+    eye = cp.eye(6, dtype=dtype)[None, :, :]
+    G = G + eye * dtype(1e-9)
+    coef = cp.linalg.solve(G, rhs[..., None]).squeeze(-1)
+
+    a = coef[:, 0]
+    b = coef[:, 1]
+    c = coef[:, 2]
+    d = coef[:, 3]
+    e = coef[:, 4]
+
+    detH = 4 * a * b - c * c
+    safe_det = cp.where(cp.abs(detH) > dtype(1e-12), detH, cp.nan)
+    cx = (c * e - 2 * b * d) / safe_det
+    cy = (c * d - 2 * a * e) / safe_det
+
+    counts = valid.sum(axis=(1, 2))
+    negdef = (a < dtype(-1e-12)) & (b < dtype(-1e-12)) & (detH > dtype(1e-12))
+    in_bounds = (cx >= 0) & (cy >= 0) & (cx < cp.asarray(ws, dtype=dtype)) & (cy < cp.asarray(hs, dtype=dtype))
+    ok = (counts >= 6) & negdef & in_bounds & cp.isfinite(cx) & cp.isfinite(cy)
+
+    cx_w, cy_w = _weighted_from_batch_gpu(g_batch, m_batch, hs, ws, bg_batch, dtype=dtype)
+    cx = cp.where(ok, cx, cx_w)
+    cy = cp.where(ok, cy, cy_w)
+    return cx, cy
+
+
+
+
+
+_OFF_CACHE = {}
+
+
+def _offsets_square(rad: int):
+    key = ("sq", int(rad))
+    if key in _OFF_CACHE:
+        return _OFF_CACHE[key]
+    r = int(rad)
+    ys = cp.arange(-r, r + 1, dtype=cp.int32)
+    xs = cp.arange(-r, r + 1, dtype=cp.int32)
+    dy, dx = cp.meshgrid(ys, xs, indexing="ij")
+    dy = dy.ravel()
+    dx = dx.ravel()
+    _OFF_CACHE[key] = (dy, dx)
+    return dy, dx
+
+
+def _masked_median_lower(vals: cp.ndarray, mask: cp.ndarray) -> cp.ndarray:
+    """Masked lower-median per row. Returns +inf when the row has no valid points."""
+    B, _M = vals.shape
+    n = cp.sum(mask, axis=1).astype(cp.int32)
+    v = cp.where(mask, vals, cp.inf)
+    vs = cp.sort(v, axis=1)
+    idx = cp.maximum((n - 1) // 2, 0)
+    return vs[cp.arange(B, dtype=cp.int32), idx]
+
+
+def _plane_fit_batched(x: cp.ndarray, y: cp.ndarray, g: cp.ndarray, m: cp.ndarray, eps_det: float = 1e-18):
+    mf = m.astype(cp.float64)
+    S1 = cp.sum(mf, axis=1)
+    Sx = cp.sum(mf * x, axis=1)
+    Sy = cp.sum(mf * y, axis=1)
+    Sxx = cp.sum(mf * x * x, axis=1)
+    Syy = cp.sum(mf * y * y, axis=1)
+    Sxy = cp.sum(mf * x * y, axis=1)
+    Sv = cp.sum(mf * g, axis=1)
+    Sxv = cp.sum(mf * x * g, axis=1)
+    Syv = cp.sum(mf * y * g, axis=1)
+    Mmat = cp.stack([
+        cp.stack([Sxx, Sxy, Sx], axis=1),
+        cp.stack([Sxy, Syy, Sy], axis=1),
+        cp.stack([Sx, Sy, S1], axis=1),
+    ], axis=1)
+    bvec = cp.stack([Sxv, Syv, Sv], axis=1)[:, :, None]
+    det = cp.linalg.det(Mmat)
+    ok = cp.isfinite(det) & (cp.abs(det) > eps_det) & (S1 >= 3)
+    eye3 = cp.eye(3, dtype=cp.float64)[None, :, :]
+    M_safe = cp.where(ok[:, None, None], Mmat, eye3)
+    b_safe = cp.where(ok[:, None, None], bvec, 0.0)
+    coef = cp.linalg.solve(M_safe, b_safe).squeeze(-1)
+    return coef[:, 0], coef[:, 1], coef[:, 2], ok
+
+
+def refine_centers_logquad_gpu_match_cpu(
+    g_gpu: cp.ndarray,
+    lab_gpu: cp.ndarray,
+    stats_gpu: cp.ndarray,
+    lab_ids_gpu: cp.ndarray,
+    *,
+    pad: int = 3,
+    win_rad: int = 4,
+    core_frac: float = 0.20,
+    weight_power: float = 1.0,
+    bg_dilate: int = 2,
+    bg_win_pad: int = 2,
+    bg_tail_frac: float = 0.05,
+    plane_bg: bool = True,
+    min_bg_pts: int = 12,
+    min_plane_pts: int = 20,
+    max_cond: float = 1e10,
+    negdef_eps: float = 1e-12,
+    fit_dilate: int = 1,
+    eps: float = 1e-12,
+    batch: int = 50_000,
+    use_float64: bool = True,
+):
+    assert g_gpu.ndim == 2 and g_gpu.dtype == cp.float32
+    assert lab_gpu.ndim == 2 and lab_gpu.dtype == cp.int32
+    assert stats_gpu.ndim == 2 and stats_gpu.shape[0] == lab_ids_gpu.shape[0]
+    assert stats_gpu.shape[1] in (4, 6)
+
+    H, W = g_gpu.shape
+    N = int(lab_ids_gpu.size)
+    g = g_gpu.astype(cp.float64) if use_float64 else g_gpu.astype(cp.float32)
+    labimg = lab_gpu
+    lab_ids = lab_ids_gpu.astype(cp.int32, copy=False)
+
+    x = stats_gpu[:, 0].astype(cp.int32)
+    y = stats_gpu[:, 1].astype(cp.int32)
+    w = stats_gpu[:, 2].astype(cp.int32)
+    h = stats_gpu[:, 3].astype(cp.int32)
+    x0 = cp.maximum(0, x - int(pad))
+    y0 = cp.maximum(0, y - int(pad))
+    x1 = cp.minimum(W, x + w + int(pad))
+    y1 = cp.minimum(H, y + h + int(pad))
+
+    if stats_gpu.shape[1] == 6:
+        cxf = stats_gpu[:, 4].astype(cp.float64)
+        cyf = stats_gpu[:, 5].astype(cp.float64)
+    else:
+        cxf = (x + (w // 2)).astype(cp.float64)
+        cyf = (y + (h // 2)).astype(cp.float64)
+
+    cxi = cp.rint(cxf).astype(cp.int32)
+    cyi = cp.rint(cyf).astype(cp.int32)
+
+    Rout = int(win_rad + bg_win_pad)
+    dy_out, dx_out = _offsets_square(Rout)
+    dy_w, dx_w = _offsets_square(int(win_rad))
+    Mout = int(dx_out.size)
+    K = int(dx_w.size)
+    Pout = 2 * Rout + 1
+    Pwin = 2 * int(win_rad) + 1
+
+    PAD = int(Rout + 2)
+    gp = cp.pad(g, pad_width=PAD, mode="constant", constant_values=0.0)
+    lp = cp.pad(labimg, pad_width=PAD, mode="constant", constant_values=0)
+
+    refined = cp.empty((N, 2), dtype=cp.float64)
+    ok_all = cp.empty((N,), dtype=cp.bool_)
+
+    for s in range(0, N, int(batch)):
+        e = min(N, s + int(batch))
+        B = e - s
+        lab = lab_ids[s:e]
+        cx = cxi[s:e]
+        cy = cyi[s:e]
+        cxp = (cx + PAD).astype(cp.int32)
+        cyp = (cy + PAD).astype(cp.int32)
+
+        xs_out = cxp[:, None] + dx_out[None, :]
+        ys_out = cyp[:, None] + dy_out[None, :]
+        g_out = gp[ys_out, xs_out]
+        l_out = lp[ys_out, xs_out]
+
+        xg_out = (cx[:, None] + dx_out[None, :]).astype(cp.int32)
+        yg_out = (cy[:, None] + dy_out[None, :]).astype(cp.int32)
+        roi_out = (xg_out >= x0[s:e][:, None]) & (xg_out < x1[s:e][:, None]) & (yg_out >= y0[s:e][:, None]) & (yg_out < y1[s:e][:, None])
+
+        m0 = (l_out == lab[:, None]).reshape(B, Pout, Pout)
+        if int(bg_dilate) > 0 and cndi is not None:
+            k = int(2 * int(bg_dilate) + 1)
+            dil = (cndi.maximum_filter(m0.astype(cp.uint8), size=(1, k, k)) > 0)
+        else:
+            dil = m0
+        dil_vec = dil.reshape(B, Mout)
+
+        bg_mask = roi_out & (~dil_vec)
+        n_bg = cp.sum(bg_mask, axis=1)
+        bg0 = _masked_median_lower(g_out, bg_mask)
+        ok_bg = cp.isfinite(bg0) & (n_bg >= int(min_bg_pts))
+
+        xs_w = cxp[:, None] + dx_w[None, :]
+        ys_w = cyp[:, None] + dy_w[None, :]
+        g_win = gp[ys_w, xs_w]
+        l_win = lp[ys_w, xs_w]
+        xg_win = (cx[:, None] + dx_w[None, :]).astype(cp.int32)
+        yg_win = (cy[:, None] + dy_w[None, :]).astype(cp.int32)
+        roi_win = (xg_win >= x0[s:e][:, None]) & (xg_win < x1[s:e][:, None]) & (yg_win >= y0[s:e][:, None]) & (yg_win < y1[s:e][:, None])
+
+        v0_win = g_win - bg0[:, None]
+        vmax0 = cp.max(cp.where(roi_win, v0_win, -cp.inf), axis=1)
+        if float(bg_tail_frac) > 0.0:
+            v0_bg = g_out - bg0[:, None]
+            thr = (float(bg_tail_frac) * vmax0)[:, None]
+            bg_mask2 = bg_mask & (v0_bg <= thr)
+            n_bg2 = cp.sum(bg_mask2, axis=1)
+            bg0_2 = _masked_median_lower(g_out, bg_mask2)
+            use2 = cp.isfinite(bg0_2) & (n_bg2 >= int(min_bg_pts))
+            bg0 = cp.where(use2, bg0_2, bg0)
+            bg_mask_used = cp.where(use2[:, None], bg_mask2, bg_mask)
+        else:
+            bg_mask_used = bg_mask
+
+        if plane_bg:
+            n_plane = cp.sum(bg_mask_used, axis=1)
+            ok_plane = ok_bg & (n_plane >= int(min_plane_pts))
+            a_bg, b_bg, c_bg, ok_p = _plane_fit_batched(
+                xg_out.astype(cp.float64),
+                yg_out.astype(cp.float64),
+                g_out.astype(cp.float64),
+                bg_mask_used,
+            )
+            ok_plane = ok_plane & ok_p
+            plane_win = a_bg[:, None] * xg_win.astype(cp.float64) + b_bg[:, None] * yg_win.astype(cp.float64) + c_bg[:, None]
+            v_win = g_win.astype(cp.float64) - plane_win
+            v_win = cp.where(ok_plane[:, None], v_win, (g_win.astype(cp.float64) - bg0[:, None]))
+            ok_bg2 = ok_bg
+        else:
+            v_win = g_win.astype(cp.float64) - bg0[:, None]
+            ok_bg2 = ok_bg
+
+        in_blob = (l_win == lab[:, None]) & roi_win
+        if int(fit_dilate) > 0 and cndi is not None:
+            m = in_blob.reshape(B, Pwin, Pwin).astype(cp.uint8)
+            k = int(2 * int(fit_dilate) + 1)
+            md = (cndi.maximum_filter(m, size=(1, k, k)) > 0)
+            in_blob = (md.reshape(B, K)) & roi_win
+
+        fit = in_blob & (v_win > 0) & cp.isfinite(v_win)
+        vmax = cp.max(cp.where(fit, v_win, -cp.inf), axis=1)
+        ok_fit = ok_bg2 & cp.isfinite(vmax) & (vmax > 0)
+        core_thr = float(core_frac) * vmax
+        core = fit & (v_win >= core_thr[:, None])
+        n_core = cp.sum(core, axis=1)
+        sel = cp.where((n_core >= 6)[:, None], core, fit)
+
+        n_sel = cp.sum(sel, axis=1)
+        ok_sel = ok_fit & (n_sel >= 6)
+
+        vv = cp.maximum(v_win, float(eps))
+        z = cp.log(vv)
+        wts = (vv ** float(weight_power)) * sel.astype(cp.float64)
+
+        wpad = cp.where(sel, wts, cp.inf)
+        wsort = cp.sort(wpad, axis=1)
+        idx99 = cp.maximum((cp.floor(0.99 * (n_sel.astype(cp.float64) - 1.0))).astype(cp.int32), 0)
+        thr99 = wsort[cp.arange(B, dtype=cp.int32), idx99]
+        thr99 = cp.where(cp.isfinite(thr99), thr99, cp.max(cp.where(sel, wts, 0.0), axis=1))
+        wts = cp.minimum(wts, thr99[:, None])
+
+        sel_f = sel.astype(cp.float64)
+        n = cp.maximum(cp.sum(sel_f, axis=1), 1.0)
+        xg = xg_win.astype(cp.float64)
+        yg = yg_win.astype(cp.float64)
+        xm = cp.sum(sel_f * xg, axis=1) / n
+        ym = cp.sum(sel_f * yg, axis=1) / n
+        ex2 = cp.sum(sel_f * xg * xg, axis=1) / n
+        ey2 = cp.sum(sel_f * yg * yg, axis=1) / n
+        varx = cp.maximum(ex2 - xm * xm, 0.0)
+        vary = cp.maximum(ey2 - ym * ym, 0.0)
+        scls = cp.maximum(cp.maximum(cp.sqrt(varx), cp.sqrt(vary)), 1.0)
+        xn = (xg - xm[:, None]) / scls[:, None]
+        yn = (yg - ym[:, None]) / scls[:, None]
+
+        p0 = xn * xn
+        p1 = yn * yn
+        p2 = xn * yn
+        p3 = xn
+        p4 = yn
+        p5 = cp.ones_like(p0)
+        P = cp.stack([p0, p1, p2, p3, p4, p5], axis=1)
+        wz = wts * z
+        bvec = cp.sum(P * wz[:, None, :], axis=2)
+        Pw = P * wts[:, None, :]
+        Mmat = Pw @ cp.transpose(P, (0, 2, 1))
+
+        eye6 = cp.eye(6, dtype=cp.float64)[None, :, :]
+        M_safe = cp.where(ok_sel[:, None, None], Mmat, eye6)
+        b_safe = cp.where(ok_sel[:, None], bvec, 0.0)
+        coef = cp.linalg.solve(M_safe, b_safe[..., None]).squeeze(-1)
+        a, bq, c, d, e1, _f = [coef[:, i] for i in range(6)]
+
+        H00 = 2.0 * a
+        H11 = 2.0 * bq
+        H01 = c
+        tr = H00 + H11
+        disc = cp.sqrt(cp.maximum((H00 - H11) * (H00 - H11) + 4.0 * H01 * H01, 0.0))
+        lam1 = 0.5 * (tr - disc)
+        lam2 = 0.5 * (tr + disc)
+        ok_peak = ok_sel & (lam1 < -float(negdef_eps)) & (lam2 < -float(negdef_eps))
+        condH = cp.abs(lam2) / cp.maximum(cp.abs(lam1), 1e-30)
+        ok_peak = ok_peak & (condH <= float(max_cond))
+
+        det = H00 * H11 - H01 * H01
+        ok_peak = ok_peak & (cp.abs(det) > 1e-20)
+        cxn = (-d * H11 + e1 * H01) / det
+        cyn = (d * H01 - e1 * H00) / det
+        cxg = xm + scls * cxn
+        cyg = ym + scls * cyn
+        ok_in = (cxg >= (cxf[s:e] - float(win_rad))) & (cxg <= (cxf[s:e] + float(win_rad))) & (cyg >= (cyf[s:e] - float(win_rad))) & (cyg <= (cyf[s:e] + float(win_rad)))
+        ok = ok_peak & ok_in
+        rx = cp.where(ok, cxg, cxf[s:e])
+        ry = cp.where(ok, cyg, cyf[s:e])
+        refined[s:e, 0] = rx
+        refined[s:e, 1] = ry
+        ok_all[s:e] = ok
+
+    return refined, ok_all
+def _smooth_binom5_gpu(x):
+    xm2 = cp.concatenate([x[..., :1], x[..., :1], x[..., :-2]], axis=-1)
+    xm1 = cp.concatenate([x[..., :1], x[..., :-1]], axis=-1)
+    xp1 = cp.concatenate([x[..., 1:], x[..., -1:]], axis=-1)
+    xp2 = cp.concatenate([x[..., 2:], x[..., -1:], x[..., -1:]], axis=-1)
+    return (xm2 + 4 * xm1 + 6 * x + 4 * xp1 + xp2) * (1.0 / 16.0)
+
+
+def _edge_from_profile_gradmoment_gpu(prof, base_x, *, grad_power: float = 8.0, loc_rad: int = 3):
+    d = cp.abs(prof[:, 1:] - prof[:, :-1])
+    B, Lm1 = d.shape
+    if Lm1 <= 0:
+        return cp.full((B,), cp.nan, dtype=cp.float64), cp.zeros((B,), dtype=bool)
+    ip = cp.argmax(d, axis=1).astype(cp.int32)
+    ip0 = cp.clip(ip, loc_rad, max(loc_rad, Lm1 - 1 - loc_rad))
+    offs = cp.arange(-loc_rad, loc_rad + 1, dtype=cp.int32)
+    jj = ip0[:, None] + offs[None, :]
+    jj = cp.clip(jj, 0, Lm1 - 1)
+    row = cp.arange(B, dtype=cp.int32)[:, None]
+    dloc = d[row, jj].astype(cp.float32)
+    w = dloc ** float(grad_power)
+    sw = cp.sum(w, axis=1) + 1e-20
+    k = jj.astype(cp.float32)
+    xk = base_x[:, None] + (k + 0.5)
+    x_edge = cp.sum(w * xk, axis=1) / sw
+    ok = sw > 1e-12
+    return x_edge, ok
+
+
+def refine_centers_edge_moment_gpu(
+    gray: np.ndarray,
+    stats_xywh_cc: np.ndarray,
+    *,
+    band_rad: int = 4,
+    edge_rad: int = 10,
+    smooth_passes: int = 2,
+    loc_rad: int = 3,
+    grad_power: float = 8.0,
+    iters: int = 2,
+    device: int = 0,
+):
+    _require_cupy()
+    g_np = np.asarray(gray, dtype=np.float32)
+    stats_np = np.asarray(stats_xywh_cc, dtype=np.float32)
+    if g_np.ndim != 2:
+        raise ValueError("gray must be a 2D grayscale image")
+    if stats_np.size == 0:
+        return np.zeros((0, 2), dtype=np.float64), np.zeros((0,), dtype=bool)
+    with gpu_device(device):
+        gray = cp.asarray(g_np, dtype=cp.float32)
+        stats_xywh_cc = cp.asarray(stats_np, dtype=cp.float32)
+        H, W = map(int, gray.shape)
+        K = int(stats_xywh_cc.shape[0])
+        w = stats_xywh_cc[:, 2].astype(cp.float32)
+        h = stats_xywh_cc[:, 3].astype(cp.float32)
+        xc = stats_xywh_cc[:, 4].astype(cp.float32)
+        yc = stats_xywh_cc[:, 5].astype(cp.float32)
+        By = 2 * band_rad + 1
+        L = 2 * edge_rad + 1
+        dy = cp.arange(-band_rad, band_rad + 1, dtype=cp.int32)
+        dx = cp.arange(-edge_rad, edge_rad + 1, dtype=cp.int32)
+        gflat = gray.ravel()
+        ok_all = cp.ones((K,), dtype=bool)
+        for _ in range(int(iters)):
+            xL0 = cp.rint(xc - 0.5 * (w - 1.0)).astype(cp.int32)
+            xR0 = cp.rint(xc + 0.5 * (w - 1.0)).astype(cp.int32)
+            yT0 = cp.rint(yc - 0.5 * (h - 1.0)).astype(cp.int32)
+            yB0 = cp.rint(yc + 0.5 * (h - 1.0)).astype(cp.int32)
+            ys = cp.clip(cp.rint(yc).astype(cp.int32)[:, None] + dy[None, :], 0, H - 1)
+            def prof_at_x(x0_int):
+                xs = cp.clip(x0_int[:, None] + dx[None, :], 0, W - 1)
+                idx = (ys[:, :, None] * W + xs[:, None, :]).astype(cp.int64)
+                patch = cp.take(gflat, idx.ravel()).reshape(K, By, L)
+                prof = cp.mean(patch, axis=1)
+                for _ in range(int(smooth_passes)):
+                    prof = _smooth_binom5_gpu(prof)
+                base = x0_int.astype(cp.float32) - edge_rad
+                return prof, base
+            profL, baseL = prof_at_x(xL0)
+            profR, baseR = prof_at_x(xR0)
+            xL, okL = _edge_from_profile_gradmoment_gpu(profL, baseL, grad_power=grad_power, loc_rad=loc_rad)
+            xR, okR = _edge_from_profile_gradmoment_gpu(profR, baseR, grad_power=grad_power, loc_rad=loc_rad)
+            xs_band = cp.clip(cp.rint(xc).astype(cp.int32)[:, None] + dy[None, :], 0, W - 1)
+            def prof_at_y(y0_int):
+                ys2 = cp.clip(y0_int[:, None] + dx[None, :], 0, H - 1)
+                idx2 = (ys2[:, None, :] * W + xs_band[:, :, None]).astype(cp.int64)
+                patch2 = cp.take(gflat, idx2.ravel()).reshape(K, By, L)
+                prof = cp.mean(patch2, axis=1)
+                for _ in range(int(smooth_passes)):
+                    prof = _smooth_binom5_gpu(prof)
+                base = y0_int.astype(cp.float32) - edge_rad
+                return prof, base
+            profT, baseT = prof_at_y(yT0)
+            profB, baseB = prof_at_y(yB0)
+            yT, okT = _edge_from_profile_gradmoment_gpu(profT, baseT, grad_power=grad_power, loc_rad=loc_rad)
+            yB, okB = _edge_from_profile_gradmoment_gpu(profB, baseB, grad_power=grad_power, loc_rad=loc_rad)
+            ok_iter = okL & okR & okT & okB
+            ok_all &= ok_iter
+            xc = 0.5 * (xL + xR)
+            yc = 0.5 * (yT + yB)
+        centers = cp.stack([xc, yc], axis=1).astype(cp.float64)
+        return cp.asnumpy(centers), cp.asnumpy(ok_all)
+
+def _refine_batch_gpu(rois: list[np.ndarray], masks: list[np.ndarray], *, method: str, use_float64: bool, device: int):
+    _require_cupy()
+    if not rois:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    rois_pad, masks_pad, hs, ws, bgs = _pad_rois(rois, masks)
+    dtype = cp.float64 if use_float64 else cp.float32
+
+    with gpu_device(device):
+        g_batch = cp.asarray(rois_pad, dtype=dtype)
+        m_batch = cp.asarray(masks_pad)
+        bg_batch = cp.asarray(bgs, dtype=dtype)
+
+        if method in {"edge_gradmoment", "edge_moment", "edges_centered"}:
+            raise ValueError("edge_gradmoment is only supported through detect_centers_gpu(...) or refine_centers_edge_moment_gpu(...)")
+        if method == "weighted":
+            cx, cy = _weighted_from_batch_gpu(g_batch, m_batch, hs, ws, bg_batch, dtype=dtype)
+        elif method in {"logquad", "logquadratic"}:
+            cx, cy = _logquadratic_from_batch_gpu(g_batch, m_batch, hs, ws, bg_batch, dtype=dtype)
+        elif method == "none":
+            cx, cy = _weighted_from_batch_gpu(g_batch, m_batch, hs, ws, bg_batch, dtype=dtype)
+        else:
+            raise ValueError("method must be one of: 'none', 'weighted', 'logquad'.")
+
+        out = cp.stack([cx, cy], axis=1)
+        return cp.asnumpy(out)
+
+
+def refine_weighted_centroid_gpu(gray_roi: np.ndarray, mask_roi: np.ndarray, *, device: int = 0, use_float64: bool = True) -> tuple[float, float]:
+    out = _refine_batch_gpu([np.asarray(gray_roi)], [np.asarray(mask_roi, dtype=bool)], method="weighted", use_float64=use_float64, device=device)
+    return float(out[0, 0]), float(out[0, 1])
+
+
+def refine_logquadratic_gpu(gray_roi: np.ndarray, mask_roi: np.ndarray, *, device: int = 0, use_float64: bool = True) -> tuple[float, float]:
+    out = _refine_batch_gpu([np.asarray(gray_roi)], [np.asarray(mask_roi, dtype=bool)], method="logquad", use_float64=use_float64, device=device)
+    return float(out[0, 0]), float(out[0, 1])
+
+
+def refine_centers_gpu(gray_roi: np.ndarray, mask_roi: np.ndarray, *, method: str = "logquad", device: int = 0, use_float64: bool = True) -> tuple[float, float]:
+    out = _refine_batch_gpu([np.asarray(gray_roi)], [np.asarray(mask_roi, dtype=bool)], method=method, use_float64=use_float64, device=device)
+    return float(out[0, 0]), float(out[0, 1])
+
+
+def detect_centers_gpu(
+    image: np.ndarray,
+    *,
+    threshold: str = "otsu",
+    invert: bool = False,
+    area_min: int = 1,
+    area_max: int = 50,
+    morph_open: int = 0,
+    morph_close: int = 0,
+    pad: int = 3,
+    refine: str = "logquad",
+    connectivity: int = 8,
+    gpu_batch: int = 4096,
+    device: int = 0,
+    use_float64: bool = True,
+    components_backend: str = "cpu",
+    small_feature_max: float = 12.0,
+) -> CenterResult:
+    g, bw = _segment_binary(
+        image,
+        threshold=threshold,
+        invert=invert,
+        morph_open=morph_open,
+        morph_close=morph_close,
+    )
+    if components_backend == "gpu":
+        comp = connected_components_stats_gpu(bw, connectivity=connectivity, device=device)
+    else:
+        comp = connected_components_stats_cpu(bw, connectivity=connectivity)
+    labels = comp.labels
+    stats = comp.stats
+    num = comp.num_labels
+
+    rows = []
+    lab_ids = []
+    method_rows = {"logquad": [], "weighted": [], "none": [], "edge_gradmoment": []}
+    for lab in range(1, num):
+        x, y, w, h, area = stats[lab]
+        if area < int(area_min) or area > int(area_max):
+            continue
+        cx, cy = comp.centroids[lab]
+        method_local = choose_refine_method_for_bbox(w, h, small_feature_max=small_feature_max) if refine == "auto" else refine
+        if method_local in {"edge_moment", "edges_centered"}:
+            method_local = "edge_gradmoment"
+        if method_local not in method_rows:
+            raise ValueError(f"Unsupported refine method: {method_local}")
+        rows.append([x, y, w, h, cx, cy])
+        lab_ids.append(lab)
+        method_rows[method_local].append(len(rows) - 1)
+
+    centers = []
+    if method_rows["logquad"]:
+        ids = np.asarray(method_rows["logquad"], dtype=np.int32)
+        with gpu_device(device):
+            g_gpu = cp.asarray(np.asarray(g, dtype=np.float32), dtype=cp.float32)
+            lab_gpu = cp.asarray(np.asarray(labels, dtype=np.int32), dtype=cp.int32)
+            stats_gpu = cp.asarray(np.asarray(rows, dtype=np.float32)[ids], dtype=cp.float32)
+            lab_ids_gpu = cp.asarray(np.asarray(lab_ids, dtype=np.int32)[ids], dtype=cp.int32)
+            refined_gpu, ok_gpu = refine_centers_logquad_gpu_match_cpu(
+                g_gpu,
+                lab_gpu,
+                stats_gpu,
+                lab_ids_gpu,
+                pad=pad,
+                batch=max(1, int(gpu_batch)),
+                use_float64=use_float64,
+            )
+            refined = cp.asnumpy(refined_gpu)
+            ok = cp.asnumpy(ok_gpu).astype(bool)
+        for pt, good in zip(refined, ok):
+            if good and np.all(np.isfinite(pt)):
+                centers.append([float(pt[0]), float(pt[1])])
+
+    if method_rows["edge_gradmoment"]:
+        rows_edge = np.asarray(rows, dtype=np.float32)[np.asarray(method_rows["edge_gradmoment"], dtype=np.int32)]
+        centers_arr, ok = refine_centers_edge_moment_gpu(g, rows_edge, device=device)
+        for pt, good in zip(centers_arr, np.asarray(ok, dtype=bool)):
+            if good and np.all(np.isfinite(pt)):
+                centers.append([float(pt[0]), float(pt[1])])
+
+    for method_name in ("weighted", "none"):
+        idxs = method_rows[method_name]
+        if not idxs:
+            continue
+        boxes = []
+        rois = []
+        masks = []
+        H, W = g.shape
+        for j in idxs:
+            lab = int(lab_ids[j])
+            x, y, w, h = [int(v) for v in rows[j][:4]]
+            x0 = max(0, x - int(pad))
+            y0 = max(0, y - int(pad))
+            x1 = min(W, x + w + int(pad))
+            y1 = min(H, y + h + int(pad))
+            boxes.append((x0, y0))
+            rois.append(g[y0:y1, x0:x1])
+            masks.append(labels[y0:y1, x0:x1] == lab)
+        loc = _refine_batch_gpu(rois, masks, method=method_name, use_float64=use_float64, device=device)
+        for (x0, y0), (cx, cy) in zip(boxes, loc):
+            if np.isfinite(cx) and np.isfinite(cy):
+                centers.append([x0 + float(cx), y0 + float(cy)])
+
+    arr = np.asarray(centers, dtype=np.float64) if centers else np.zeros((0, 2), dtype=np.float64)
+    return CenterResult(
+        centers_xy=arr,
+        method=f"threshold={threshold}, refine={refine}",
+        backend="gpu",
+        meta={
+            "invert": bool(invert),
+            "area_min": int(area_min),
+            "area_max": int(area_max),
+            "morph_open": int(morph_open),
+            "morph_close": int(morph_close),
+            "pad": int(pad),
+            "connectivity": int(connectivity),
+            "gpu_batch": int(gpu_batch),
+            "device": int(device),
+            "use_float64": bool(use_float64),
+            "components_backend": str(components_backend),
+            "small_feature_max": float(small_feature_max),
+        },
+    )
