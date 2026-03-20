@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**maskproc** (v0.2.0) — notebook-friendly photomask image-processing utilities. Python 3.10+, numpy-only core dependency. Used in Jupyter notebooks for photomask center detection, pitch estimation, and image registration.
+**subpx** (v0.2.0) — notebook-friendly photomask image-processing utilities. Python 3.10+, numpy-only core dependency. Used in Jupyter notebooks for photomask center detection, pitch estimation, and image registration.
 
 ## Commands
 
@@ -28,9 +28,9 @@ No linter or formatter is configured. No CI pipeline exists.
 The central design pattern: public API modules dispatch to `_cpu/` or `_gpu/` implementations via `backends.py`.
 
 ```
-maskproc/centers.py  (public API)
-    → maskproc/_cpu/centers.py   (OpenCV-based)
-    → maskproc/_gpu/centers.py   (CuPy-based, hybrid CPU segmentation + GPU refinement)
+subpx/centers.py  (public API)
+    → subpx/_cpu/centers.py   (OpenCV-based)
+    → subpx/_gpu/centers.py   (CuPy-based, hybrid CPU segmentation + GPU refinement)
 ```
 
 Same pattern for `components.py` and `registration.py`. Backend selected via `backend="auto"|"cpu"|"gpu"` parameter on public functions. `"auto"` checks CuPy availability.

@@ -1,6 +1,6 @@
 import numpy as np
 
-from maskproc import (
+from subpx import (
     fft_periodicity_uniform,
     fft_periodicity_resample,
     fit_rowwise_distortion_field,

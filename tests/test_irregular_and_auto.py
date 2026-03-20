@@ -1,7 +1,7 @@
 import numpy as np
 
-from maskproc import recommend_refine_method
-from maskproc.spectra import periodicity_lombscargle
+from subpx import recommend_refine_method
+from subpx.spectra import periodicity_lombscargle
 
 
 def test_recommend_refine_method_threshold():

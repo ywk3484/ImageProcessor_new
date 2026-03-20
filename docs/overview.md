@@ -21,8 +21,8 @@ Examples:
 
 
 ## Internal layout added in v0.2
-- `maskproc._cpu.*`: backend-specific CPU implementations
-- `maskproc._gpu.*`: backend-specific GPU implementations
+- `subpx._cpu.*`: backend-specific CPU implementations
+- `subpx._gpu.*`: backend-specific GPU implementations
 - public modules dispatch to one of the above while preserving one stable API
 
 

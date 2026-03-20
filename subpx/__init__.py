@@ -1,4 +1,4 @@
-"""maskproc: notebook-friendly image-processing utilities for photomask analysis."""
+"""subpx: notebook-friendly subpixel image-processing utilities."""
 
 try:
     from .viewer import imshow_huge, show_image, GLTiledImshow, GLOrtho2D

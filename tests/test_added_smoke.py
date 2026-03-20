@@ -1,6 +1,6 @@
 import numpy as np
 
-from maskproc import (
+from subpx import (
     detect_centers_tiled,
     connected_components_stats,
     fft_pitch_error,

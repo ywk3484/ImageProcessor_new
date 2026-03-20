@@ -1,6 +1,6 @@
-# maskproc
+# subpx
 
-Notebook-friendly photomask image-processing library with transparent CPU/GPU backend dispatch.
+Notebook-friendly subpixel image-processing library with transparent CPU/GPU backend dispatch.
 
 Python 3.10+ | NumPy-only core | Optional GPU acceleration via CuPy
 
@@ -35,7 +35,7 @@ pip install PyQt5 pyqtgraph pyopengl  # for the viewer
 ## Quick start
 
 ```python
-from maskproc import detect_centers, estimate_pitch, estimate_shift
+from subpx import detect_centers, estimate_pitch, estimate_shift
 
 # Detect photomask feature centers with GPU-accelerated subpixel refinement
 result = detect_centers(img, backend="gpu", refine="logquad")
@@ -52,7 +52,7 @@ print(shift.shift_yx)                # [dy, dx] in pixels
 ### Tiled processing for large images
 
 ```python
-from maskproc import detect_centers_tiled
+from subpx import detect_centers_tiled
 
 result = detect_centers_tiled(huge_image, tile_h=8192, overlap=128)
 ```
@@ -73,7 +73,7 @@ pytest tests/ -v
 ## Project structure
 
 ```
-maskproc/
+subpx/
   __init__.py          # Public API re-exports
   centers.py           # Center detection (public API)
   pitch.py             # Pitch estimation

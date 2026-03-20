@@ -13,12 +13,12 @@
 ## Import policy for old notebooks
 During migration, old notebooks may temporarily use:
 ```python
-from maskproc.legacy import *
+from subpx.legacy import *
 ```
 
 New notebooks should instead use:
 ```python
-from maskproc import detect_centers, estimate_pitch, estimate_shift, imshow_huge
+from subpx import detect_centers, estimate_pitch, estimate_shift, imshow_huge
 ```
 
 

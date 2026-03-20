@@ -1,8 +1,8 @@
 import numpy as np
 
-from maskproc.centers import filter_centers, dedupe_centers, detect_centers
-from maskproc.pitch import estimate_pitch_lines
-from maskproc.registration import estimate_shift
+from subpx.centers import filter_centers, dedupe_centers, detect_centers
+from subpx.pitch import estimate_pitch_lines
+from subpx.registration import estimate_shift
 
 
 def test_filter_and_dedupe_smoke():
