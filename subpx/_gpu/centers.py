@@ -948,3 +948,164 @@ def detect_centers_gpu(
             "small_feature_max": float(small_feature_max),
         },
     )
+
+
+def _detect_centers_tiled_gpu(
+    image: np.ndarray,
+    *,
+    invert: bool = False,
+    area_min: int = 1,
+    area_max: int = 50,
+    morph_open: int = 0,
+    morph_close: int = 0,
+    tile_h: int = 8192,
+    overlap: int = 128,
+    otsu_downsample: int = 4,
+    thr_scale: float = 0.8,
+    refine: str = "edge_gradmoment",
+    connectivity: int = 8,
+    device: int = 0,
+    band_rad: int = 4,
+    edge_rad: int = 10,
+    smooth_passes: int = 2,
+    loc_rad: int = 3,
+    grad_power: float = 8.0,
+    iters: int = 2,
+    pad: int = 3,
+    gpu_batch: int = 4096,
+    use_float64: bool = True,
+) -> CenterResult:
+    """Dedicated tiled GPU center detection pipeline.
+
+    Mirrors the reference find_subpixel_centers_tiled_hybrid_gpu:
+    one global Otsu threshold, per-tile fixed threshold + GPU CC +
+    vectorized area filter + batched refinement + band-based de-dup.
+    """
+    _require_cupy()
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("OpenCV is required for tiled GPU center detection.") from exc
+
+    g = np.asarray(image)
+    if g.ndim != 2:
+        raise ValueError("Expected 2D grayscale image")
+    H, W = g.shape
+
+    if overlap >= tile_h:
+        raise ValueError("overlap must be < tile_h")
+
+    # Validate refine method before entering tile loop
+    _supported_refine = {"edge_gradmoment"}
+    _known_refine = _supported_refine | {"logquad", "logquadratic", "weighted", "edge_erf", "auto"}
+    if refine not in _known_refine:
+        raise ValueError(f"Unknown refine method: {refine}")
+    if refine not in _supported_refine:
+        raise NotImplementedError(
+            f"refine='{refine}' is not yet supported in the tiled GPU pipeline. "
+            "Use refine='edge_gradmoment' or the non-tiled detect_centers_gpu()."
+        )
+
+    # --- Step 0: Global threshold (once, on downsampled image) ---
+    ds = max(1, int(otsu_downsample))
+    thr_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+    g_ds = g[::ds, ::ds]
+    otsu_thresh, _ = cv2.threshold(g_ds, 0, 255, thr_type | cv2.THRESH_OTSU)
+    thr = float(otsu_thresh) * float(thr_scale)
+
+    step = tile_h - overlap
+    all_centers = []
+
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)) if (morph_open > 0 or morph_close > 0) else None
+
+    y0 = 0
+    while y0 < H:
+        y1 = min(H, y0 + tile_h)
+        tile = g[y0:y1]
+
+        # --- Per-tile threshold + morphology (CPU) ---
+        _, bw = cv2.threshold(tile, thr, 255, thr_type)
+        if morph_open > 0:
+            bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k, iterations=int(morph_open))
+        if morph_close > 0:
+            bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, k, iterations=int(morph_close))
+
+        # --- GPU connected components ---
+        comp = connected_components_stats_gpu(bw, connectivity=int(connectivity), device=int(device))
+        num = comp.num_labels
+
+        # num_labels includes background (label 0). num_labels == 1 means no foreground.
+        if num > 1:
+            stats = comp.stats          # (num_labels, 5) int32: [min_x, min_y, w, h, area]
+            centroids = comp.centroids  # (num_labels, 2) float64: [cx, cy]
+
+            # --- Vectorized area filtering (no Python loop) ---
+            area = stats[1:, 4]
+            mask = (area >= int(area_min)) & (area <= int(area_max))
+
+            if np.any(mask):
+                filtered_stats = stats[1:][mask]
+                filtered_cents = centroids[1:][mask]
+
+                # Build (K, 6): [x, y, w, h, cx, cy] — drop area column via [:, :4]
+                stats_xywh_cc = np.concatenate([
+                    filtered_stats[:, :4].astype(np.float32),
+                    filtered_cents.astype(np.float32),
+                ], axis=1)
+
+                # --- Refinement dispatch ---
+                # refine method validated before loop, so only edge_gradmoment reaches here
+                if refine == "edge_gradmoment":
+                    refined, ok = refine_centers_edge_moment_gpu(
+                        tile, stats_xywh_cc,
+                        band_rad=int(band_rad), edge_rad=int(edge_rad),
+                        smooth_passes=int(smooth_passes), loc_rad=int(loc_rad),
+                        grad_power=float(grad_power), iters=int(iters),
+                        device=int(device),
+                    )
+                else:
+                    # Dispatch structure reserved for future refinement methods
+                    raise NotImplementedError(f"refine='{refine}' dispatch not implemented (should have been caught in validation)")
+
+                # --- Global coordinate offset + band-based de-dup ---
+                refined = np.asarray(refined, dtype=np.float64)
+                ok = np.asarray(ok, dtype=bool)
+                good = ok & np.all(np.isfinite(refined), axis=1)
+                refined = refined[good]
+
+                if refined.shape[0] > 0:
+                    refined[:, 1] += y0  # tile-local → global
+
+                    half = overlap // 2
+                    keep_lo = y0 if y0 == 0 else (y0 + half)
+                    keep_hi = y1 if y1 == H else (y1 - half)
+                    m = (refined[:, 1] >= keep_lo) & (refined[:, 1] < keep_hi)
+                    if np.any(m):
+                        all_centers.append(refined[m])
+
+        if y1 == H:
+            break
+        y0 += step
+
+    if all_centers:
+        centers = np.vstack(all_centers)
+    else:
+        centers = np.zeros((0, 2), dtype=np.float64)
+
+    return CenterResult(
+        centers_xy=centers,
+        method=f"tiled_gpu(refine={refine})",
+        backend="gpu",
+        meta={
+            "tile_h": int(tile_h),
+            "overlap": int(overlap),
+            "otsu_downsample": int(ds),
+            "thr_scale": float(thr_scale),
+            "global_otsu_threshold": float(thr),
+            "refine": str(refine),
+            "invert": bool(invert),
+            "area_min": int(area_min),
+            "area_max": int(area_max),
+            "device": int(device),
+        },
+    )

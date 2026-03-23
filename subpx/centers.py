@@ -188,13 +188,15 @@ def detect_centers_tiled(
     tile_h: int = 8192,
     overlap: int = 128,
     otsu_downsample: int = 4,
+    thr_scale: float = 0.8,
     dedupe_eps: float = 1.5,
     **kwargs,
 ) -> CenterResult:
     """Detect centers on vertically tiled images.
 
-    This preserves the notebook-friendly behavior of the historical tiled GPU wrapper,
-    but exposes it behind a stable public name.
+    For GPU backend, uses a dedicated tiled pipeline with global Otsu threshold,
+    GPU connected components, vectorized filtering, and band-based de-dup.
+    For CPU backend, tiles are processed independently via detect_centers().
     """
     img = to_numpy(image)
     if img.ndim != 2:
@@ -202,33 +204,53 @@ def detect_centers_tiled(
     H, W = img.shape
     tile_h = int(max(1, tile_h))
     overlap = int(max(0, overlap))
-    if tile_h <= 2 * overlap:
-        raise ValueError("tile_h must be larger than 2*overlap.")
 
-    step = tile_h - 2 * overlap if H > tile_h else tile_h
-    starts = list(range(0, H, step))
+    b = resolve_backend(backend)
+
+    # --- GPU path: dedicated tiled pipeline ---
+    if b == "gpu":
+        from ._gpu.centers import _detect_centers_tiled_gpu
+        return _detect_centers_tiled_gpu(
+            img,
+            tile_h=tile_h,
+            overlap=overlap,
+            otsu_downsample=otsu_downsample,
+            thr_scale=thr_scale,
+            **kwargs,
+        )
+
+    # --- CPU path: tile-by-tile detect_centers ---
+    if overlap >= tile_h:
+        raise ValueError("overlap must be < tile_h")
+
+    step = tile_h - overlap
     all_centers = []
     per_tile_counts = []
 
-    for y_start in starts:
-        y0 = max(0, y_start - overlap)
-        y1 = min(H, y_start + tile_h - overlap)
+    y0 = 0
+    while y0 < H:
+        y1 = min(H, y0 + tile_h)
         tile = img[y0:y1]
-        res = detect_centers(tile, backend=backend, **kwargs)
+        res = detect_centers(tile, backend="cpu", **kwargs)
         pts = np.asarray(res.centers_xy, dtype=np.float64)
         if pts.size == 0:
             per_tile_counts.append(0)
-            continue
+        else:
+            global_pts = pts.copy()
+            global_pts[:, 1] += y0
 
-        keep_y0 = y_start if y_start > 0 else 0
-        keep_y1 = min(H, y_start + step) if y_start + step < H else H
-        global_pts = pts.copy()
-        global_pts[:, 1] += y0
-        keep = (global_pts[:, 1] >= keep_y0) & (global_pts[:, 1] < keep_y1)
-        kept = global_pts[keep]
-        per_tile_counts.append(int(kept.shape[0]))
-        if kept.size:
-            all_centers.append(kept)
+            half = overlap // 2
+            keep_lo = y0 if y0 == 0 else (y0 + half)
+            keep_hi = y1 if y1 == H else (y1 - half)
+            keep = (global_pts[:, 1] >= keep_lo) & (global_pts[:, 1] < keep_hi)
+            kept = global_pts[keep]
+            per_tile_counts.append(int(kept.shape[0]))
+            if kept.size:
+                all_centers.append(kept)
+
+        if y1 == H:
+            break
+        y0 += step
 
     if all_centers:
         centers = np.vstack(all_centers)
@@ -239,7 +261,7 @@ def detect_centers_tiled(
     return CenterResult(
         centers_xy=centers,
         method=f"tiled({backend})",
-        backend=resolve_backend(backend),
+        backend=b,
         meta={
             "tile_h": int(tile_h),
             "overlap": int(overlap),
