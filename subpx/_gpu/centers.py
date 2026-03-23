@@ -5,7 +5,7 @@ import numpy as np
 from ..types import CenterResult
 from ..backends import gpu_device
 from .._cpu.centers import _segment_binary, _bg_from_border, choose_refine_method_for_bbox
-from .components import connected_components_stats_gpu
+from .components import connected_components_stats_gpu, _connected_components_stats_gpu_core
 from .._cpu.components import connected_components_stats_cpu
 
 try:
@@ -437,6 +437,68 @@ def _edge_from_profile_gradmoment_gpu(prof, base_x, *, grad_power: float = 8.0, 
     return x_edge, ok
 
 
+def _refine_edge_moment_core(gray_gpu, stats_gpu, *,
+                              band_rad=4, edge_rad=10, smooth_passes=2,
+                              loc_rad=3, grad_power=8.0, iters=2):
+    """CuPy in, CuPy out, no device context.
+
+    gray_gpu:  (H, W) float32 CuPy
+    stats_gpu: (K, 6) float32 CuPy [x, y, w, h, cx, cy]
+    Returns:   (centers_gpu, ok_gpu) — CuPy float64 (K,2), CuPy bool (K,)
+    """
+    H, W = map(int, gray_gpu.shape)
+    K = int(stats_gpu.shape[0])
+    w = stats_gpu[:, 2].astype(cp.float32)
+    h = stats_gpu[:, 3].astype(cp.float32)
+    xc = stats_gpu[:, 4].astype(cp.float32)
+    yc = stats_gpu[:, 5].astype(cp.float32)
+    By = 2 * band_rad + 1
+    L = 2 * edge_rad + 1
+    dy = cp.arange(-band_rad, band_rad + 1, dtype=cp.int32)
+    dx = cp.arange(-edge_rad, edge_rad + 1, dtype=cp.int32)
+    gflat = gray_gpu.ravel()
+    ok_all = cp.ones((K,), dtype=bool)
+    for _ in range(int(iters)):
+        xL0 = cp.rint(xc - 0.5 * (w - 1.0)).astype(cp.int32)
+        xR0 = cp.rint(xc + 0.5 * (w - 1.0)).astype(cp.int32)
+        yT0 = cp.rint(yc - 0.5 * (h - 1.0)).astype(cp.int32)
+        yB0 = cp.rint(yc + 0.5 * (h - 1.0)).astype(cp.int32)
+        ys = cp.clip(cp.rint(yc).astype(cp.int32)[:, None] + dy[None, :], 0, H - 1)
+        def prof_at_x(x0_int):
+            xs = cp.clip(x0_int[:, None] + dx[None, :], 0, W - 1)
+            idx = (ys[:, :, None] * W + xs[:, None, :]).astype(cp.int64)
+            patch = cp.take(gflat, idx.ravel()).reshape(K, By, L)
+            prof = cp.mean(patch, axis=1)
+            for _ in range(int(smooth_passes)):
+                prof = _smooth_binom5_gpu(prof)
+            base = x0_int.astype(cp.float32) - edge_rad
+            return prof, base
+        profL, baseL = prof_at_x(xL0)
+        profR, baseR = prof_at_x(xR0)
+        xL, okL = _edge_from_profile_gradmoment_gpu(profL, baseL, grad_power=grad_power, loc_rad=loc_rad)
+        xR, okR = _edge_from_profile_gradmoment_gpu(profR, baseR, grad_power=grad_power, loc_rad=loc_rad)
+        xs_band = cp.clip(cp.rint(xc).astype(cp.int32)[:, None] + dy[None, :], 0, W - 1)
+        def prof_at_y(y0_int):
+            ys2 = cp.clip(y0_int[:, None] + dx[None, :], 0, H - 1)
+            idx2 = (ys2[:, None, :] * W + xs_band[:, :, None]).astype(cp.int64)
+            patch2 = cp.take(gflat, idx2.ravel()).reshape(K, By, L)
+            prof = cp.mean(patch2, axis=1)
+            for _ in range(int(smooth_passes)):
+                prof = _smooth_binom5_gpu(prof)
+            base = y0_int.astype(cp.float32) - edge_rad
+            return prof, base
+        profT, baseT = prof_at_y(yT0)
+        profB, baseB = prof_at_y(yB0)
+        yT, okT = _edge_from_profile_gradmoment_gpu(profT, baseT, grad_power=grad_power, loc_rad=loc_rad)
+        yB, okB = _edge_from_profile_gradmoment_gpu(profB, baseB, grad_power=grad_power, loc_rad=loc_rad)
+        ok_iter = okL & okR & okT & okB
+        ok_all &= ok_iter
+        xc = 0.5 * (xL + xR)
+        yc = 0.5 * (yT + yB)
+    centers = cp.stack([xc, yc], axis=1).astype(cp.float64)
+    return centers, ok_all
+
+
 def refine_centers_edge_moment_gpu(
     gray: np.ndarray,
     stats_xywh_cc: np.ndarray,
@@ -457,59 +519,14 @@ def refine_centers_edge_moment_gpu(
     if stats_np.size == 0:
         return np.zeros((0, 2), dtype=np.float64), np.zeros((0,), dtype=bool)
     with gpu_device(device):
-        gray = cp.asarray(g_np, dtype=cp.float32)
-        stats_xywh_cc = cp.asarray(stats_np, dtype=cp.float32)
-        H, W = map(int, gray.shape)
-        K = int(stats_xywh_cc.shape[0])
-        w = stats_xywh_cc[:, 2].astype(cp.float32)
-        h = stats_xywh_cc[:, 3].astype(cp.float32)
-        xc = stats_xywh_cc[:, 4].astype(cp.float32)
-        yc = stats_xywh_cc[:, 5].astype(cp.float32)
-        By = 2 * band_rad + 1
-        L = 2 * edge_rad + 1
-        dy = cp.arange(-band_rad, band_rad + 1, dtype=cp.int32)
-        dx = cp.arange(-edge_rad, edge_rad + 1, dtype=cp.int32)
-        gflat = gray.ravel()
-        ok_all = cp.ones((K,), dtype=bool)
-        for _ in range(int(iters)):
-            xL0 = cp.rint(xc - 0.5 * (w - 1.0)).astype(cp.int32)
-            xR0 = cp.rint(xc + 0.5 * (w - 1.0)).astype(cp.int32)
-            yT0 = cp.rint(yc - 0.5 * (h - 1.0)).astype(cp.int32)
-            yB0 = cp.rint(yc + 0.5 * (h - 1.0)).astype(cp.int32)
-            ys = cp.clip(cp.rint(yc).astype(cp.int32)[:, None] + dy[None, :], 0, H - 1)
-            def prof_at_x(x0_int):
-                xs = cp.clip(x0_int[:, None] + dx[None, :], 0, W - 1)
-                idx = (ys[:, :, None] * W + xs[:, None, :]).astype(cp.int64)
-                patch = cp.take(gflat, idx.ravel()).reshape(K, By, L)
-                prof = cp.mean(patch, axis=1)
-                for _ in range(int(smooth_passes)):
-                    prof = _smooth_binom5_gpu(prof)
-                base = x0_int.astype(cp.float32) - edge_rad
-                return prof, base
-            profL, baseL = prof_at_x(xL0)
-            profR, baseR = prof_at_x(xR0)
-            xL, okL = _edge_from_profile_gradmoment_gpu(profL, baseL, grad_power=grad_power, loc_rad=loc_rad)
-            xR, okR = _edge_from_profile_gradmoment_gpu(profR, baseR, grad_power=grad_power, loc_rad=loc_rad)
-            xs_band = cp.clip(cp.rint(xc).astype(cp.int32)[:, None] + dy[None, :], 0, W - 1)
-            def prof_at_y(y0_int):
-                ys2 = cp.clip(y0_int[:, None] + dx[None, :], 0, H - 1)
-                idx2 = (ys2[:, None, :] * W + xs_band[:, :, None]).astype(cp.int64)
-                patch2 = cp.take(gflat, idx2.ravel()).reshape(K, By, L)
-                prof = cp.mean(patch2, axis=1)
-                for _ in range(int(smooth_passes)):
-                    prof = _smooth_binom5_gpu(prof)
-                base = y0_int.astype(cp.float32) - edge_rad
-                return prof, base
-            profT, baseT = prof_at_y(yT0)
-            profB, baseB = prof_at_y(yB0)
-            yT, okT = _edge_from_profile_gradmoment_gpu(profT, baseT, grad_power=grad_power, loc_rad=loc_rad)
-            yB, okB = _edge_from_profile_gradmoment_gpu(profB, baseB, grad_power=grad_power, loc_rad=loc_rad)
-            ok_iter = okL & okR & okT & okB
-            ok_all &= ok_iter
-            xc = 0.5 * (xL + xR)
-            yc = 0.5 * (yT + yB)
-        centers = cp.stack([xc, yc], axis=1).astype(cp.float64)
-        return cp.asnumpy(centers), cp.asnumpy(ok_all)
+        centers, ok = _refine_edge_moment_core(
+            cp.asarray(g_np, dtype=cp.float32),
+            cp.asarray(stats_np, dtype=cp.float32),
+            band_rad=band_rad, edge_rad=edge_rad,
+            smooth_passes=smooth_passes, loc_rad=loc_rad,
+            grad_power=grad_power, iters=iters,
+        )
+        return cp.asnumpy(centers), cp.asnumpy(ok)
 
 
 
@@ -648,6 +665,106 @@ def _edge_from_profile_erf_gpu(
     return x_out.astype(cp.float64), ok
 
 
+def _refine_edge_erf_core(gray_gpu, stats_gpu, *,
+                           band_rad=4, edge_rad=10, smooth_passes=2,
+                           loc_rad=3, grad_power=8.0, iters=2,
+                           erf_fit_rad=5, erf_gn_iters=5,
+                           erf_init_sigma=1.25, erf_sigma_min=0.35,
+                           erf_sigma_max=6.0, erf_max_shift=2.5,
+                           erf_damp=1e-4, erf_cond_max=1e8):
+    """CuPy in, CuPy out, no device context.
+
+    gray_gpu:  (H, W) float32 CuPy
+    stats_gpu: (K, 6) float32 CuPy [x, y, w, h, cx, cy]
+    Returns:   (centers_gpu, ok_gpu) — CuPy float64 (K,2), CuPy bool (K,)
+    """
+    H, W = map(int, gray_gpu.shape)
+    K = int(stats_gpu.shape[0])
+    w = stats_gpu[:, 2].astype(cp.float32)
+    h = stats_gpu[:, 3].astype(cp.float32)
+    xc = stats_gpu[:, 4].astype(cp.float64)
+    yc = stats_gpu[:, 5].astype(cp.float64)
+    By = 2 * int(band_rad) + 1
+    L = 2 * int(edge_rad) + 1
+    dy = cp.arange(-int(band_rad), int(band_rad) + 1, dtype=cp.int32)
+    dx = cp.arange(-int(edge_rad), int(edge_rad) + 1, dtype=cp.int32)
+    gflat = gray_gpu.ravel()
+    ok_all = cp.ones((K,), dtype=bool)
+
+    for _ in range(int(iters)):
+        xL0 = cp.rint(xc - 0.5 * (w.astype(cp.float64) - 1.0)).astype(cp.int32)
+        xR0 = cp.rint(xc + 0.5 * (w.astype(cp.float64) - 1.0)).astype(cp.int32)
+        yT0 = cp.rint(yc - 0.5 * (h.astype(cp.float64) - 1.0)).astype(cp.int32)
+        yB0 = cp.rint(yc + 0.5 * (h.astype(cp.float64) - 1.0)).astype(cp.int32)
+
+        ys = cp.clip(cp.rint(yc).astype(cp.int32)[:, None] + dy[None, :], 0, H - 1)
+
+        def prof_at_x(x0_int):
+            xs = cp.clip(x0_int[:, None] + dx[None, :], 0, W - 1)
+            idx = (ys[:, :, None] * W + xs[:, None, :]).astype(cp.int64)
+            patch = cp.take(gflat, idx.ravel()).reshape(K, By, L)
+            prof = cp.mean(patch, axis=1)
+            for _ in range(int(smooth_passes)):
+                prof = _smooth_binom5_gpu(prof)
+            base = x0_int.astype(cp.float64) - float(edge_rad)
+            return prof.astype(cp.float64), base
+
+        profL, baseL = prof_at_x(xL0)
+        profR, baseR = prof_at_x(xR0)
+        xL_seed, okL0 = _edge_from_profile_gradmoment_gpu(profL, baseL.astype(cp.float32), grad_power=grad_power, loc_rad=loc_rad)
+        xR_seed, okR0 = _edge_from_profile_gradmoment_gpu(profR, baseR.astype(cp.float32), grad_power=grad_power, loc_rad=loc_rad)
+        xL, okL1 = _edge_from_profile_erf_gpu(
+            profL, baseL, xL_seed,
+            fit_rad=erf_fit_rad, gn_iters=erf_gn_iters, init_sigma=erf_init_sigma,
+            sigma_min=erf_sigma_min, sigma_max=erf_sigma_max, max_shift=erf_max_shift,
+            damp=erf_damp, cond_max=erf_cond_max, loc_rad=max(1, int(loc_rad) - 1),
+        )
+        xR, okR1 = _edge_from_profile_erf_gpu(
+            profR, baseR, xR_seed,
+            fit_rad=erf_fit_rad, gn_iters=erf_gn_iters, init_sigma=erf_init_sigma,
+            sigma_min=erf_sigma_min, sigma_max=erf_sigma_max, max_shift=erf_max_shift,
+            damp=erf_damp, cond_max=erf_cond_max, loc_rad=max(1, int(loc_rad) - 1),
+        )
+
+        xs_band = cp.clip(cp.rint(xc).astype(cp.int32)[:, None] + dy[None, :], 0, W - 1)
+
+        def prof_at_y(y0_int):
+            ys2 = cp.clip(y0_int[:, None] + dx[None, :], 0, H - 1)
+            idx2 = (ys2[:, None, :] * W + xs_band[:, :, None]).astype(cp.int64)
+            patch2 = cp.take(gflat, idx2.ravel()).reshape(K, By, L)
+            prof = cp.mean(patch2, axis=1)
+            for _ in range(int(smooth_passes)):
+                prof = _smooth_binom5_gpu(prof)
+            base = y0_int.astype(cp.float64) - float(edge_rad)
+            return prof.astype(cp.float64), base
+
+        profT, baseT = prof_at_y(yT0)
+        profB, baseB = prof_at_y(yB0)
+        yT_seed, okT0 = _edge_from_profile_gradmoment_gpu(profT, baseT.astype(cp.float32), grad_power=grad_power, loc_rad=loc_rad)
+        yB_seed, okB0 = _edge_from_profile_gradmoment_gpu(profB, baseB.astype(cp.float32), grad_power=grad_power, loc_rad=loc_rad)
+        yT, okT1 = _edge_from_profile_erf_gpu(
+            profT, baseT, yT_seed,
+            fit_rad=erf_fit_rad, gn_iters=erf_gn_iters, init_sigma=erf_init_sigma,
+            sigma_min=erf_sigma_min, sigma_max=erf_sigma_max, max_shift=erf_max_shift,
+            damp=erf_damp, cond_max=erf_cond_max, loc_rad=max(1, int(loc_rad) - 1),
+        )
+        yB, okB1 = _edge_from_profile_erf_gpu(
+            profB, baseB, yB_seed,
+            fit_rad=erf_fit_rad, gn_iters=erf_gn_iters, init_sigma=erf_init_sigma,
+            sigma_min=erf_sigma_min, sigma_max=erf_sigma_max, max_shift=erf_max_shift,
+            damp=erf_damp, cond_max=erf_cond_max, loc_rad=max(1, int(loc_rad) - 1),
+        )
+
+        ok_iter = okL0 & okR0 & okT0 & okB0 & okL1 & okR1 & okT1 & okB1
+        ok_iter &= (xR > xL) & (yB > yT)
+        ok_all &= ok_iter
+        xc = 0.5 * (xL + xR)
+        yc = 0.5 * (yT + yB)
+
+    centers = cp.stack([xc, yc], axis=1).astype(cp.float64)
+    return centers, ok_all
+
+
 def refine_centers_edge_erf_gpu(
     gray: np.ndarray,
     stats_xywh_cc: np.ndarray,
@@ -683,95 +800,19 @@ def refine_centers_edge_erf_gpu(
         return np.zeros((0, 2), dtype=np.float64), np.zeros((0,), dtype=bool)
     if stats_np.ndim != 2 or stats_np.shape[1] < 6:
         raise ValueError("stats_xywh_cc must have shape (N, >=6) with columns [x, y, w, h, cx, cy]")
-
     with gpu_device(device):
-        gray = cp.asarray(g_np, dtype=cp.float32)
-        stats_xywh_cc = cp.asarray(stats_np[:, :6], dtype=cp.float32)
-        H, W = map(int, gray.shape)
-        K = int(stats_xywh_cc.shape[0])
-        w = stats_xywh_cc[:, 2].astype(cp.float32)
-        h = stats_xywh_cc[:, 3].astype(cp.float32)
-        xc = stats_xywh_cc[:, 4].astype(cp.float64)
-        yc = stats_xywh_cc[:, 5].astype(cp.float64)
-        By = 2 * int(band_rad) + 1
-        L = 2 * int(edge_rad) + 1
-        dy = cp.arange(-int(band_rad), int(band_rad) + 1, dtype=cp.int32)
-        dx = cp.arange(-int(edge_rad), int(edge_rad) + 1, dtype=cp.int32)
-        gflat = gray.ravel()
-        ok_all = cp.ones((K,), dtype=bool)
-
-        for _ in range(int(iters)):
-            xL0 = cp.rint(xc - 0.5 * (w.astype(cp.float64) - 1.0)).astype(cp.int32)
-            xR0 = cp.rint(xc + 0.5 * (w.astype(cp.float64) - 1.0)).astype(cp.int32)
-            yT0 = cp.rint(yc - 0.5 * (h.astype(cp.float64) - 1.0)).astype(cp.int32)
-            yB0 = cp.rint(yc + 0.5 * (h.astype(cp.float64) - 1.0)).astype(cp.int32)
-
-            ys = cp.clip(cp.rint(yc).astype(cp.int32)[:, None] + dy[None, :], 0, H - 1)
-
-            def prof_at_x(x0_int):
-                xs = cp.clip(x0_int[:, None] + dx[None, :], 0, W - 1)
-                idx = (ys[:, :, None] * W + xs[:, None, :]).astype(cp.int64)
-                patch = cp.take(gflat, idx.ravel()).reshape(K, By, L)
-                prof = cp.mean(patch, axis=1)
-                for _ in range(int(smooth_passes)):
-                    prof = _smooth_binom5_gpu(prof)
-                base = x0_int.astype(cp.float64) - float(edge_rad)
-                return prof.astype(cp.float64), base
-
-            profL, baseL = prof_at_x(xL0)
-            profR, baseR = prof_at_x(xR0)
-            xL_seed, okL0 = _edge_from_profile_gradmoment_gpu(profL, baseL.astype(cp.float32), grad_power=grad_power, loc_rad=loc_rad)
-            xR_seed, okR0 = _edge_from_profile_gradmoment_gpu(profR, baseR.astype(cp.float32), grad_power=grad_power, loc_rad=loc_rad)
-            xL, okL1 = _edge_from_profile_erf_gpu(
-                profL, baseL, xL_seed,
-                fit_rad=erf_fit_rad, gn_iters=erf_gn_iters, init_sigma=erf_init_sigma,
-                sigma_min=erf_sigma_min, sigma_max=erf_sigma_max, max_shift=erf_max_shift,
-                damp=erf_damp, cond_max=erf_cond_max, loc_rad=max(1, int(loc_rad) - 1),
-            )
-            xR, okR1 = _edge_from_profile_erf_gpu(
-                profR, baseR, xR_seed,
-                fit_rad=erf_fit_rad, gn_iters=erf_gn_iters, init_sigma=erf_init_sigma,
-                sigma_min=erf_sigma_min, sigma_max=erf_sigma_max, max_shift=erf_max_shift,
-                damp=erf_damp, cond_max=erf_cond_max, loc_rad=max(1, int(loc_rad) - 1),
-            )
-
-            xs_band = cp.clip(cp.rint(xc).astype(cp.int32)[:, None] + dy[None, :], 0, W - 1)
-
-            def prof_at_y(y0_int):
-                ys2 = cp.clip(y0_int[:, None] + dx[None, :], 0, H - 1)
-                idx2 = (ys2[:, None, :] * W + xs_band[:, :, None]).astype(cp.int64)
-                patch2 = cp.take(gflat, idx2.ravel()).reshape(K, By, L)
-                prof = cp.mean(patch2, axis=1)
-                for _ in range(int(smooth_passes)):
-                    prof = _smooth_binom5_gpu(prof)
-                base = y0_int.astype(cp.float64) - float(edge_rad)
-                return prof.astype(cp.float64), base
-
-            profT, baseT = prof_at_y(yT0)
-            profB, baseB = prof_at_y(yB0)
-            yT_seed, okT0 = _edge_from_profile_gradmoment_gpu(profT, baseT.astype(cp.float32), grad_power=grad_power, loc_rad=loc_rad)
-            yB_seed, okB0 = _edge_from_profile_gradmoment_gpu(profB, baseB.astype(cp.float32), grad_power=grad_power, loc_rad=loc_rad)
-            yT, okT1 = _edge_from_profile_erf_gpu(
-                profT, baseT, yT_seed,
-                fit_rad=erf_fit_rad, gn_iters=erf_gn_iters, init_sigma=erf_init_sigma,
-                sigma_min=erf_sigma_min, sigma_max=erf_sigma_max, max_shift=erf_max_shift,
-                damp=erf_damp, cond_max=erf_cond_max, loc_rad=max(1, int(loc_rad) - 1),
-            )
-            yB, okB1 = _edge_from_profile_erf_gpu(
-                profB, baseB, yB_seed,
-                fit_rad=erf_fit_rad, gn_iters=erf_gn_iters, init_sigma=erf_init_sigma,
-                sigma_min=erf_sigma_min, sigma_max=erf_sigma_max, max_shift=erf_max_shift,
-                damp=erf_damp, cond_max=erf_cond_max, loc_rad=max(1, int(loc_rad) - 1),
-            )
-
-            ok_iter = okL0 & okR0 & okT0 & okB0 & okL1 & okR1 & okT1 & okB1
-            ok_iter &= (xR > xL) & (yB > yT)
-            ok_all &= ok_iter
-            xc = 0.5 * (xL + xR)
-            yc = 0.5 * (yT + yB)
-
-        centers = cp.stack([xc, yc], axis=1).astype(cp.float64)
-        return cp.asnumpy(centers), cp.asnumpy(ok_all)
+        centers, ok = _refine_edge_erf_core(
+            cp.asarray(g_np, dtype=cp.float32),
+            cp.asarray(stats_np[:, :6], dtype=cp.float32),
+            band_rad=band_rad, edge_rad=edge_rad,
+            smooth_passes=smooth_passes, loc_rad=loc_rad,
+            grad_power=grad_power, iters=iters,
+            erf_fit_rad=erf_fit_rad, erf_gn_iters=erf_gn_iters,
+            erf_init_sigma=erf_init_sigma, erf_sigma_min=erf_sigma_min,
+            erf_sigma_max=erf_sigma_max, erf_max_shift=erf_max_shift,
+            erf_damp=erf_damp, erf_cond_max=erf_cond_max,
+        )
+        return cp.asnumpy(centers), cp.asnumpy(ok)
 
 def _refine_batch_gpu(rois: list[np.ndarray], masks: list[np.ndarray], *, method: str, use_float64: bool, device: int):
     _require_cupy()
@@ -965,21 +1006,31 @@ def _detect_centers_tiled_gpu(
     refine: str = "edge_gradmoment",
     connectivity: int = 8,
     device: int = 0,
+    # edge_gradmoment / edge_erf shared params
     band_rad: int = 4,
     edge_rad: int = 10,
     smooth_passes: int = 2,
     loc_rad: int = 3,
     grad_power: float = 8.0,
     iters: int = 2,
+    # edge_erf-specific params
+    erf_fit_rad: int = 5,
+    erf_gn_iters: int = 5,
+    erf_init_sigma: float = 1.25,
+    erf_sigma_min: float = 0.35,
+    erf_sigma_max: float = 6.0,
+    erf_max_shift: float = 2.5,
+    erf_damp: float = 1e-4,
+    erf_cond_max: float = 1e8,
+    # logquad/weighted params
     pad: int = 3,
     gpu_batch: int = 4096,
     use_float64: bool = True,
 ) -> CenterResult:
     """Dedicated tiled GPU center detection pipeline.
 
-    Mirrors the reference find_subpixel_centers_tiled_hybrid_gpu:
-    one global Otsu threshold, per-tile fixed threshold + GPU CC +
-    vectorized area filter + batched refinement + band-based de-dup.
+    Optimized: single device context, RawKernel CC stats, GPU-side filtering,
+    core refinement functions called directly (no GPU↔CPU transfers in the loop).
     """
     _require_cupy()
     try:
@@ -996,14 +1047,14 @@ def _detect_centers_tiled_gpu(
         raise ValueError("overlap must be < tile_h")
 
     # Validate refine method before entering tile loop
-    _supported_refine = {"edge_gradmoment"}
-    _known_refine = _supported_refine | {"logquad", "logquadratic", "weighted", "edge_erf", "auto"}
+    _supported_refine = {"edge_gradmoment", "edge_erf", "logquad", "logquadratic"}
+    _known_refine = _supported_refine | {"weighted", "auto"}
     if refine not in _known_refine:
         raise ValueError(f"Unknown refine method: {refine}")
     if refine not in _supported_refine:
         raise NotImplementedError(
             f"refine='{refine}' is not yet supported in the tiled GPU pipeline. "
-            "Use refine='edge_gradmoment' or the non-tiled detect_centers_gpu()."
+            "Use refine='edge_gradmoment', 'edge_erf', 'logquad', or the non-tiled detect_centers_gpu()."
         )
 
     # --- Step 0: Global threshold (once, on downsampled image) ---
@@ -1018,74 +1069,100 @@ def _detect_centers_tiled_gpu(
 
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)) if (morph_open > 0 or morph_close > 0) else None
 
-    y0 = 0
-    while y0 < H:
-        y1 = min(H, y0 + tile_h)
-        tile = g[y0:y1]
+    # Single device context for the entire tile loop
+    with cp.cuda.Device(int(device)):
+        y0 = 0
+        while y0 < H:
+            y1 = min(H, y0 + tile_h)
+            tile = g[y0:y1]
 
-        # --- Per-tile threshold + morphology (CPU) ---
-        _, bw = cv2.threshold(tile, thr, 255, thr_type)
-        if morph_open > 0:
-            bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k, iterations=int(morph_open))
-        if morph_close > 0:
-            bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, k, iterations=int(morph_close))
+            # --- Per-tile threshold + morphology (CPU) ---
+            _, bw = cv2.threshold(tile, thr, 255, thr_type)
+            if morph_open > 0:
+                bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k, iterations=int(morph_open))
+            if morph_close > 0:
+                bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, k, iterations=int(morph_close))
 
-        # --- GPU connected components ---
-        comp = connected_components_stats_gpu(bw, connectivity=int(connectivity), device=int(device))
-        num = comp.num_labels
+            # --- GPU CC via core (stays on GPU, no roundtrip) ---
+            bw_gpu = cp.asarray(bw != 0)
+            labels_gpu, stats_gpu, centroids_gpu, num = (
+                _connected_components_stats_gpu_core(bw_gpu, connectivity=int(connectivity))
+            )
 
-        # num_labels includes background (label 0). num_labels == 1 means no foreground.
-        if num > 1:
-            stats = comp.stats          # (num_labels, 5) int32: [min_x, min_y, w, h, area]
-            centroids = comp.centroids  # (num_labels, 2) float64: [cx, cy]
+            # num includes background (label 0). num == 1 means no foreground.
+            if num > 1:
+                # --- Vectorized area filter (CuPy, on GPU) ---
+                area = stats_gpu[1:, 4]
+                mask = (area >= int(area_min)) & (area <= int(area_max))
 
-            # --- Vectorized area filtering (no Python loop) ---
-            area = stats[1:, 4]
-            mask = (area >= int(area_min)) & (area <= int(area_max))
+                if cp.any(mask):
+                    # Upload tile once for refinement
+                    tile_gpu = cp.asarray(tile, dtype=cp.float32)
 
-            if np.any(mask):
-                filtered_stats = stats[1:][mask]
-                filtered_cents = centroids[1:][mask]
+                    # Build (K, 6) stats array on GPU: [x, y, w, h, cx, cy]
+                    filtered_stats = stats_gpu[1:][mask]
+                    filtered_cents = centroids_gpu[1:][mask]
+                    stats_xywh_cc = cp.concatenate([
+                        filtered_stats[:, :4].astype(cp.float32),
+                        filtered_cents.astype(cp.float32),
+                    ], axis=1)
 
-                # Build (K, 6): [x, y, w, h, cx, cy] — drop area column via [:, :4]
-                stats_xywh_cc = np.concatenate([
-                    filtered_stats[:, :4].astype(np.float32),
-                    filtered_cents.astype(np.float32),
-                ], axis=1)
+                    # --- Refinement dispatch (all on GPU via core functions) ---
+                    if refine == "edge_gradmoment":
+                        refined_gpu, ok_gpu = _refine_edge_moment_core(
+                            tile_gpu, stats_xywh_cc,
+                            band_rad=band_rad, edge_rad=edge_rad,
+                            smooth_passes=smooth_passes, loc_rad=loc_rad,
+                            grad_power=grad_power, iters=iters,
+                        )
+                    elif refine == "edge_erf":
+                        refined_gpu, ok_gpu = _refine_edge_erf_core(
+                            tile_gpu, stats_xywh_cc,
+                            band_rad=band_rad, edge_rad=edge_rad,
+                            smooth_passes=smooth_passes, loc_rad=loc_rad,
+                            grad_power=grad_power, iters=iters,
+                            erf_fit_rad=erf_fit_rad, erf_gn_iters=erf_gn_iters,
+                            erf_init_sigma=erf_init_sigma,
+                            erf_sigma_min=erf_sigma_min,
+                            erf_sigma_max=erf_sigma_max,
+                            erf_max_shift=erf_max_shift,
+                            erf_damp=erf_damp, erf_cond_max=erf_cond_max,
+                        )
+                    elif refine in ("logquad", "logquadratic"):
+                        lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
+                        refined_gpu, ok_gpu = refine_centers_logquad_gpu_match_cpu(
+                            tile_gpu,
+                            labels_gpu.astype(cp.int32),
+                            stats_xywh_cc,
+                            lab_ids_gpu,
+                            pad=pad, batch=max(1, int(gpu_batch)),
+                            use_float64=use_float64,
+                        )
+                    else:
+                        raise NotImplementedError(
+                            f"refine='{refine}' dispatch not implemented "
+                            "(should have been caught in validation)"
+                        )
 
-                # --- Refinement dispatch ---
-                # refine method validated before loop, so only edge_gradmoment reaches here
-                if refine == "edge_gradmoment":
-                    refined, ok = refine_centers_edge_moment_gpu(
-                        tile, stats_xywh_cc,
-                        band_rad=int(band_rad), edge_rad=int(edge_rad),
-                        smooth_passes=int(smooth_passes), loc_rad=int(loc_rad),
-                        grad_power=float(grad_power), iters=int(iters),
-                        device=int(device),
-                    )
-                else:
-                    # Dispatch structure reserved for future refinement methods
-                    raise NotImplementedError(f"refine='{refine}' dispatch not implemented (should have been caught in validation)")
+                    # --- Download only small centers array + band-based de-dup ---
+                    refined = cp.asnumpy(refined_gpu).astype(np.float64)
+                    ok = cp.asnumpy(ok_gpu).astype(bool)
+                    good = ok & np.all(np.isfinite(refined), axis=1)
+                    refined = refined[good]
 
-                # --- Global coordinate offset + band-based de-dup ---
-                refined = np.asarray(refined, dtype=np.float64)
-                ok = np.asarray(ok, dtype=bool)
-                good = ok & np.all(np.isfinite(refined), axis=1)
-                refined = refined[good]
+                    if refined.shape[0] > 0:
+                        refined[:, 1] += y0  # tile-local → global
 
-                if refined.shape[0] > 0:
-                    refined[:, 1] += y0  # tile-local → global
+                        half = overlap // 2
+                        keep_lo = y0 if y0 == 0 else (y0 + half)
+                        keep_hi = y1 if y1 == H else (y1 - half)
+                        m = (refined[:, 1] >= keep_lo) & (refined[:, 1] < keep_hi)
+                        if np.any(m):
+                            all_centers.append(refined[m])
 
-                    half = overlap // 2
-                    keep_lo = y0 if y0 == 0 else (y0 + half)
-                    keep_hi = y1 if y1 == H else (y1 - half)
-                    m = (refined[:, 1] >= keep_lo) & (refined[:, 1] < keep_hi)
-                    if np.any(m):
-                        all_centers.append(refined[m])
-
-        if y1 == H:
-            break
-        y0 += step
+            if y1 == H:
+                break
+            y0 += step
 
     if all_centers:
         centers = np.vstack(all_centers)
@@ -1107,5 +1184,6 @@ def _detect_centers_tiled_gpu(
             "area_min": int(area_min),
             "area_max": int(area_max),
             "device": int(device),
+            "implementation": "rawkernel_cc+core_refine",
         },
     )

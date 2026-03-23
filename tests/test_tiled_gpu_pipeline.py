@@ -31,6 +31,42 @@ except Exception:
 gpu = pytest.mark.skipif(not HAS_CUPY, reason="CuPy not available")
 
 
+# --- CC RawKernel tests ---
+
+
+@gpu
+def test_cc_rawkernel_correctness():
+    """RawKernel CC stats must match known expected values."""
+    import cupy as cp
+    from subpx._gpu.components import _connected_components_stats_gpu_core
+
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    mask[10:20, 10:20] = 255   # 10x10 block
+    mask[50:60, 50:60] = 255   # 10x10 block
+    with cp.cuda.Device(0):
+        mask_gpu = cp.asarray(mask > 0)
+        labels, stats, cents, num = _connected_components_stats_gpu_core(mask_gpu)
+        assert num == 3  # bg + 2 components
+        areas = cp.asnumpy(stats[1:, 4])
+        assert set(areas.tolist()) == {100}  # both 10x10
+
+
+@gpu
+def test_cc_public_returns_numpy():
+    """Public connected_components_stats_gpu must still return NumPy."""
+    from subpx._gpu.components import connected_components_stats_gpu
+
+    mask = np.zeros((50, 50), dtype=np.uint8)
+    mask[10:20, 10:20] = 255
+    comp = connected_components_stats_gpu(mask)
+    assert isinstance(comp.labels, np.ndarray)
+    assert isinstance(comp.stats, np.ndarray)
+    assert isinstance(comp.centroids, np.ndarray)
+
+
+# --- Tiled pipeline tests ---
+
+
 @gpu
 def test_tiled_gpu_pipeline_basic():
     """Basic: small image, single tile covers everything."""
@@ -92,7 +128,7 @@ def test_tiled_gpu_pipeline_overlap_validation():
 
 
 @gpu
-@pytest.mark.parametrize("method", ["logquad", "weighted", "edge_erf", "auto"])
+@pytest.mark.parametrize("method", ["weighted", "auto"])
 def test_tiled_gpu_pipeline_unimplemented_refine(method):
     """Unimplemented refine methods should raise NotImplementedError."""
     from subpx._gpu.centers import _detect_centers_tiled_gpu
@@ -110,6 +146,28 @@ def test_tiled_gpu_pipeline_unknown_refine():
     img, _ = _make_dot_grid(rows=2, cols=2, spacing=15, dot_size=3, margin=10)
     with pytest.raises(ValueError, match="Unknown refine method"):
         _detect_centers_tiled_gpu(img, refine="nonexistent", area_min=1, area_max=50)
+
+
+@gpu
+def test_tiled_gpu_pipeline_edge_erf():
+    """edge_erf refine should work in tiled pipeline."""
+    from subpx._gpu.centers import _detect_centers_tiled_gpu
+
+    img, expected = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=5, margin=10)
+    result = _detect_centers_tiled_gpu(img, area_min=1, area_max=100, refine="edge_erf")
+    assert isinstance(result, CenterResult)
+    assert result.centers_xy.shape[0] == expected.shape[0]
+
+
+@gpu
+def test_tiled_gpu_pipeline_logquad():
+    """logquad refine should work in tiled pipeline."""
+    from subpx._gpu.centers import _detect_centers_tiled_gpu
+
+    img, expected = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=3, margin=10)
+    result = _detect_centers_tiled_gpu(img, area_min=1, area_max=50, refine="logquad")
+    assert isinstance(result, CenterResult)
+    assert result.centers_xy.shape[0] == expected.shape[0]
 
 
 # --- Integration tests for detect_centers_tiled public API ---
