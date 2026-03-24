@@ -215,6 +215,7 @@ def estimate_pitch_lines(
             values=np.zeros((0,), dtype=np.float64),
             axis=line_axis,
             method="per-line",
+            backend="cpu",
             meta={
                 "line_centers_perp": np.zeros((0,), dtype=np.float64),
                 "line_counts": np.zeros((0,), dtype=np.int32),
@@ -252,6 +253,7 @@ def estimate_pitch_lines(
         values=line_pitch[order],
         axis=line_axis,
         method="per-line",
+        backend="cpu",
         meta={
             "line_centers_perp": line_centers[order],
             "line_counts": line_counts[order],
