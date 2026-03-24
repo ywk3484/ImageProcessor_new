@@ -152,6 +152,113 @@ def _masked_median_lower(vals: cp.ndarray, mask: cp.ndarray) -> cp.ndarray:
     return vs[cp.arange(B, dtype=cp.int32), idx]
 
 
+def _bg_from_border_gpu_batch(g_batch, hs, ws, border=2):
+    """Per-ROI background from border pixels on GPU.
+
+    g_batch: (B, Hmax, Wmax) CuPy float — padded gray ROIs
+    hs, ws:  (B,) CuPy int32 — actual height/width per ROI
+    border:  int — border width (default 2, matching CPU _bg_from_border)
+    Returns: (B,) CuPy float — per-ROI background estimate
+    """
+    B, Hmax, Wmax = g_batch.shape
+    b = int(border)
+    dy = cp.arange(Hmax, dtype=cp.int32)[None, :, None]
+    dx = cp.arange(Wmax, dtype=cp.int32)[None, None, :]
+
+    valid = (dy < hs[:, None, None]) & (dx < ws[:, None, None])
+    is_border = valid & (
+        (dy < b) | (dy >= hs[:, None, None] - b) |
+        (dx < b) | (dx >= ws[:, None, None] - b)
+    )
+    # Tiny ROIs (h or w <= 2*border): use all valid pixels
+    tiny = (hs <= 2 * b) | (ws <= 2 * b)
+    is_border = cp.where(tiny[:, None, None], valid, is_border)
+
+    bg = _masked_median_lower(
+        g_batch.reshape(B, Hmax * Wmax),
+        is_border.reshape(B, Hmax * Wmax),
+    )
+    return cp.where(cp.isfinite(bg), bg, 0.0)
+
+
+def _refine_weighted_core(tile_gpu, labels_gpu, stats_gpu, lab_ids_gpu, *,
+                           pad=3, border=2, batch=4096, use_float64=True):
+    """Weighted centroid — CuPy in, CuPy out, no device context.
+
+    tile_gpu:    (H, W) float32 CuPy
+    labels_gpu:  (H, W) int32 CuPy
+    stats_gpu:   (K, 6) float32 CuPy [x, y, w, h, cx, cy]
+    lab_ids_gpu: (K,) int32 CuPy
+    Returns:     (centers_gpu, ok_gpu) — float64 (K,2), bool (K,)
+    """
+    dtype = cp.float64 if use_float64 else cp.float32
+    K = int(stats_gpu.shape[0])
+    H, W = tile_gpu.shape
+
+    # Padded bounding boxes
+    x0 = cp.maximum(stats_gpu[:, 0].astype(cp.int32) - pad, 0)
+    y0 = cp.maximum(stats_gpu[:, 1].astype(cp.int32) - pad, 0)
+    x1 = cp.minimum((stats_gpu[:, 0] + stats_gpu[:, 2]).astype(cp.int32) + pad, W)
+    y1 = cp.minimum((stats_gpu[:, 1] + stats_gpu[:, 3]).astype(cp.int32) + pad, H)
+    hs = y1 - y0
+    ws = x1 - x0
+
+    centers_out = cp.full((K, 2), cp.nan, dtype=cp.float64)
+    ok_out = cp.zeros((K,), dtype=cp.bool_)
+
+    for s in range(0, K, int(batch)):
+        e = min(K, s + int(batch))
+        B = e - s
+        hs_b = hs[s:e]
+        ws_b = ws[s:e]
+        x0_b = x0[s:e]
+        y0_b = y0[s:e]
+        Hmax = int(hs_b.max()) if B > 0 else 0
+        Wmax = int(ws_b.max()) if B > 0 else 0
+
+        if Hmax == 0 or Wmax == 0:
+            continue
+
+        # Build index grids via broadcasting
+        dy = cp.arange(Hmax, dtype=cp.int32)[None, :, None]  # (1, Hmax, 1)
+        dx = cp.arange(Wmax, dtype=cp.int32)[None, None, :]  # (1, 1, Wmax)
+
+        ys = y0_b[:, None, None] + dy  # (B, Hmax, Wmax)
+        xs = x0_b[:, None, None] + dx  # (B, Hmax, Wmax)
+
+        valid = (dy < hs_b[:, None, None]) & (dx < ws_b[:, None, None])
+
+        # Clamp for safe indexing (out-of-valid will be zeroed)
+        ys_c = cp.clip(ys, 0, H - 1)
+        xs_c = cp.clip(xs, 0, W - 1)
+
+        # Gather grayscale and labels
+        g_batch = cp.where(valid, tile_gpu[ys_c, xs_c], cp.float32(0))
+        l_batch = cp.where(valid, labels_gpu[ys_c, xs_c], cp.int32(0))
+
+        # Build masks: pixel belongs to this component
+        m_batch = (l_batch == lab_ids_gpu[s:e, None, None]) & valid
+
+        # Background estimation
+        bg_batch = _bg_from_border_gpu_batch(g_batch.astype(dtype), hs_b, ws_b, border=border)
+
+        # Weighted centroid
+        cx, cy = _weighted_from_batch_gpu(
+            g_batch.astype(dtype), m_batch, hs_b, ws_b, bg_batch, dtype=dtype,
+        )
+
+        # Convert ROI-local → tile-global
+        cx_global = cx + x0_b.astype(dtype)
+        cy_global = cy + y0_b.astype(dtype)
+
+        ok_b = cp.isfinite(cx_global) & cp.isfinite(cy_global)
+        centers_out[s:e, 0] = cx_global
+        centers_out[s:e, 1] = cy_global
+        ok_out[s:e] = ok_b
+
+    return centers_out, ok_out
+
+
 def _plane_fit_batched(x: cp.ndarray, y: cp.ndarray, g: cp.ndarray, m: cp.ndarray, eps_det: float = 1e-18):
     mf = m.astype(cp.float64)
     S1 = cp.sum(mf, axis=1)
@@ -1026,6 +1133,7 @@ def _detect_centers_tiled_gpu(
     pad: int = 3,
     gpu_batch: int = 4096,
     use_float64: bool = True,
+    small_feature_max: float = 12.0,
 ) -> CenterResult:
     """Dedicated tiled GPU center detection pipeline.
 
@@ -1047,15 +1155,9 @@ def _detect_centers_tiled_gpu(
         raise ValueError("overlap must be < tile_h")
 
     # Validate refine method before entering tile loop
-    _supported_refine = {"edge_gradmoment", "edge_erf", "logquad", "logquadratic"}
-    _known_refine = _supported_refine | {"weighted", "auto"}
-    if refine not in _known_refine:
-        raise ValueError(f"Unknown refine method: {refine}")
+    _supported_refine = {"edge_gradmoment", "edge_erf", "logquad", "logquadratic", "weighted", "auto"}
     if refine not in _supported_refine:
-        raise NotImplementedError(
-            f"refine='{refine}' is not yet supported in the tiled GPU pipeline. "
-            "Use refine='edge_gradmoment', 'edge_erf', 'logquad', or the non-tiled detect_centers_gpu()."
-        )
+        raise ValueError(f"Unknown refine method: {refine}")
 
     # --- Step 0: Global threshold (once, on downsampled image) ---
     ds = max(1, int(otsu_downsample))
@@ -1107,6 +1209,9 @@ def _detect_centers_tiled_gpu(
                         filtered_cents.astype(cp.float32),
                     ], axis=1)
 
+                    # lab_ids needed by logquad, weighted, auto
+                    lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
+
                     # --- Refinement dispatch (all on GPU via core functions) ---
                     if refine == "edge_gradmoment":
                         refined_gpu, ok_gpu = _refine_edge_moment_core(
@@ -1129,7 +1234,6 @@ def _detect_centers_tiled_gpu(
                             erf_damp=erf_damp, erf_cond_max=erf_cond_max,
                         )
                     elif refine in ("logquad", "logquadratic"):
-                        lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
                         refined_gpu, ok_gpu = refine_centers_logquad_gpu_match_cpu(
                             tile_gpu,
                             labels_gpu.astype(cp.int32),
@@ -1138,11 +1242,43 @@ def _detect_centers_tiled_gpu(
                             pad=pad, batch=max(1, int(gpu_batch)),
                             use_float64=use_float64,
                         )
-                    else:
-                        raise NotImplementedError(
-                            f"refine='{refine}' dispatch not implemented "
-                            "(should have been caught in validation)"
+                    elif refine == "weighted":
+                        refined_gpu, ok_gpu = _refine_weighted_core(
+                            tile_gpu, labels_gpu.astype(cp.int32),
+                            stats_xywh_cc, lab_ids_gpu,
+                            pad=pad, batch=max(1, int(gpu_batch)),
+                            use_float64=use_float64,
                         )
+                    elif refine == "auto":
+                        max_dim = cp.maximum(stats_xywh_cc[:, 2], stats_xywh_cc[:, 3])
+                        is_small = max_dim <= float(small_feature_max)
+                        is_large = ~is_small
+
+                        K_total = int(stats_xywh_cc.shape[0])
+                        refined_gpu = cp.full((K_total, 2), cp.nan, dtype=cp.float64)
+                        ok_gpu = cp.zeros((K_total,), dtype=cp.bool_)
+
+                        if cp.any(is_small):
+                            si = cp.nonzero(is_small)[0]
+                            r, o = refine_centers_logquad_gpu_match_cpu(
+                                tile_gpu, labels_gpu.astype(cp.int32),
+                                stats_xywh_cc[si], lab_ids_gpu[si],
+                                pad=pad, batch=max(1, int(gpu_batch)),
+                                use_float64=use_float64,
+                            )
+                            refined_gpu[si] = r
+                            ok_gpu[si] = o
+
+                        if cp.any(is_large):
+                            li = cp.nonzero(is_large)[0]
+                            r, o = _refine_edge_moment_core(
+                                tile_gpu, stats_xywh_cc[li],
+                                band_rad=band_rad, edge_rad=edge_rad,
+                                smooth_passes=smooth_passes, loc_rad=loc_rad,
+                                grad_power=grad_power, iters=iters,
+                            )
+                            refined_gpu[li] = r
+                            ok_gpu[li] = o
 
                     # --- Download only small centers array + band-based de-dup ---
                     refined = cp.asnumpy(refined_gpu).astype(np.float64)
@@ -1184,6 +1320,7 @@ def _detect_centers_tiled_gpu(
             "area_min": int(area_min),
             "area_max": int(area_max),
             "device": int(device),
+            "small_feature_max": float(small_feature_max),
             "implementation": "rawkernel_cc+core_refine",
         },
     )

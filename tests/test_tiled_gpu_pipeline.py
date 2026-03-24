@@ -128,17 +128,6 @@ def test_tiled_gpu_pipeline_overlap_validation():
 
 
 @gpu
-@pytest.mark.parametrize("method", ["weighted", "auto"])
-def test_tiled_gpu_pipeline_unimplemented_refine(method):
-    """Unimplemented refine methods should raise NotImplementedError."""
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
-
-    img, _ = _make_dot_grid(rows=2, cols=2, spacing=15, dot_size=3, margin=10)
-    with pytest.raises(NotImplementedError):
-        _detect_centers_tiled_gpu(img, refine=method, area_min=1, area_max=50)
-
-
-@gpu
 def test_tiled_gpu_pipeline_unknown_refine():
     """Unknown refine method should raise ValueError."""
     from subpx._gpu.centers import _detect_centers_tiled_gpu
@@ -168,6 +157,53 @@ def test_tiled_gpu_pipeline_logquad():
     result = _detect_centers_tiled_gpu(img, area_min=1, area_max=50, refine="logquad")
     assert isinstance(result, CenterResult)
     assert result.centers_xy.shape[0] == expected.shape[0]
+
+
+@gpu
+def test_tiled_gpu_pipeline_weighted():
+    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    img, expected = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=3, margin=10)
+    result = _detect_centers_tiled_gpu(img, area_min=1, area_max=50, refine="weighted")
+    assert isinstance(result, CenterResult)
+    assert result.centers_xy.shape[0] == expected.shape[0]
+
+
+@gpu
+def test_tiled_gpu_pipeline_auto():
+    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    img, expected = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=3, margin=10)
+    result = _detect_centers_tiled_gpu(img, area_min=1, area_max=50, refine="auto")
+    assert isinstance(result, CenterResult)
+    assert result.centers_xy.shape[0] == expected.shape[0]
+
+
+@gpu
+def test_tiled_gpu_pipeline_auto_mixed_sizes():
+    """auto should handle both small and large features."""
+    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    H, W = 200, 200
+    img = np.zeros((H, W), dtype=np.uint8)
+    img[20:23, 20:23] = 255      # small 3x3
+    img[20:23, 50:53] = 255      # small 3x3
+    img[100:115, 100:115] = 255  # large 15x15
+    img[100:115, 150:165] = 255  # large 15x15
+    result = _detect_centers_tiled_gpu(
+        img, area_min=1, area_max=300, refine="auto", small_feature_max=12.0,
+    )
+    assert isinstance(result, CenterResult)
+    assert result.centers_xy.shape[0] == 4
+
+
+@gpu
+def test_tiled_gpu_pipeline_weighted_multi_tile():
+    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    img, expected = _make_dot_grid(rows=10, cols=4, spacing=20, dot_size=3, margin=10)
+    H = img.shape[0]
+    result = _detect_centers_tiled_gpu(
+        img, area_min=1, area_max=50, tile_h=H // 3, overlap=30, refine="weighted",
+    )
+    assert isinstance(result, CenterResult)
+    assert abs(result.centers_xy.shape[0] - expected.shape[0]) <= 2
 
 
 # --- Integration tests for detect_centers_tiled public API ---
