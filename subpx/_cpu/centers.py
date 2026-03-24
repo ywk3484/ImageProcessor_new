@@ -69,7 +69,7 @@ def refine_logquadratic_cpu(gray_roi: np.ndarray, mask_roi: np.ndarray) -> tuple
     m = np.asarray(mask_roi, dtype=bool)
 
     if np.count_nonzero(m) < 6:
-        return refine_weighted_centroid_cpu(gray_roi, mask_roi)
+        return (np.nan, np.nan)
 
     bg = _bg_from_border(g, border=2)
     v = g - bg
@@ -77,7 +77,7 @@ def refine_logquadratic_cpu(gray_roi: np.ndarray, mask_roi: np.ndarray) -> tuple
 
     vpos = v[m]
     if vpos.size == 0 or np.max(vpos) <= 0:
-        return refine_weighted_centroid_cpu(gray_roi, mask_roi)
+        return (np.nan, np.nan)
 
     eps = 1e-9
     z = np.log(np.maximum(vpos, eps))
@@ -93,17 +93,17 @@ def refine_logquadratic_cpu(gray_roi: np.ndarray, mask_roi: np.ndarray) -> tuple
     gvec = np.array([-d, -e], dtype=np.float64)
 
     if np.linalg.cond(H) > 1e8:
-        return refine_weighted_centroid_cpu(gray_roi, mask_roi)
+        return (np.nan, np.nan)
 
     try:
         xy = np.linalg.solve(H, gvec)
     except np.linalg.LinAlgError:
-        return refine_weighted_centroid_cpu(gray_roi, mask_roi)
+        return (np.nan, np.nan)
 
     cx, cy = float(xy[0]), float(xy[1])
     h, w = g.shape
     if not (0 <= cx < w and 0 <= cy < h):
-        return refine_weighted_centroid_cpu(gray_roi, mask_roi)
+        return (np.nan, np.nan)
     return (cx, cy)
 
 
@@ -219,7 +219,7 @@ def refine_edge_moment_cpu(
         yc = 0.5 * (yT + yB)
 
     if not ok_all or not np.isfinite(xc) or not np.isfinite(yc):
-        return refine_logquadratic_cpu(gray_roi, mask_roi)
+        return (np.nan, np.nan)
     return float(xc), float(yc)
 
 def refine_centers_cpu(gray_roi: np.ndarray, mask_roi: np.ndarray, *, method: str = "logquad", small_feature_max: float = 12.0) -> tuple[float, float]:

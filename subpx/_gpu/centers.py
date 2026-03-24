@@ -108,9 +108,8 @@ def _logquadratic_from_batch_gpu(g_batch, m_batch, hs, ws, bg_batch, *, dtype):
     in_bounds = (cx >= 0) & (cy >= 0) & (cx < cp.asarray(ws, dtype=dtype)) & (cy < cp.asarray(hs, dtype=dtype))
     ok = (counts >= 6) & negdef & in_bounds & cp.isfinite(cx) & cp.isfinite(cy)
 
-    cx_w, cy_w = _weighted_from_batch_gpu(g_batch, m_batch, hs, ws, bg_batch, dtype=dtype)
-    cx = cp.where(ok, cx, cx_w)
-    cy = cp.where(ok, cy, cy_w)
+    cx = cp.where(ok, cx, cp.nan)
+    cy = cp.where(ok, cy, cp.nan)
     return cx, cy
 
 
@@ -739,7 +738,10 @@ def _edge_from_profile_erf_gpu(
         try:
             delta = cp.linalg.solve(JTJ, JTr[..., None]).squeeze(-1)
         except Exception:
-            return x_seed.astype(cp.float64), cp.zeros((B,), dtype=bool)
+            delta = cp.zeros((B, 5), dtype=cp.float64)
+        bad_delta = ~cp.all(cp.isfinite(delta), axis=1)
+        delta = cp.where(bad_delta[:, None], 0.0, delta)
+        ok &= ~bad_delta
 
         delta[:, 3] = cp.clip(delta[:, 3], -0.75, 0.75)
         delta[:, 4] = cp.clip(delta[:, 4], -0.35, 0.35)
@@ -750,8 +752,9 @@ def _edge_from_profile_erf_gpu(
         x0 = cp.clip(x0 + delta[:, 3], x_seed - max_shift_f, x_seed + max_shift_f)
         lsig = cp.clip(lsig + delta[:, 4], float(np.log(sigma_min)), float(np.log(sigma_max)))
 
-        cond = cp.linalg.cond(JTJ)
-        ok &= cp.isfinite(cond) & (cond < float(cond_max))
+    # Final condition check (only on last iteration's JTJ)
+    cond = cp.linalg.cond(JTJ)
+    ok &= cp.isfinite(cond) & (cond < float(cond_max))
 
     sig = cp.clip(cp.exp(lsig), float(sigma_min), float(sigma_max))
     z = (xs - x0[:, None]) / (sqrt_2 * sig[:, None])
@@ -768,7 +771,7 @@ def _edge_from_profile_erf_gpu(
     ok &= (c > amp_floor)
     ok &= (rms <= (0.35 * dyn + 1e-6))
 
-    x_out = cp.where(ok, x0, x_seed)
+    x_out = cp.where(ok, x0, cp.nan)
     return x_out.astype(cp.float64), ok
 
 
@@ -1209,9 +1212,6 @@ def _detect_centers_tiled_gpu(
                         filtered_cents.astype(cp.float32),
                     ], axis=1)
 
-                    # lab_ids needed by logquad, weighted, auto
-                    lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
-
                     # --- Refinement dispatch (all on GPU via core functions) ---
                     if refine == "edge_gradmoment":
                         refined_gpu, ok_gpu = _refine_edge_moment_core(
@@ -1234,6 +1234,7 @@ def _detect_centers_tiled_gpu(
                             erf_damp=erf_damp, erf_cond_max=erf_cond_max,
                         )
                     elif refine in ("logquad", "logquadratic"):
+                        lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
                         refined_gpu, ok_gpu = refine_centers_logquad_gpu_match_cpu(
                             tile_gpu,
                             labels_gpu.astype(cp.int32),
@@ -1243,6 +1244,7 @@ def _detect_centers_tiled_gpu(
                             use_float64=use_float64,
                         )
                     elif refine == "weighted":
+                        lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
                         refined_gpu, ok_gpu = _refine_weighted_core(
                             tile_gpu, labels_gpu.astype(cp.int32),
                             stats_xywh_cc, lab_ids_gpu,
@@ -1250,6 +1252,7 @@ def _detect_centers_tiled_gpu(
                             use_float64=use_float64,
                         )
                     elif refine == "auto":
+                        lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
                         max_dim = cp.maximum(stats_xywh_cc[:, 2], stats_xywh_cc[:, 3])
                         is_small = max_dim <= float(small_feature_max)
                         is_large = ~is_small
