@@ -146,6 +146,17 @@ class TestPitchLinesGPU:
         assert "valid_mask" in res.meta
         assert res.meta["valid_mask"].dtype == bool
 
+    def test_centered_coordinates(self):
+        """Grid centered at origin with negative coordinates."""
+        xs = (np.arange(10) - 5) * 10.0  # -50 to 40
+        ys = (np.arange(10) - 5) * 10.0
+        xx, yy = np.meshgrid(xs, ys)
+        pts = np.column_stack([xx.ravel(), yy.ravel()])
+        res = estimate_pitch_lines(pts, line_axis="row", tol=2.0, backend="gpu")
+        valid = res.values[np.isfinite(res.values)]
+        assert valid.size >= 5
+        np.testing.assert_allclose(valid, 10.0, atol=0.1)
+
     def test_large_grid_performance(self):
         """100x100 grid completes and produces correct results."""
         xs = np.arange(100) * 5.0

@@ -219,8 +219,11 @@ def _compute_row_pitches(along_gpu, labels_gpu, L, min_points, pitch_var_max):
 
     # Sort by (label, along_value) using composite key
     # This groups points by row and sorts within each row simultaneously
-    label_offset = (cp.max(cp.abs(point_along)) + 1.0) if point_along.size > 0 else 1.0
-    sort_keys = point_labels.astype(cp.float64) * label_offset + point_along
+    # Normalize along values to [0, range] so keys never overlap across labels
+    along_min = float(cp.min(point_along)) if point_along.size > 0 else 0.0
+    along_range = float(cp.max(point_along) - cp.min(point_along)) if point_along.size > 0 else 0.0
+    label_offset = along_range + 1.0
+    sort_keys = point_labels.astype(cp.float64) * label_offset + (point_along - along_min)
     sort_order = cp.argsort(sort_keys)
     sorted_labels = point_labels[sort_order]
     sorted_along = point_along[sort_order]
