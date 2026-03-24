@@ -18,6 +18,7 @@ class PitchResult:
     values: np.ndarray
     axis: str
     method: str
+    backend: str = "cpu"
     meta: dict[str, Any] = field(default_factory=dict)
 
 
