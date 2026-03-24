@@ -11,6 +11,7 @@ from typing import Optional, Dict, List
 import numpy as np
 
 from .types import PitchResult
+from .backends import resolve_backend
 
 
 def _assign_lines_1d(values: np.ndarray, tol: float):
@@ -208,7 +209,19 @@ def estimate_pitch_lines(
     line_axis: str = "row",
     tol: float = 1.5,
     min_points_per_line: int = 3,
+    backend: str = "auto",
+    device: int = 0,
+    pitch_var_max: float = 0.25,
 ) -> PitchResult:
+    b = resolve_backend(backend)
+    if b == "gpu":
+        from ._gpu.pitch import estimate_pitch_lines_gpu
+        return estimate_pitch_lines_gpu(
+            centers_xy, line_axis=line_axis, tol=tol,
+            min_points_per_line=min_points_per_line,
+            device=device, pitch_var_max=pitch_var_max,
+        )
+    # pitch_var_max is not used in CPU path (GPU-only row consistency filter)
     pts = np.asarray(centers_xy, dtype=np.float64)
     if pts.size == 0:
         return PitchResult(
