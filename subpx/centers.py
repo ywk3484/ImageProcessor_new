@@ -31,7 +31,7 @@ from ._gpu.centers import (
 )
 from .types import CenterResult
 
-
+_VORONOI_METHODS = {"radial_symmetry", "isophote_curvature"}
 
 
 def recommend_refine_method(width_px: float, height_px: float, *, small_feature_max: float = 12.0) -> str:
@@ -145,9 +145,14 @@ def detect_centers(
     use_float64: bool = True,
     components_backend: str = "cpu",
     small_feature_max: float = 12.0,
+    upsample_factor: int = 4,
 ):
     b = resolve_backend(backend)
     img = to_numpy(image)
+    if b == "cpu" and refine in _VORONOI_METHODS:
+        raise NotImplementedError(
+            f"refine='{refine}' requires GPU backend. Set backend='gpu' or install CuPy."
+        )
     if b == "gpu":
         return detect_centers_gpu(
             img,
@@ -165,6 +170,7 @@ def detect_centers(
             use_float64=use_float64,
             components_backend=components_backend,
             small_feature_max=small_feature_max,
+            upsample_factor=upsample_factor,
         )
     return detect_centers_cpu(
         img,
@@ -198,6 +204,10 @@ def detect_centers_tiled(
     GPU connected components, vectorized filtering, and band-based de-dup.
     For CPU backend, tiles are processed independently via detect_centers().
     """
+    if kwargs.get("refine") in _VORONOI_METHODS:
+        raise NotImplementedError(
+            "Voronoi-partitioned methods are not supported with tiled detection."
+        )
     img = to_numpy(image)
     if img.ndim != 2:
         raise ValueError("detect_centers_tiled expects a 2D grayscale image.")
@@ -356,6 +366,10 @@ def detect_centers_tiled_global_otsu(
     img = to_numpy(image)
     if img.ndim != 2:
         raise ValueError("detect_centers_tiled_global_otsu expects a 2D grayscale image.")
+    if kwargs.get("refine") in _VORONOI_METHODS:
+        raise NotImplementedError(
+            "Voronoi-partitioned methods are not supported with tiled detection."
+        )
     try:
         import cv2  # type: ignore
     except Exception as exc:  # pragma: no cover

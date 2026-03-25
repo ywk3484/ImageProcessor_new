@@ -1408,6 +1408,7 @@ def detect_centers_gpu(
     use_float64: bool = True,
     components_backend: str = "cpu",
     small_feature_max: float = 12.0,
+    upsample_factor: int = 4,
 ) -> CenterResult:
     g, bw = _segment_binary(
         image,
@@ -1423,6 +1424,125 @@ def detect_centers_gpu(
     labels = comp.labels
     stats = comp.stats
     num = comp.num_labels
+
+    # ── Voronoi-partitioned methods: early dispatch ──────────────────────
+    # Must branch BEFORE method_rows loop which rejects unknown method names.
+    _VORONOI_METHODS = {"radial_symmetry", "isophote_curvature"}
+    if refine in _VORONOI_METHODS:
+        # Collect component stats (same filtering as method_rows path)
+        rows = []
+        for lab in range(1, num):
+            x, y, w, h, area = stats[lab]
+            if area < int(area_min) or area > int(area_max):
+                continue
+            cx, cy = comp.centroids[lab]
+            rows.append([x, y, w, h, cx, cy])
+
+        if not rows:
+            arr = np.zeros((0, 2), dtype=np.float64)
+            meta = {
+                "invert": bool(invert), "area_min": int(area_min), "area_max": int(area_max),
+                "morph_open": int(morph_open), "morph_close": int(morph_close),
+                "pad": int(pad), "connectivity": int(connectivity),
+                "gpu_batch": int(gpu_batch), "device": int(device),
+                "use_float64": bool(use_float64),
+                "components_backend": str(components_backend),
+                "small_feature_max": float(small_feature_max),
+                "upsample_factor": int(upsample_factor),
+            }
+            return CenterResult(centers_xy=arr, method=f"threshold={threshold}, refine={refine}", backend="gpu", meta=meta)
+
+        rows_arr = np.asarray(rows, dtype=np.float64)
+        coarse_centers = rows_arr[:, 4:6]  # [cx, cy] = [x, y] order
+
+        # 1. Voronoi partition
+        from .voronoi import compute_voronoi_labels_gpu
+        voronoi_labels = compute_voronoi_labels_gpu(
+            coarse_centers,
+            g.shape,
+            device=device,
+        )
+        cell_areas = np.bincount(voronoi_labels.ravel(), minlength=len(rows))
+
+        # 2. Extract Voronoi-masked ROIs with border-pixel background fill
+        rois_list = []
+        masks_list = []
+        H, W = g.shape
+        for j, (x, y, w, h, cx, cy) in enumerate(rows):
+            x0 = max(0, int(x) - int(pad))
+            y0 = max(0, int(y) - int(pad))
+            x1 = min(W, int(x + w) + int(pad))
+            y1 = min(H, int(y + h) + int(pad))
+            roi = g[y0:y1, x0:x1].astype(np.float64)
+            vmask = voronoi_labels[y0:y1, x0:x1] == j
+            # Background-fill: median of border pixels (numpy-only erosion)
+            inner = vmask.copy()
+            inner[0, :] = inner[-1, :] = inner[:, 0] = inner[:, -1] = False
+            inner[1:, :] &= vmask[:-1, :]
+            inner[:-1, :] &= vmask[1:, :]
+            inner[:, 1:] &= vmask[:, :-1]
+            inner[:, :-1] &= vmask[:, 1:]
+            border_mask = vmask & ~inner
+            border_vals = roi[border_mask]
+            bg = float(np.median(border_vals)) if border_vals.size > 0 else 0.0
+            roi_filled = np.where(vmask, roi, bg)
+            rois_list.append(roi_filled)
+            masks_list.append(vmask)
+
+        # 3. Pad to uniform size and stack
+        hs = [r.shape[0] for r in rois_list]
+        ws = [r.shape[1] for r in rois_list]
+        Hm, Wm = max(hs), max(ws)
+        rois_stack = np.zeros((len(rois_list), Hm, Wm), dtype=np.float64)
+        masks_stack = np.zeros((len(rois_list), Hm, Wm), dtype=bool)
+        origins = []
+        for j, (roi, vmask) in enumerate(zip(rois_list, masks_list)):
+            h_r, w_r = roi.shape
+            rois_stack[j, :h_r, :w_r] = roi
+            masks_stack[j, :h_r, :w_r] = vmask
+            x0 = max(0, int(rows[j][0]) - int(pad))
+            y0 = max(0, int(rows[j][1]) - int(pad))
+            origins.append((x0, y0))
+
+        # 4. Batch refinement
+        if refine == "radial_symmetry":
+            local_centers, quality = _radial_symmetry_batch_gpu(
+                rois_stack, masks_stack, upsample_factor=upsample_factor, device=device,
+            )
+            quality_key = "radial_symmetry_residual"
+        else:
+            local_centers, quality = _isophote_curvature_batch_gpu(
+                rois_stack, masks_stack, upsample_factor=upsample_factor, device=device,
+            )
+            quality_key = "isophote_curvature_spread"
+
+        # 5. Transform to image coordinates and filter
+        centers_out = []
+        quality_kept = []
+        areas_kept = []
+        for j, (lc, q) in enumerate(zip(local_centers, quality)):
+            x0, y0 = origins[j]
+            gx = x0 + float(lc[0])
+            gy = y0 + float(lc[1])
+            if np.isfinite(gx) and np.isfinite(gy):
+                centers_out.append([gx, gy])
+                quality_kept.append(float(q))
+                areas_kept.append(int(cell_areas[j]) if j < len(cell_areas) else 0)
+
+        arr = np.asarray(centers_out, dtype=np.float64) if centers_out else np.zeros((0, 2), dtype=np.float64)
+        meta = {
+            "invert": bool(invert), "area_min": int(area_min), "area_max": int(area_max),
+            "morph_open": int(morph_open), "morph_close": int(morph_close),
+            "pad": int(pad), "connectivity": int(connectivity),
+            "gpu_batch": int(gpu_batch), "device": int(device),
+            "use_float64": bool(use_float64),
+            "components_backend": str(components_backend),
+            "small_feature_max": float(small_feature_max),
+            "upsample_factor": int(upsample_factor),
+            quality_key: np.asarray(quality_kept, dtype=np.float64),
+            "voronoi_cell_area": np.asarray(areas_kept, dtype=np.int64),
+        }
+        return CenterResult(centers_xy=arr, method=f"threshold={threshold}, refine={refine}", backend="gpu", meta=meta)
 
     rows = []
     lab_ids = []

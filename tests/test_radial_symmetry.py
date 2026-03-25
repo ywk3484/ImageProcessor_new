@@ -101,3 +101,49 @@ def test_radial_symmetry_no_upsample():
     centers, _ = _radial_symmetry_batch_gpu(rois, masks, upsample_factor=1, device=0)
     err = np.sqrt((centers[0, 0] - true_cx)**2 + (centers[0, 1] - true_cy)**2)
     assert err < 0.1, f"No-upsample error {err:.4f} px"
+
+
+@skipno_gpu
+def test_detect_centers_radial_symmetry_integration():
+    """Full pipeline: detect_centers with refine='radial_symmetry'."""
+    from subpx.centers import detect_centers
+    img = np.zeros((64, 64), dtype=np.uint8)
+    # Two small blobs
+    for cy, cx in [(15, 15), (15, 45)]:
+        yy, xx = np.mgrid[:64, :64]
+        img += (200 * np.exp(-((xx-cx)**2 + (yy-cy)**2) / (2*2.0**2))).astype(np.uint8)
+    res = detect_centers(
+        img, backend="gpu", refine="radial_symmetry",
+        area_min=4, area_max=200, upsample_factor=4,
+    )
+    assert res.centers_xy.shape[0] == 2
+    assert "radial_symmetry_residual" in res.meta
+    assert "voronoi_cell_area" in res.meta
+    assert res.meta["upsample_factor"] == 4
+
+
+def test_detect_centers_radial_symmetry_cpu_raises():
+    """CPU backend must raise NotImplementedError (no GPU needed for this test)."""
+    from subpx.centers import detect_centers
+    img = np.zeros((32, 32), dtype=np.uint8)
+    img[10:14, 10:14] = 200
+    with pytest.raises(NotImplementedError):
+        detect_centers(img, backend="cpu", refine="radial_symmetry")
+
+
+def test_detect_centers_tiled_radial_symmetry_raises():
+    """Tiled detection must raise NotImplementedError for new methods (no GPU needed)."""
+    from subpx.centers import detect_centers_tiled
+    img = np.zeros((64, 64), dtype=np.uint8)
+    img[10:14, 10:14] = 200
+    with pytest.raises(NotImplementedError):
+        detect_centers_tiled(img, backend="gpu", refine="radial_symmetry")
+
+
+def test_detect_centers_tiled_global_otsu_radial_symmetry_raises():
+    """tiled_global_otsu must also raise NotImplementedError."""
+    from subpx.centers import detect_centers_tiled_global_otsu
+    img = np.zeros((64, 64), dtype=np.uint8)
+    img[10:14, 10:14] = 200
+    with pytest.raises(NotImplementedError):
+        detect_centers_tiled_global_otsu(img, backend="gpu", refine="radial_symmetry")
