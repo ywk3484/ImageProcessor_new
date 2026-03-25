@@ -1,8 +1,9 @@
 """subpx: notebook-friendly subpixel image-processing utilities."""
 
 try:
-    from .viewer import imshow_huge, show_image, GLTiledImshow, GLOrtho2D
+    from .viewer import imshow, imshow_huge, show_image, GLTiledImshow, GLOrtho2D
 except Exception:
+    imshow = None
     imshow_huge = None
     show_image = None
     GLTiledImshow = None
@@ -54,6 +55,7 @@ from .mosaic import (
 )
 
 __all__ = [
+    "imshow",
     "imshow_huge",
     "show_image",
     "GLTiledImshow",

@@ -32,6 +32,74 @@ except Exception:
 
 
 # -----------------------------
+# GL shader cache reset
+# -----------------------------
+
+def _reset_gl_shader_caches():
+    """Reset class-level shader program caches on pyqtgraph GL items.
+
+    PyQtGraph caches compiled shaders at the class level. When a GL context
+    is destroyed (viewer window closed) and a new one is created, the stale
+    cache causes items to silently fail to render.  Calling this before
+    creating a new viewer forces recompilation in the new context.
+    """
+    for cls_path in (
+        "pyqtgraph.opengl.items.GLScatterPlotItem.GLScatterPlotItem",
+        "pyqtgraph.opengl.items.GLLinePlotItem.GLLinePlotItem",
+        "pyqtgraph.opengl.items.GLImageItem.GLImageItem",
+        "pyqtgraph.opengl.items.GLVolumeItem.GLVolumeItem",
+    ):
+        try:
+            parts = cls_path.rsplit(".", 1)
+            mod = __import__(parts[0], fromlist=[parts[1]])
+            cls = getattr(mod, parts[1])
+            if hasattr(cls, "_shaderProgram"):
+                cls._shaderProgram = None
+        except Exception:
+            pass
+    try:
+        from pyqtgraph.opengl import shaders as pg_shaders
+        if hasattr(pg_shaders, "initShaders"):
+            pg_shaders.initShaders()
+    except Exception:
+        pass
+
+
+# -----------------------------
+# Color parsing
+# -----------------------------
+
+_NAMED_COLORS = {
+    "red":     (1.0, 0.0, 0.0, 1.0),
+    "green":   (0.0, 1.0, 0.0, 1.0),
+    "blue":    (0.0, 0.0, 1.0, 1.0),
+    "cyan":    (0.0, 1.0, 1.0, 1.0),
+    "magenta": (1.0, 0.0, 1.0, 1.0),
+    "yellow":  (1.0, 1.0, 0.0, 1.0),
+    "white":   (1.0, 1.0, 1.0, 1.0),
+    "orange":  (1.0, 0.5, 0.0, 1.0),
+}
+
+
+def _parse_color(color):
+    """Convert a color spec to (R, G, B, A) float tuple.
+
+    Accepts: named string ("red"), (R,G,B) tuple, or (R,G,B,A) tuple.
+    """
+    if isinstance(color, str):
+        c = _NAMED_COLORS.get(color.lower())
+        if c is None:
+            raise ValueError(f"Unknown color name: {color!r}. Use one of {list(_NAMED_COLORS)}")
+        return c
+    c = tuple(float(x) for x in color)
+    if len(c) == 3:
+        return (*c, 1.0)
+    if len(c) == 4:
+        return c
+    raise ValueError(f"Color must be a name, (R,G,B), or (R,G,B,A) — got length {len(c)}")
+
+
+# -----------------------------
 # Utility functions
 # -----------------------------
 
@@ -532,6 +600,10 @@ class GLTiledImshow(QtWidgets.QWidget):
 
         layout.addLayout(bottom, stretch=0)
 
+        # ---------- Overlays ----------
+        self._overlays = {}        # name -> GLGraphicsItem
+        self._overlay_counter = 0
+
         # ---------- Tiles ----------
         self._tiles = {}           # key=(ds, ty, tx) -> GLImageItem
         self._current_ds = None
@@ -617,6 +689,163 @@ class GLTiledImshow(QtWidgets.QWidget):
             self.colorbar.set_range(self.lo, self.hi)
         self._current_ds = None  # force tile rebuild
         self._update_tiles()
+
+    # -----------------------------
+    # Overlay API
+    # -----------------------------
+
+    def _next_overlay_name(self, prefix):
+        self._overlay_counter += 1
+        return f"{prefix}-{self._overlay_counter}"
+
+    def add_points(self, xy, color="red", size=5, name=None):
+        """Add scatter markers at (N, 2) pixel coordinates [x, y].
+
+        Parameters
+        ----------
+        xy : array_like, shape (N, 2)
+            Point positions in [x, y] (column, row) image pixel coordinates.
+        color : str or tuple
+            Named color string or (R, G, B) / (R, G, B, A) float tuple.
+        size : float
+            Marker diameter in pixels.
+        name : str, optional
+            Overlay name for later removal.  Auto-generated if not given.
+
+        Returns
+        -------
+        str
+            The overlay name (use with ``remove_overlay``).
+        """
+        pts = np.asarray(xy, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[1] != 2:
+            raise ValueError(f"xy must be (N, 2), got shape {pts.shape}")
+
+        rgba = _parse_color(color)
+        pos3 = np.zeros((pts.shape[0], 3), dtype=np.float32)
+        pos3[:, 0] = pts[:, 0]
+        pos3[:, 1] = pts[:, 1]
+
+        item = gl.GLScatterPlotItem(pos=pos3, color=rgba, size=size, pxMode=True)
+        item.setDepthValue(10)
+        self.view.addItem(item)
+
+        name = name or self._next_overlay_name("points")
+        if name in self._overlays:
+            self.remove_overlay(name)
+        self._overlays[name] = item
+        return name
+
+    def add_lines(self, segments, color="cyan", width=1.5, name=None):
+        """Add line segments.
+
+        Parameters
+        ----------
+        segments : array_like, shape (M, 2, 2)
+            M line segments, each [[x0, y0], [x1, y1]].
+        color : str or tuple
+            Named color string or (R, G, B) / (R, G, B, A) float tuple.
+        width : float
+            Line width in pixels.
+        name : str, optional
+            Overlay name for later removal.
+
+        Returns
+        -------
+        str
+            The overlay name.
+        """
+        segs = np.asarray(segments, dtype=np.float32)
+        if segs.ndim != 3 or segs.shape[1:] != (2, 2):
+            raise ValueError(f"segments must be (M, 2, 2), got shape {segs.shape}")
+
+        rgba = _parse_color(color)
+        # Flatten to (2*M, 3) for mode="lines"
+        pos3 = np.zeros((segs.shape[0] * 2, 3), dtype=np.float32)
+        pos3[0::2, 0] = segs[:, 0, 0]  # x0
+        pos3[0::2, 1] = segs[:, 0, 1]  # y0
+        pos3[1::2, 0] = segs[:, 1, 0]  # x1
+        pos3[1::2, 1] = segs[:, 1, 1]  # y1
+
+        item = gl.GLLinePlotItem(pos=pos3, color=rgba, width=width, mode="lines")
+        item.setDepthValue(10)
+        self.view.addItem(item)
+
+        name = name or self._next_overlay_name("lines")
+        if name in self._overlays:
+            self.remove_overlay(name)
+        self._overlays[name] = item
+        return name
+
+    def add_rects(self, rects, color="yellow", width=1.0, name=None):
+        """Add rectangular outlines.
+
+        Parameters
+        ----------
+        rects : array_like, shape (K, 4)
+            Each row is [x, y, w, h] — top-left corner and size.
+        color : str or tuple
+            Named color string or (R, G, B) / (R, G, B, A) float tuple.
+        width : float
+            Line width in pixels.
+        name : str, optional
+            Overlay name for later removal.
+
+        Returns
+        -------
+        str
+            The overlay name.
+        """
+        r = np.asarray(rects, dtype=np.float32)
+        if r.ndim != 2 or r.shape[1] != 4:
+            raise ValueError(f"rects must be (K, 4), got shape {r.shape}")
+
+        # Each rect becomes 4 line segments (12 coordinate pairs, but we
+        # need 4 segment pairs = 8 points per rect)
+        K = r.shape[0]
+        x, y, w, h = r[:, 0], r[:, 1], r[:, 2], r[:, 3]
+
+        # 4 segments per rect: top, right, bottom, left
+        segs = np.zeros((K * 4, 2, 2), dtype=np.float32)
+        # top:    (x, y) -> (x+w, y)
+        segs[0::4, 0, 0] = x;       segs[0::4, 0, 1] = y
+        segs[0::4, 1, 0] = x + w;   segs[0::4, 1, 1] = y
+        # right:  (x+w, y) -> (x+w, y+h)
+        segs[1::4, 0, 0] = x + w;   segs[1::4, 0, 1] = y
+        segs[1::4, 1, 0] = x + w;   segs[1::4, 1, 1] = y + h
+        # bottom: (x+w, y+h) -> (x, y+h)
+        segs[2::4, 0, 0] = x + w;   segs[2::4, 0, 1] = y + h
+        segs[2::4, 1, 0] = x;       segs[2::4, 1, 1] = y + h
+        # left:   (x, y+h) -> (x, y)
+        segs[3::4, 0, 0] = x;       segs[3::4, 0, 1] = y + h
+        segs[3::4, 1, 0] = x;       segs[3::4, 1, 1] = y
+
+        return self.add_lines(segs, color=color, width=width,
+                              name=name or self._next_overlay_name("rects"))
+
+    def remove_overlay(self, name):
+        """Remove a named overlay from the view.
+
+        Parameters
+        ----------
+        name : str
+            The name returned by ``add_points``, ``add_lines``, or ``add_rects``.
+        """
+        item = self._overlays.pop(name, None)
+        if item is not None:
+            try:
+                self.view.removeItem(item)
+            except Exception:
+                pass
+
+    def clear_overlays(self):
+        """Remove all overlays (points, lines, rects) from the view."""
+        for item in self._overlays.values():
+            try:
+                self.view.removeItem(item)
+            except Exception:
+                pass
+        self._overlays.clear()
 
     # -----------------------------
     # Copy to clipboard
@@ -828,13 +1057,72 @@ class GLTiledImshow(QtWidgets.QWidget):
 # Notebook-facing convenience wrappers
 # -----------------------------
 
+def imshow(img, title=None, window_size=(1200, 800), **kwargs):
+    """Show a huge image in an interactive GL viewer.
+
+    Creates a ``QMainWindow`` containing a :class:`GLTiledImshow` widget,
+    calls ``.show()``, and returns the viewer widget.  Intended for use in
+    Jupyter notebooks with ``%gui qt`` enabled.
+
+    Parameters
+    ----------
+    img : ndarray or memmap
+        Image array — ``(H, W)`` grayscale or ``(H, W, 3/4)`` RGB/RGBA.
+    title : str, optional
+        Window title.  Defaults to image shape description.
+    window_size : tuple of (int, int)
+        Initial window width and height in pixels.
+    **kwargs
+        Forwarded to :class:`GLTiledImshow` (``cmap``, ``divider_step``,
+        ``stripe_width``, ``tile_w``, ``tile_h``, etc.).
+
+    Returns
+    -------
+    GLTiledImshow
+        The viewer widget.  Access the window via ``viewer.window()``.
+
+    Examples
+    --------
+    ::
+
+        %gui qt
+        import subpx
+        v = subpx.imshow(img, cmap="gray", divider_step=64)
+        v.add_points(centers_xy, color="red", size=4)
+        v.add_rects(bboxes, color="cyan")
+    """
+    _reset_gl_shader_caches()
+
+    viewer = GLTiledImshow(img, **kwargs)
+
+    win = QtWidgets.QMainWindow()
+    win.setCentralWidget(viewer)
+
+    if title is None:
+        shape_str = "x".join(str(s) for s in img.shape)
+        title = f"subpx — {shape_str}"
+    win.setWindowTitle(title)
+
+    w, h = int(window_size[0]), int(window_size[1])
+    win.resize(w, h)
+    win.show()
+
+    # Keep a reference so the window isn't garbage collected
+    viewer._main_window = win
+
+    return viewer
+
+
 def imshow_huge(img, **kwargs):
-    """Create and return a GLTiledImshow widget for a huge image."""
+    """Create and return a GLTiledImshow widget for a huge image.
+
+    .. deprecated:: Use :func:`imshow` instead for managed window creation.
+    """
     return GLTiledImshow(img, **kwargs)
 
 
 def show_image(img, **kwargs):
-    """Alias for imshow_huge for notebook-friendly usage."""
+    """Alias for :func:`imshow_huge`."""
     return imshow_huge(img, **kwargs)
 
 
@@ -848,6 +1136,7 @@ __all__ = [
     "ColorBarWidget",
     "GLOrtho2D",
     "GLTiledImshow",
+    "imshow",
     "imshow_huge",
     "show_image",
 ]
