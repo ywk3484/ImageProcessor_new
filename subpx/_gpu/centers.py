@@ -967,6 +967,226 @@ def refine_centers_gpu(gray_roi: np.ndarray, mask_roi: np.ndarray, *, method: st
     return float(out[0, 0]), float(out[0, 1])
 
 
+# ---------------------------------------------------------------------------
+# Parthasarathy radial-symmetry batch GPU kernel
+# ---------------------------------------------------------------------------
+
+def _radial_symmetry_batch_gpu(
+    rois: np.ndarray,
+    masks: np.ndarray,
+    *,
+    upsample_factor: int = 4,
+    boundary_margin: int | None = None,
+    device: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Batch Parthasarathy radial symmetry center estimation on GPU.
+
+    Parameters
+    ----------
+    rois : (N, H, W) float64 array -- stacked ROIs (background-filled outside mask)
+    masks : (N, H, W) bool array -- Voronoi cell masks (True = valid pixel)
+    upsample_factor : int -- bicubic upsampling factor (1 = disabled)
+    boundary_margin : int or None -- gradient margin near Voronoi boundary
+    device : int -- GPU device
+
+    Returns
+    -------
+    centers : (N, 2) float64 array -- centers in ROI pixel coordinates [x, y]
+    residuals : (N,) float64 array -- goodness-of-fit metric per blob
+    """
+    _require_cupy()
+
+    rois = np.asarray(rois, dtype=np.float64)
+    masks = np.asarray(masks, dtype=bool)
+    N = rois.shape[0]
+
+    if N == 0:
+        return np.empty((0, 2), dtype=np.float64), np.empty((0,), dtype=np.float64)
+
+    if boundary_margin is None:
+        boundary_margin = upsample_factor
+
+    with gpu_device(device):
+        # -- Step 1: Track per-ROI original dimensions (from mask extent) --
+        orig_hs = np.array([rois.shape[1]] * N, dtype=np.int32)
+        orig_ws = np.array([rois.shape[2]] * N, dtype=np.int32)
+
+        # -- Step 2 & 3: Upsample and pad to uniform size --
+        factor = int(upsample_factor)
+        if factor > 1:
+            up_rois_list = []
+            up_masks_list = []
+            up_hs = np.empty(N, dtype=np.int32)
+            up_ws = np.empty(N, dtype=np.int32)
+            for i in range(N):
+                roi_g = cp.asarray(rois[i])
+                mask_g = cp.asarray(masks[i].astype(np.float64))
+                up_roi = cndi.zoom(roi_g, factor, order=3)
+                up_mask = cndi.zoom(mask_g, factor, order=0) > 0.5
+                up_hs[i] = up_roi.shape[0]
+                up_ws[i] = up_roi.shape[1]
+                up_rois_list.append(up_roi)
+                up_masks_list.append(up_mask)
+            # Pad to uniform size
+            Hmax = int(up_hs.max())
+            Wmax = int(up_ws.max())
+            g_batch = cp.zeros((N, Hmax, Wmax), dtype=cp.float64)
+            m_batch = cp.zeros((N, Hmax, Wmax), dtype=bool)
+            for i in range(N):
+                h_i, w_i = int(up_hs[i]), int(up_ws[i])
+                g_batch[i, :h_i, :w_i] = up_rois_list[i]
+                m_batch[i, :h_i, :w_i] = up_masks_list[i]
+        else:
+            g_batch = cp.asarray(rois)
+            m_batch = cp.asarray(masks)
+            up_hs = orig_hs.copy()
+            up_ws = orig_ws.copy()
+            Hmax = g_batch.shape[1]
+            Wmax = g_batch.shape[2]
+
+        # -- Step 4: Erode mask by boundary_margin --
+        # Adaptively cap the margin so small ROIs retain enough valid
+        # midpoints.  After erosion of margin m the remaining valid region
+        # is roughly (H - 2m) x (W - 2m) and the midpoint grid is one
+        # smaller in each dimension.  We require the eroded region to be
+        # large enough to yield at least a ~10x10 midpoint grid for
+        # robust fitting, so cap at (min_dim - 11) // 2.  For very small
+        # ROIs this naturally reduces to 0.
+        min_up_dim = int(min(int(up_hs.min()), int(up_ws.min())))
+        max_margin = max(0, (min_up_dim - 11) // 2)
+        eff_margin = min(boundary_margin, max_margin)
+        if eff_margin > 0:
+            struct = cp.ones((1, 2 * eff_margin + 1, 2 * eff_margin + 1), dtype=bool)
+            m_eroded = cndi.binary_erosion(m_batch, structure=struct)
+        else:
+            m_eroded = m_batch.copy()
+
+        # -- Step 5: Diagonal gradients at midpoints --
+        # I[i,j] notation: i=row, j=col.  Midpoint between (i,j), (i+1,j), (i,j+1), (i+1,j+1)
+        # is at (i+0.5, j+0.5).
+        # dIdu = I[i, j+1] - I[i+1, j]  (diagonal u)
+        # dIdv = I[i, j]   - I[i+1, j+1] (diagonal v)
+        I = g_batch
+        Hp = Hmax - 1  # midpoint grid height
+        Wp = Wmax - 1  # midpoint grid width
+
+        if Hp < 1 or Wp < 1:
+            # Degenerate case: ROIs too small for gradients
+            centers = np.full((N, 2), np.nan, dtype=np.float64)
+            residuals = np.full((N,), np.inf, dtype=np.float64)
+            return centers, residuals
+
+        dIdu = I[:, :Hp, 1:Wp+1] - I[:, 1:Hp+1, :Wp]       # (N, Hp, Wp)
+        dIdv = I[:, :Hp, :Wp]    - I[:, 1:Hp+1, 1:Wp+1]     # (N, Hp, Wp)
+
+        # -- Step 6: Midpoint validity mask: all 4 surrounding pixels inside eroded mask --
+        m00 = m_eroded[:, :Hp, :Wp]
+        m01 = m_eroded[:, :Hp, 1:Wp+1]
+        m10 = m_eroded[:, 1:Hp+1, :Wp]
+        m11 = m_eroded[:, 1:Hp+1, 1:Wp+1]
+        valid = m00 & m01 & m10 & m11  # (N, Hp, Wp)
+
+        # -- Step 7: Slope m = -(dIdv + dIdu) / (dIdu - dIdv), clamp near-vertical --
+        denom = dIdu - dIdv
+        near_zero = cp.abs(denom) < 1e-12
+        safe_denom = cp.where(near_zero, cp.float64(1.0), denom)
+        slope = -(dIdv + dIdu) / safe_denom
+        # Clamp near-vertical slopes
+        slope = cp.where(near_zero, cp.where(-(dIdv + dIdu) >= 0, cp.float64(1e9), cp.float64(-1e9)), slope)
+
+        # -- Step 8: ROI-centered midpoint coordinates --
+        # Midpoint (i+0.5, j+0.5) in pixel coords. We want coordinates centered
+        # on the ROI center: xm, ym relative to center of each ROI's upsampled grid.
+        # Per-ROI centering: for ROI i, center_x = (up_ws[i]-1)/2, center_y = (up_hs[i]-1)/2
+        # Midpoint pixel coords: col = j + 0.5, row = i_row + 0.5
+        col_idx = cp.arange(Wp, dtype=cp.float64)[None, None, :] + 0.5  # (1, 1, Wp)
+        row_idx = cp.arange(Hp, dtype=cp.float64)[None, :, None] + 0.5  # (1, Hp, 1)
+
+        # Per-ROI center offsets
+        up_ws_g = cp.asarray(up_ws, dtype=cp.float64)
+        up_hs_g = cp.asarray(up_hs, dtype=cp.float64)
+        cx_off = (up_ws_g - 1.0) / 2.0  # (N,)
+        cy_off = (up_hs_g - 1.0) / 2.0  # (N,)
+
+        xm = col_idx - cx_off[:, None, None]  # (N, Hp, Wp)
+        ym = row_idx - cy_off[:, None, None]  # (N, Hp, Wp)
+
+        # -- Step 9: Line intercepts b = ym - slope * xm --
+        b = ym - slope * xm  # (N, Hp, Wp)
+
+        # -- Step 10: Weights w = |grad|^2 / dist_to_gradient_centroid --
+        grad_mag_sq = dIdu**2 + dIdv**2  # (N, Hp, Wp)
+
+        # Gradient centroid per ROI (weighted by grad_mag_sq within valid mask)
+        w_base = cp.where(valid, grad_mag_sq, cp.float64(0.0))
+        w_sum = w_base.sum(axis=(1, 2))  # (N,)
+        w_sum_safe = cp.maximum(w_sum, cp.float64(1e-30))
+        gc_x = (w_base * xm).sum(axis=(1, 2)) / w_sum_safe  # (N,)
+        gc_y = (w_base * ym).sum(axis=(1, 2)) / w_sum_safe  # (N,)
+
+        dist_sq = (xm - gc_x[:, None, None])**2 + (ym - gc_y[:, None, None])**2
+        dist = cp.sqrt(cp.maximum(dist_sq, cp.float64(1e-30)))
+
+        w = cp.where(valid, grad_mag_sq / dist, cp.float64(0.0))  # (N, Hp, Wp)
+
+        # -- Step 11: Analytic 2x2 solve --
+        # Weighted least squares for intersection of lines y = m*x + b
+        # Minimize sum_k w_k * (y_k - m_k * x_k - b_k)^2 over (xc, yc)
+        # where each line constraint is: yc = slope_k * xc + b_k
+        # Rearranging: slope_k * xc - yc + b_k = 0
+        # Normal equations:
+        #   [sum(m^2*w)  -sum(m*w)] [xc]   [-sum(m*b*w)]
+        #   [-sum(m*w)    sum(w)  ] [yc] = [ sum(b*w)  ]
+        sw = w.sum(axis=(1, 2))       # (N,)
+        smmw = (slope**2 * w).sum(axis=(1, 2))  # (N,)
+        smw = (slope * w).sum(axis=(1, 2))       # (N,)
+        smbw = (slope * b * w).sum(axis=(1, 2))  # (N,)
+        sbw = (b * w).sum(axis=(1, 2))           # (N,)
+
+        det = smmw * sw - smw * smw  # (N,)
+        det_safe = cp.where(cp.abs(det) < 1e-30, cp.float64(1e-30), det)
+        xc = (-smbw * sw + smw * sbw) / det_safe   # (N,)
+        yc = (smmw * sbw - smbw * smw) / det_safe   # (N,)
+
+        # -- Step 12: Residual: weighted mean perpendicular distance squared --
+        # perpendicular distance from point (xm, ym) to line yc = slope*xc + b
+        # For each midpoint line: distance of (xc, yc) to line y = m*x + b
+        # d = |m*xc - yc + b| / sqrt(m^2 + 1)
+        perp_d_sq = (slope * xc[:, None, None] - yc[:, None, None] + b)**2 / (slope**2 + 1.0)
+        residual = (w * perp_d_sq).sum(axis=(1, 2)) / cp.maximum(sw, cp.float64(1e-30))
+
+        # -- Step 13: Per-ROI coordinate transform --
+        # Transfer to CPU
+        xc_cpu = cp.asnumpy(xc)  # (N,) centered coords in upsampled grid
+        yc_cpu = cp.asnumpy(yc)
+        residual_cpu = cp.asnumpy(residual)
+
+    # Convert from centered upsampled coords to original ROI pixel coords
+    # xc is relative to center of upsampled grid: xc_pix_up = xc + (w_up - 1) / 2
+    # Then map back: xc_orig = xc_pix_up * (w_orig - 1) / (w_up - 1)
+    centers = np.empty((N, 2), dtype=np.float64)
+    for i in range(N):
+        w_up_i = float(up_ws[i])
+        h_up_i = float(up_hs[i])
+        w_orig_i = float(orig_ws[i])
+        h_orig_i = float(orig_hs[i])
+
+        xc_pix_up = xc_cpu[i] + (w_up_i - 1.0) / 2.0
+        yc_pix_up = yc_cpu[i] + (h_up_i - 1.0) / 2.0
+
+        if factor > 1 and w_up_i > 1 and h_up_i > 1:
+            xc_orig = xc_pix_up * (w_orig_i - 1.0) / (w_up_i - 1.0)
+            yc_orig = yc_pix_up * (h_orig_i - 1.0) / (h_up_i - 1.0)
+        else:
+            xc_orig = xc_pix_up
+            yc_orig = yc_pix_up
+
+        centers[i, 0] = xc_orig
+        centers[i, 1] = yc_orig
+
+    return centers, residual_cpu
+
+
 def detect_centers_gpu(
     image: np.ndarray,
     *,
