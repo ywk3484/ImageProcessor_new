@@ -147,3 +147,41 @@ def test_detect_centers_tiled_global_otsu_radial_symmetry_raises():
     img[10:14, 10:14] = 200
     with pytest.raises(NotImplementedError):
         detect_centers_tiled_global_otsu(img, backend="gpu", refine="radial_symmetry")
+
+
+@skipno_gpu
+def test_radial_symmetry_no_neighbor_bias():
+    """Closely-packed blobs: radial symmetry should not have neighbor-induced bias.
+
+    Create two Gaussian blobs separated by only 2*sigma. Without Voronoi
+    partitioning, a centroid method would be pulled toward the neighbor.
+    With Voronoi partitioning + radial symmetry, the center should be unbiased.
+    """
+    from subpx.centers import detect_centers
+    sigma = 2.0
+    sep = 2.5 * sigma  # 5 px separation — closely packed
+    cx1, cy1 = 20.0, 20.0
+    cx2, cy2 = 20.0 + sep, 20.0
+
+    img = np.zeros((40, 50), dtype=np.float64)
+    yy, xx = np.mgrid[:40, :50]
+    img += 200 * np.exp(-((xx - cx1)**2 + (yy - cy1)**2) / (2 * sigma**2))
+    img += 200 * np.exp(-((xx - cx2)**2 + (yy - cy2)**2) / (2 * sigma**2))
+    img = np.clip(img, 0, 255).astype(np.uint8)
+
+    res = detect_centers(
+        img, backend="gpu", refine="radial_symmetry",
+        area_min=4, area_max=500, upsample_factor=4,
+    )
+    assert res.centers_xy.shape[0] == 2
+
+    # Sort by x to identify blob 1 and blob 2
+    pts = res.centers_xy[np.argsort(res.centers_xy[:, 0])]
+
+    err1 = np.sqrt((pts[0, 0] - cx1)**2 + (pts[0, 1] - cy1)**2)
+    err2 = np.sqrt((pts[1, 0] - cx2)**2 + (pts[1, 1] - cy2)**2)
+
+    # The key assertion: no systematic bias toward the neighbor
+    # Both errors should be small (< 0.3 px) despite close packing
+    assert err1 < 0.3, f"Blob 1 error {err1:.4f} px — possible neighbor bias"
+    assert err2 < 0.3, f"Blob 2 error {err2:.4f} px — possible neighbor bias"
