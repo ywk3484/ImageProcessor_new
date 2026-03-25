@@ -1,11 +1,28 @@
 
 # Notebook Examples
 
-## Huge image viewer
+## Huge image viewer with overlays
 ```python
-from subpx import imshow_huge
-viewer = imshow_huge(img, divider_step=64, stripe_width=64)
+%gui qt
+import subpx
+
+v = subpx.imshow(img, cmap="gray", divider_step=64, title="my image")
+
+# Scatter markers from detected centers
+v.add_points(centers_xy, color="red", size=4)
+
+# Bounding boxes: each row is [x, y, w, h]
+v.add_rects(bboxes, color="cyan", width=1.0, name="roi")
+
+# Line segments: shape (M, 2, 2), each [[x0,y0], [x1,y1]]
+v.add_lines(segments, color="yellow", width=1.5)
+
+# Remove overlays
+v.remove_overlay("roi")   # by name
+v.clear_overlays()         # all
 ```
+
+See `examples/viewer_overlay_example.py` for a complete runnable workflow.
 
 ## Center detection
 ```python
