@@ -1011,31 +1011,18 @@ def _radial_symmetry_batch_gpu(
         orig_hs = np.array([rois.shape[1]] * N, dtype=np.int32)
         orig_ws = np.array([rois.shape[2]] * N, dtype=np.int32)
 
-        # -- Step 2 & 3: Upsample and pad to uniform size --
+        # -- Step 2 & 3: Upsample (single batch kernel launch) --
         factor = int(upsample_factor)
         if factor > 1:
-            up_rois_list = []
-            up_masks_list = []
-            up_hs = np.empty(N, dtype=np.int32)
-            up_ws = np.empty(N, dtype=np.int32)
-            for i in range(N):
-                roi_g = cp.asarray(rois[i])
-                mask_g = cp.asarray(masks[i].astype(np.float64))
-                up_roi = cndi.zoom(roi_g, factor, order=3)
-                up_mask = cndi.zoom(mask_g, factor, order=0) > 0.5
-                up_hs[i] = up_roi.shape[0]
-                up_ws[i] = up_roi.shape[1]
-                up_rois_list.append(up_roi)
-                up_masks_list.append(up_mask)
-            # Pad to uniform size
-            Hmax = int(up_hs.max())
-            Wmax = int(up_ws.max())
-            g_batch = cp.zeros((N, Hmax, Wmax), dtype=cp.float64)
-            m_batch = cp.zeros((N, Hmax, Wmax), dtype=bool)
-            for i in range(N):
-                h_i, w_i = int(up_hs[i]), int(up_ws[i])
-                g_batch[i, :h_i, :w_i] = up_rois_list[i]
-                m_batch[i, :h_i, :w_i] = up_masks_list[i]
+            from .upsample import batch_bicubic_upsample, batch_nn_upsample
+            rois_gpu = cp.asarray(rois, dtype=cp.float64)
+            masks_gpu = cp.asarray(masks.astype(np.float64))
+            g_batch = batch_bicubic_upsample(rois_gpu, factor)
+            m_batch = batch_nn_upsample(masks_gpu, factor) > 0.5
+            up_hs = np.full(N, g_batch.shape[1], dtype=np.int32)
+            up_ws = np.full(N, g_batch.shape[2], dtype=np.int32)
+            Hmax = g_batch.shape[1]
+            Wmax = g_batch.shape[2]
         else:
             g_batch = cp.asarray(rois)
             m_batch = cp.asarray(masks)
@@ -1234,31 +1221,18 @@ def _isophote_curvature_batch_gpu(
         orig_hs = np.array([rois.shape[1]] * N, dtype=np.int32)
         orig_ws = np.array([rois.shape[2]] * N, dtype=np.int32)
 
-        # -- Step 2 & 3: Upsample and pad to uniform size --
+        # -- Step 2 & 3: Upsample (single batch kernel launch) --
         factor = int(upsample_factor)
         if factor > 1:
-            up_rois_list = []
-            up_masks_list = []
-            up_hs = np.empty(N, dtype=np.int32)
-            up_ws = np.empty(N, dtype=np.int32)
-            for i in range(N):
-                roi_g = cp.asarray(rois[i])
-                mask_g = cp.asarray(masks[i].astype(np.float64))
-                up_roi = cndi.zoom(roi_g, factor, order=3)
-                up_mask = cndi.zoom(mask_g, factor, order=0) > 0.5
-                up_hs[i] = up_roi.shape[0]
-                up_ws[i] = up_roi.shape[1]
-                up_rois_list.append(up_roi)
-                up_masks_list.append(up_mask)
-            # Pad to uniform size
-            Hmax = int(up_hs.max())
-            Wmax = int(up_ws.max())
-            g_batch = cp.zeros((N, Hmax, Wmax), dtype=cp.float64)
-            m_batch = cp.zeros((N, Hmax, Wmax), dtype=bool)
-            for i in range(N):
-                h_i, w_i = int(up_hs[i]), int(up_ws[i])
-                g_batch[i, :h_i, :w_i] = up_rois_list[i]
-                m_batch[i, :h_i, :w_i] = up_masks_list[i]
+            from .upsample import batch_bicubic_upsample, batch_nn_upsample
+            rois_gpu = cp.asarray(rois, dtype=cp.float64)
+            masks_gpu = cp.asarray(masks.astype(np.float64))
+            g_batch = batch_bicubic_upsample(rois_gpu, factor)
+            m_batch = batch_nn_upsample(masks_gpu, factor) > 0.5
+            up_hs = np.full(N, g_batch.shape[1], dtype=np.int32)
+            up_ws = np.full(N, g_batch.shape[2], dtype=np.int32)
+            Hmax = g_batch.shape[1]
+            Wmax = g_batch.shape[2]
         else:
             g_batch = cp.asarray(rois)
             m_batch = cp.asarray(masks)
@@ -1391,6 +1365,70 @@ def _isophote_curvature_batch_gpu(
     return centers, spread_cpu
 
 
+def _extract_voronoi_rois(
+    gray: np.ndarray,
+    voronoi_labels: np.ndarray,
+    rows: list,
+    pad: int = 3,
+) -> tuple[np.ndarray, np.ndarray, list[tuple[int, int]]]:
+    """Extract Voronoi-masked ROIs with border-pixel background fill.
+
+    Parameters
+    ----------
+    gray : (H, W) float64 grayscale image
+    voronoi_labels : (H, W) int32 Voronoi label map
+    rows : list of (x, y, w, h, cx, cy) per component
+    pad : border padding in pixels
+
+    Returns
+    -------
+    rois_stack : (N, Hmax, Wmax) float64 — padded ROIs
+    masks_stack : (N, Hmax, Wmax) bool — Voronoi masks
+    origins : list of (x0, y0) top-left corners
+    """
+    H, W = gray.shape
+    rois_list = []
+    masks_list = []
+    origins = []
+
+    for j, (x, y, w, h, cx, cy) in enumerate(rows):
+        x0 = max(0, int(x) - int(pad))
+        y0 = max(0, int(y) - int(pad))
+        x1 = min(W, int(x + w) + int(pad))
+        y1 = min(H, int(y + h) + int(pad))
+        roi = gray[y0:y1, x0:x1].astype(np.float64)
+        vmask = voronoi_labels[y0:y1, x0:x1] == j
+
+        # Background-fill: median of border pixels (numpy-only erosion)
+        inner = vmask.copy()
+        inner[0, :] = inner[-1, :] = inner[:, 0] = inner[:, -1] = False
+        inner[1:, :] &= vmask[:-1, :]
+        inner[:-1, :] &= vmask[1:, :]
+        inner[:, 1:] &= vmask[:, :-1]
+        inner[:, :-1] &= vmask[:, 1:]
+        border_mask = vmask & ~inner
+        border_vals = roi[border_mask]
+        bg = float(np.median(border_vals)) if border_vals.size > 0 else 0.0
+        roi_filled = np.where(vmask, roi, bg)
+
+        rois_list.append(roi_filled)
+        masks_list.append(vmask)
+        origins.append((x0, y0))
+
+    # Pad to uniform size and stack
+    hs = [r.shape[0] for r in rois_list]
+    ws = [r.shape[1] for r in rois_list]
+    Hm, Wm = max(hs), max(ws)
+    rois_stack = np.zeros((len(rois_list), Hm, Wm), dtype=np.float64)
+    masks_stack = np.zeros((len(rois_list), Hm, Wm), dtype=bool)
+    for j, (roi, vmask) in enumerate(zip(rois_list, masks_list)):
+        h_r, w_r = roi.shape
+        rois_stack[j, :h_r, :w_r] = roi
+        masks_stack[j, :h_r, :w_r] = vmask
+
+    return rois_stack, masks_stack, origins
+
+
 def detect_centers_gpu(
     image: np.ndarray,
     *,
@@ -1464,45 +1502,10 @@ def detect_centers_gpu(
         )
         cell_areas = np.bincount(voronoi_labels.ravel(), minlength=len(rows))
 
-        # 2. Extract Voronoi-masked ROIs with border-pixel background fill
-        rois_list = []
-        masks_list = []
-        H, W = g.shape
-        for j, (x, y, w, h, cx, cy) in enumerate(rows):
-            x0 = max(0, int(x) - int(pad))
-            y0 = max(0, int(y) - int(pad))
-            x1 = min(W, int(x + w) + int(pad))
-            y1 = min(H, int(y + h) + int(pad))
-            roi = g[y0:y1, x0:x1].astype(np.float64)
-            vmask = voronoi_labels[y0:y1, x0:x1] == j
-            # Background-fill: median of border pixels (numpy-only erosion)
-            inner = vmask.copy()
-            inner[0, :] = inner[-1, :] = inner[:, 0] = inner[:, -1] = False
-            inner[1:, :] &= vmask[:-1, :]
-            inner[:-1, :] &= vmask[1:, :]
-            inner[:, 1:] &= vmask[:, :-1]
-            inner[:, :-1] &= vmask[:, 1:]
-            border_mask = vmask & ~inner
-            border_vals = roi[border_mask]
-            bg = float(np.median(border_vals)) if border_vals.size > 0 else 0.0
-            roi_filled = np.where(vmask, roi, bg)
-            rois_list.append(roi_filled)
-            masks_list.append(vmask)
-
-        # 3. Pad to uniform size and stack
-        hs = [r.shape[0] for r in rois_list]
-        ws = [r.shape[1] for r in rois_list]
-        Hm, Wm = max(hs), max(ws)
-        rois_stack = np.zeros((len(rois_list), Hm, Wm), dtype=np.float64)
-        masks_stack = np.zeros((len(rois_list), Hm, Wm), dtype=bool)
-        origins = []
-        for j, (roi, vmask) in enumerate(zip(rois_list, masks_list)):
-            h_r, w_r = roi.shape
-            rois_stack[j, :h_r, :w_r] = roi
-            masks_stack[j, :h_r, :w_r] = vmask
-            x0 = max(0, int(rows[j][0]) - int(pad))
-            y0 = max(0, int(rows[j][1]) - int(pad))
-            origins.append((x0, y0))
+        # 2-3. Extract Voronoi-masked ROIs, pad to uniform size
+        rois_stack, masks_stack, origins = _extract_voronoi_rois(
+            g, voronoi_labels, rows, pad=pad,
+        )
 
         # 4. Batch refinement
         if refine == "radial_symmetry":
@@ -1681,6 +1684,8 @@ def _detect_centers_tiled_gpu(
     gpu_batch: int = 4096,
     use_float64: bool = True,
     small_feature_max: float = 12.0,
+    # Voronoi method params
+    upsample_factor: int = 4,
 ) -> CenterResult:
     """Dedicated tiled GPU center detection pipeline.
 
@@ -1702,7 +1707,10 @@ def _detect_centers_tiled_gpu(
         raise ValueError("overlap must be < tile_h")
 
     # Validate refine method before entering tile loop
-    _supported_refine = {"edge_gradmoment", "edge_erf", "logquad", "logquadratic", "weighted", "auto"}
+    _supported_refine = {
+        "edge_gradmoment", "edge_erf", "logquad", "logquadratic",
+        "weighted", "auto", "radial_symmetry", "isophote_curvature",
+    }
     if refine not in _supported_refine:
         raise ValueError(f"Unknown refine method: {refine}")
 
@@ -1745,9 +1753,6 @@ def _detect_centers_tiled_gpu(
                 mask = (area >= int(area_min)) & (area <= int(area_max))
 
                 if cp.any(mask):
-                    # Upload tile once for refinement
-                    tile_gpu = cp.asarray(tile, dtype=cp.float32)
-
                     # Build (K, 6) stats array on GPU: [x, y, w, h, cx, cy]
                     filtered_stats = stats_gpu[1:][mask]
                     filtered_cents = centroids_gpu[1:][mask]
@@ -1756,83 +1761,127 @@ def _detect_centers_tiled_gpu(
                         filtered_cents.astype(cp.float32),
                     ], axis=1)
 
-                    # --- Refinement dispatch (all on GPU via core functions) ---
-                    if refine == "edge_gradmoment":
-                        refined_gpu, ok_gpu = _refine_edge_moment_core(
-                            tile_gpu, stats_xywh_cc,
-                            band_rad=band_rad, edge_rad=edge_rad,
-                            smooth_passes=smooth_passes, loc_rad=loc_rad,
-                            grad_power=grad_power, iters=iters,
-                        )
-                    elif refine == "edge_erf":
-                        refined_gpu, ok_gpu = _refine_edge_erf_core(
-                            tile_gpu, stats_xywh_cc,
-                            band_rad=band_rad, edge_rad=edge_rad,
-                            smooth_passes=smooth_passes, loc_rad=loc_rad,
-                            grad_power=grad_power, iters=iters,
-                            erf_fit_rad=erf_fit_rad, erf_gn_iters=erf_gn_iters,
-                            erf_init_sigma=erf_init_sigma,
-                            erf_sigma_min=erf_sigma_min,
-                            erf_sigma_max=erf_sigma_max,
-                            erf_max_shift=erf_max_shift,
-                            erf_damp=erf_damp, erf_cond_max=erf_cond_max,
-                        )
-                    elif refine in ("logquad", "logquadratic"):
-                        lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
-                        refined_gpu, ok_gpu = refine_centers_logquad_gpu_match_cpu(
-                            tile_gpu,
-                            labels_gpu.astype(cp.int32),
-                            stats_xywh_cc,
-                            lab_ids_gpu,
-                            pad=pad, batch=max(1, int(gpu_batch)),
-                            use_float64=use_float64,
-                        )
-                    elif refine == "weighted":
-                        lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
-                        refined_gpu, ok_gpu = _refine_weighted_core(
-                            tile_gpu, labels_gpu.astype(cp.int32),
-                            stats_xywh_cc, lab_ids_gpu,
-                            pad=pad, batch=max(1, int(gpu_batch)),
-                            use_float64=use_float64,
-                        )
-                    elif refine == "auto":
-                        lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
-                        max_dim = cp.maximum(stats_xywh_cc[:, 2], stats_xywh_cc[:, 3])
-                        is_small = max_dim <= float(small_feature_max)
-                        is_large = ~is_small
+                    # --- Refinement dispatch ---
+                    if refine in ("radial_symmetry", "isophote_curvature"):
+                        # Voronoi path: per-tile Voronoi → ROI extraction → batch GPU
+                        stats_np = cp.asnumpy(filtered_stats)
+                        cents_np = cp.asnumpy(filtered_cents)
+                        rows = np.column_stack([
+                            stats_np[:, :4], cents_np,
+                        ]).tolist()
+                        coarse_centers = cents_np.astype(np.float64)
 
-                        K_total = int(stats_xywh_cc.shape[0])
-                        refined_gpu = cp.full((K_total, 2), cp.nan, dtype=cp.float64)
-                        ok_gpu = cp.zeros((K_total,), dtype=cp.bool_)
+                        from .voronoi import compute_voronoi_labels_gpu
+                        tile_local_h = y1 - y0
+                        voronoi_labels = compute_voronoi_labels_gpu(
+                            coarse_centers, (tile_local_h, W), device=device,
+                        )
 
-                        if cp.any(is_small):
-                            si = cp.nonzero(is_small)[0]
-                            r, o = refine_centers_logquad_gpu_match_cpu(
-                                tile_gpu, labels_gpu.astype(cp.int32),
-                                stats_xywh_cc[si], lab_ids_gpu[si],
-                                pad=pad, batch=max(1, int(gpu_batch)),
-                                use_float64=use_float64,
+                        tile_f64 = tile.astype(np.float64)
+                        rois_stack, masks_stack, origins = _extract_voronoi_rois(
+                            tile_f64, voronoi_labels, rows, pad=pad,
+                        )
+
+                        if refine == "radial_symmetry":
+                            local_centers, quality = _radial_symmetry_batch_gpu(
+                                rois_stack, masks_stack,
+                                upsample_factor=upsample_factor, device=device,
                             )
-                            refined_gpu[si] = r
-                            ok_gpu[si] = o
+                        else:
+                            local_centers, quality = _isophote_curvature_batch_gpu(
+                                rois_stack, masks_stack,
+                                upsample_factor=upsample_factor, device=device,
+                            )
 
-                        if cp.any(is_large):
-                            li = cp.nonzero(is_large)[0]
-                            r, o = _refine_edge_moment_core(
-                                tile_gpu, stats_xywh_cc[li],
+                        # Transform ROI-local → tile-local coordinates
+                        K = local_centers.shape[0]
+                        refined = np.full((K, 2), np.nan, dtype=np.float64)
+                        for j in range(K):
+                            x0_r, y0_r = origins[j]
+                            refined[j, 0] = x0_r + local_centers[j, 0]
+                            refined[j, 1] = y0_r + local_centers[j, 1]
+                        good = np.all(np.isfinite(refined), axis=1)
+                        refined = refined[good]
+                    else:
+                        # Non-Voronoi path: all on GPU via core functions
+                        tile_gpu = cp.asarray(tile, dtype=cp.float32)
+
+                        if refine == "edge_gradmoment":
+                            refined_gpu, ok_gpu = _refine_edge_moment_core(
+                                tile_gpu, stats_xywh_cc,
                                 band_rad=band_rad, edge_rad=edge_rad,
                                 smooth_passes=smooth_passes, loc_rad=loc_rad,
                                 grad_power=grad_power, iters=iters,
                             )
-                            refined_gpu[li] = r
-                            ok_gpu[li] = o
+                        elif refine == "edge_erf":
+                            refined_gpu, ok_gpu = _refine_edge_erf_core(
+                                tile_gpu, stats_xywh_cc,
+                                band_rad=band_rad, edge_rad=edge_rad,
+                                smooth_passes=smooth_passes, loc_rad=loc_rad,
+                                grad_power=grad_power, iters=iters,
+                                erf_fit_rad=erf_fit_rad, erf_gn_iters=erf_gn_iters,
+                                erf_init_sigma=erf_init_sigma,
+                                erf_sigma_min=erf_sigma_min,
+                                erf_sigma_max=erf_sigma_max,
+                                erf_max_shift=erf_max_shift,
+                                erf_damp=erf_damp, erf_cond_max=erf_cond_max,
+                            )
+                        elif refine in ("logquad", "logquadratic"):
+                            lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
+                            refined_gpu, ok_gpu = refine_centers_logquad_gpu_match_cpu(
+                                tile_gpu,
+                                labels_gpu.astype(cp.int32),
+                                stats_xywh_cc,
+                                lab_ids_gpu,
+                                pad=pad, batch=max(1, int(gpu_batch)),
+                                use_float64=use_float64,
+                            )
+                        elif refine == "weighted":
+                            lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
+                            refined_gpu, ok_gpu = _refine_weighted_core(
+                                tile_gpu, labels_gpu.astype(cp.int32),
+                                stats_xywh_cc, lab_ids_gpu,
+                                pad=pad, batch=max(1, int(gpu_batch)),
+                                use_float64=use_float64,
+                            )
+                        elif refine == "auto":
+                            lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
+                            max_dim = cp.maximum(stats_xywh_cc[:, 2], stats_xywh_cc[:, 3])
+                            is_small = max_dim <= float(small_feature_max)
+                            is_large = ~is_small
 
-                    # --- Download only small centers array + band-based de-dup ---
-                    refined = cp.asnumpy(refined_gpu).astype(np.float64)
-                    ok = cp.asnumpy(ok_gpu).astype(bool)
-                    good = ok & np.all(np.isfinite(refined), axis=1)
-                    refined = refined[good]
+                            K_total = int(stats_xywh_cc.shape[0])
+                            refined_gpu = cp.full((K_total, 2), cp.nan, dtype=cp.float64)
+                            ok_gpu = cp.zeros((K_total,), dtype=cp.bool_)
 
+                            if cp.any(is_small):
+                                si = cp.nonzero(is_small)[0]
+                                r, o = refine_centers_logquad_gpu_match_cpu(
+                                    tile_gpu, labels_gpu.astype(cp.int32),
+                                    stats_xywh_cc[si], lab_ids_gpu[si],
+                                    pad=pad, batch=max(1, int(gpu_batch)),
+                                    use_float64=use_float64,
+                                )
+                                refined_gpu[si] = r
+                                ok_gpu[si] = o
+
+                            if cp.any(is_large):
+                                li = cp.nonzero(is_large)[0]
+                                r, o = _refine_edge_moment_core(
+                                    tile_gpu, stats_xywh_cc[li],
+                                    band_rad=band_rad, edge_rad=edge_rad,
+                                    smooth_passes=smooth_passes, loc_rad=loc_rad,
+                                    grad_power=grad_power, iters=iters,
+                                )
+                                refined_gpu[li] = r
+                                ok_gpu[li] = o
+
+                        refined = cp.asnumpy(refined_gpu).astype(np.float64)
+                        ok = cp.asnumpy(ok_gpu).astype(bool)
+                        good = ok & np.all(np.isfinite(refined), axis=1)
+                        refined = refined[good]
+
+                    # --- Band-based de-dup (common for all methods) ---
                     if refined.shape[0] > 0:
                         refined[:, 1] += y0  # tile-local → global
 
@@ -1868,6 +1917,7 @@ def _detect_centers_tiled_gpu(
             "area_max": int(area_max),
             "device": int(device),
             "small_feature_max": float(small_feature_max),
+            "upsample_factor": int(upsample_factor),
             "implementation": "rawkernel_cc+core_refine",
         },
     )

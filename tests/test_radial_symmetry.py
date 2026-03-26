@@ -131,13 +131,23 @@ def test_detect_centers_radial_symmetry_cpu_raises():
         detect_centers(img, backend="cpu", refine="radial_symmetry")
 
 
-def test_detect_centers_tiled_radial_symmetry_raises():
-    """Tiled detection must raise NotImplementedError for new methods (no GPU needed)."""
+@skipno_gpu
+def test_detect_centers_tiled_radial_symmetry():
+    """Tiled detection should work for radial_symmetry method."""
     from subpx.centers import detect_centers_tiled
-    img = np.zeros((64, 64), dtype=np.uint8)
-    img[10:14, 10:14] = 200
-    with pytest.raises(NotImplementedError):
-        detect_centers_tiled(img, backend="gpu", refine="radial_symmetry")
+    # Two blobs: one in top half, one in bottom half
+    img = np.zeros((128, 64), dtype=np.uint8)
+    img[20:26, 20:26] = 200
+    img[80:86, 40:46] = 200
+    res = detect_centers_tiled(
+        img, backend="gpu", refine="radial_symmetry",
+        tile_h=64, overlap=16, area_min=4, area_max=100,
+    )
+    assert res.centers_xy.shape[0] == 2
+    # Verify both blobs detected (one near y=23, one near y=83)
+    ys = sorted(res.centers_xy[:, 1])
+    assert 15 < ys[0] < 30
+    assert 75 < ys[1] < 90
 
 
 def test_detect_centers_tiled_global_otsu_radial_symmetry_raises():

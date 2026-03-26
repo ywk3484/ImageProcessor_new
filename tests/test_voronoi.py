@@ -62,3 +62,29 @@ def test_voronoi_cell_areas():
     assert areas.sum() == 20 * 20
     # Roughly equal areas for symmetric seeds
     assert np.all(areas > 50)  # each should be ~100
+
+
+@skipno_gpu
+def test_voronoi_grid_matches_brute_force():
+    """Grid-accelerated kernel produces identical labels to brute-force."""
+    from subpx._gpu.voronoi import compute_voronoi_labels_gpu
+    import subpx._gpu.voronoi as voronoi_mod
+
+    rng = np.random.default_rng(42)
+    N = 400  # above _GRID_THRESHOLD=256
+    H, W = 200, 300
+    seeds = rng.uniform(0, [W, H], size=(N, 2)).astype(np.float32)
+
+    # Grid-accelerated (N=400 > threshold)
+    grid_labels = compute_voronoi_labels_gpu(seeds, (H, W), device=0)
+
+    # Force brute-force by raising threshold temporarily
+    old = voronoi_mod._GRID_THRESHOLD
+    voronoi_mod._GRID_THRESHOLD = 10_000
+    try:
+        brute_labels = compute_voronoi_labels_gpu(seeds, (H, W), device=0)
+    finally:
+        voronoi_mod._GRID_THRESHOLD = old
+
+    # Both use FP32 — identical distance comparisons → identical labels
+    assert np.array_equal(grid_labels, brute_labels)

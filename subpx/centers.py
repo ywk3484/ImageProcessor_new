@@ -204,10 +204,6 @@ def detect_centers_tiled(
     GPU connected components, vectorized filtering, and band-based de-dup.
     For CPU backend, tiles are processed independently via detect_centers().
     """
-    if kwargs.get("refine") in _VORONOI_METHODS:
-        raise NotImplementedError(
-            "Voronoi-partitioned methods are not supported with tiled detection."
-        )
     img = to_numpy(image)
     if img.ndim != 2:
         raise ValueError("detect_centers_tiled expects a 2D grayscale image.")
