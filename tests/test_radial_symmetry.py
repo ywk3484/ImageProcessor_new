@@ -213,6 +213,74 @@ def test_segment_binary_triangle_threshold():
     assert bw.max() == 255  # at least some foreground pixels
 
 
+@skipno_gpu
+def test_radial_symmetry_rejects_out_of_bounds_center():
+    """A heavily asymmetric ROI should produce an out-of-bounds fit that gets rejected (NaN)."""
+    from subpx._gpu.centers import _radial_symmetry_batch_gpu
+
+    # Create a blob at the right edge of a 15x15 ROI — center is outside
+    # the left portion, simulating a clipped edge blob
+    blob = _make_gaussian_blob(14.0, 7.0, sigma=1.5, shape=(15, 15))
+    # Mask out right half to simulate asymmetric clipping
+    mask = np.ones((15, 15), dtype=bool)
+    mask[:, 10:] = False
+
+    rois = np.stack([blob])
+    masks = np.stack([mask])
+    centers, residuals = _radial_symmetry_batch_gpu(rois, masks, upsample_factor=4, device=0)
+
+    # The fit should be NaN (rejected) because the true center is outside
+    # the valid masked region
+    assert np.isnan(centers[0, 0]) or np.isnan(centers[0, 1]), (
+        f"Expected NaN for out-of-bounds fit, got center ({centers[0, 0]:.2f}, {centers[0, 1]:.2f})"
+    )
+
+
+@skipno_gpu
+def test_radial_symmetry_rejects_edge_blobs():
+    """Blobs at the image boundary should be rejected by quality gates.
+
+    Creates an image with one center blob (should be detected) and four
+    edge blobs (one on each side, partially outside image). The edge blobs
+    should be rejected because their asymmetric ROIs produce poor fits.
+    """
+    from subpx.centers import detect_centers
+
+    img = np.zeros((64, 64), dtype=np.uint8)
+    yy, xx = np.mgrid[:64, :64]
+
+    # Center blob — should survive
+    img += (200 * np.exp(-((xx - 32)**2 + (yy - 32)**2) / (2 * 2.0**2))).astype(np.uint8)
+    # Edge blobs — placed so bbox doesn't touch boundary but padded ROI is clipped
+    # Blob near left edge (x=2)
+    img += (200 * np.exp(-((xx - 2)**2 + (yy - 32)**2) / (2 * 2.0**2))).astype(np.uint8)
+    # Blob near top edge (y=2)
+    img += (200 * np.exp(-((xx - 32)**2 + (yy - 2)**2) / (2 * 2.0**2))).astype(np.uint8)
+
+    res = detect_centers(
+        img, backend="gpu", refine="radial_symmetry",
+        area_min=4, area_max=200, upsample_factor=4, threshold="triangle",
+    )
+    # Only the center blob should survive quality gates.
+    # The edge blobs may be detected as connected components but should
+    # be filtered by the boundary check (bbox touches edge) or quality gates.
+    # At minimum, the center blob should be in the results.
+    assert res.centers_xy.shape[0] >= 1
+
+    # Check that center blob is detected near (32, 32)
+    dists_to_center = np.sqrt(np.sum((res.centers_xy - [32, 32])**2, axis=1))
+    assert np.min(dists_to_center) < 1.0, "Center blob not detected"
+
+    # Edge blobs should NOT be in the results
+    for edge_pos in [[2, 32], [32, 2]]:
+        dists = np.sqrt(np.sum((res.centers_xy - edge_pos)**2, axis=1))
+        if len(dists) > 0:
+            assert np.min(dists) > 3.0, (
+                f"Edge blob near {edge_pos} should have been rejected, "
+                f"but found center at distance {np.min(dists):.2f} px"
+            )
+
+
 def test_triangle_detects_more_faint_blobs_than_otsu():
     """Triangle threshold captures faint blobs that Otsu misses.
 

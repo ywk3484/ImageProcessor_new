@@ -1168,6 +1168,12 @@ def _radial_symmetry_batch_gpu(
             xc_orig = xc_pix_up
             yc_orig = yc_pix_up
 
+        # -- Quality gate 1: in-bounds check --
+        if not (0 <= xc_orig < w_orig_i and 0 <= yc_orig < h_orig_i):
+            xc_orig = np.nan
+            yc_orig = np.nan
+            residual_cpu[i] = np.inf
+
         centers[i, 0] = xc_orig
         centers[i, 1] = yc_orig
 
