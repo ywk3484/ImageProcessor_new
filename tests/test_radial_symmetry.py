@@ -281,6 +281,94 @@ def test_radial_symmetry_rejects_edge_blobs():
             )
 
 
+@skipno_gpu
+def test_voronoi_each_cell_contains_one_seed():
+    """After Triangle thresholding, each Voronoi cell should contain exactly one seed.
+
+    This validates that the Voronoi kernel is correct when given complete seeds.
+    If this test fails, the Voronoi kernel has a bug independent of thresholding.
+    """
+    from subpx._gpu.voronoi import compute_voronoi_labels_gpu
+
+    # Create a regular grid of seeds (simulating well-detected blob centroids)
+    spacing = 10
+    seeds = []
+    for y in range(spacing, 100, spacing):
+        for x in range(spacing, 100, spacing):
+            seeds.append([float(x), float(y)])
+    seeds = np.array(seeds, dtype=np.float64)
+    N = len(seeds)
+
+    labels = compute_voronoi_labels_gpu(seeds, (100, 100), device=0)
+
+    # Each cell should contain exactly one seed center
+    for i in range(N):
+        sx, sy = int(round(seeds[i, 0])), int(round(seeds[i, 1]))
+        # Clamp to image bounds
+        sx = min(max(sx, 0), 99)
+        sy = min(max(sy, 0), 99)
+        assert labels[sy, sx] == i, (
+            f"Seed {i} at ({seeds[i, 0]:.1f}, {seeds[i, 1]:.1f}) is in Voronoi cell "
+            f"{labels[sy, sx]}, expected cell {i}"
+        )
+
+    # No cell should contain a different seed's center
+    for i in range(N):
+        cell_mask = labels == i
+        other_seeds_in_cell = 0
+        for j in range(N):
+            if j == i:
+                continue
+            sx, sy = int(round(seeds[j, 0])), int(round(seeds[j, 1]))
+            sx = min(max(sx, 0), 99)
+            sy = min(max(sy, 0), 99)
+            if cell_mask[sy, sx]:
+                other_seeds_in_cell += 1
+        assert other_seeds_in_cell == 0, (
+            f"Voronoi cell {i} contains {other_seeds_in_cell} other seed center(s)"
+        )
+
+
+@skipno_gpu
+def test_radial_symmetry_triangle_full_pipeline():
+    """Full pipeline: triangle threshold + radial symmetry on closely-packed blobs.
+
+    This is the end-to-end test that validates the entire fix chain:
+    triangle threshold -> complete seeds -> correct Voronoi -> accurate centers.
+    """
+    from subpx.centers import detect_centers
+
+    # Create 3x3 grid of closely-packed blobs (6px spacing, ~3px diameter)
+    img = np.zeros((64, 64), dtype=np.uint8)
+    yy, xx = np.mgrid[:64, :64]
+    true_centers = []
+    for row in range(3):
+        for col in range(3):
+            cx = 20.0 + col * 8.0
+            cy = 20.0 + row * 8.0
+            img += (150 * np.exp(-((xx - cx)**2 + (yy - cy)**2) / (2 * 1.5**2))).astype(np.uint8)
+            true_centers.append([cx, cy])
+    true_centers = np.array(true_centers)
+
+    res = detect_centers(
+        img, backend="gpu", refine="radial_symmetry",
+        area_min=1, area_max=200, upsample_factor=4, threshold="triangle",
+    )
+
+    # All 9 blobs should be detected
+    assert res.centers_xy.shape[0] == 9, (
+        f"Expected 9 centers, got {res.centers_xy.shape[0]}"
+    )
+
+    # Match detected to true centers (nearest neighbor)
+    from scipy.spatial import cKDTree
+    tree = cKDTree(true_centers)
+    dists, _ = tree.query(res.centers_xy)
+    assert np.all(dists < 0.5), (
+        f"Max center error {dists.max():.3f} px exceeds 0.5 px"
+    )
+
+
 def test_triangle_detects_more_faint_blobs_than_otsu():
     """Triangle threshold captures faint blobs that Otsu misses.
 
