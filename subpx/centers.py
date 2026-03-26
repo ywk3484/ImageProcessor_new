@@ -131,7 +131,7 @@ def detect_centers(
     image: np.ndarray,
     *,
     backend: str = "auto",
-    threshold: str = "otsu",
+    threshold: str = "triangle",
     invert: bool = False,
     area_min: int = 1,
     area_max: int = 50,

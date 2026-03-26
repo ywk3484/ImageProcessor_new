@@ -23,6 +23,7 @@ import matplotlib.patches as mpatches
 def run_diagnosis(
     image,
     *,
+    threshold: str = "triangle",
     invert: bool = True,
     area_min: int = 1,
     area_max: int = 50,
@@ -72,7 +73,7 @@ def run_diagnosis(
     print(f"Image shape: {img.shape}, dtype: {img.dtype}")
 
     # -- Step A: Segmentation --
-    g, bw = _segment_binary(img, threshold="otsu", invert=invert)
+    g, bw = _segment_binary(img, threshold=threshold, invert=invert)
     print(f"Grayscale range: [{g.min()}, {g.max()}]")
     print(f"Binary: {bw.sum()} foreground pixels out of {bw.size}")
 

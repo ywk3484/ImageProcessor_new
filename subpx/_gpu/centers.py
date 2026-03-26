@@ -1438,7 +1438,7 @@ def _extract_voronoi_rois(
 def detect_centers_gpu(
     image: np.ndarray,
     *,
-    threshold: str = "otsu",
+    threshold: str = "triangle",
     invert: bool = False,
     area_min: int = 1,
     area_max: int = 50,

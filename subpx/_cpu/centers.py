@@ -244,7 +244,7 @@ def refine_centers_cpu(gray_roi: np.ndarray, mask_roi: np.ndarray, *, method: st
     raise ValueError("method must be one of: 'none', 'weighted', 'logquad', 'edge_gradmoment', 'auto'.")
 
 
-def _segment_binary(image: np.ndarray, *, threshold: str = "otsu", invert: bool = False, morph_open: int = 0, morph_close: int = 0):
+def _segment_binary(image: np.ndarray, *, threshold: str = "triangle", invert: bool = False, morph_open: int = 0, morph_close: int = 0):
     _require_cv2()
     g = np.asarray(image)
     if g.ndim != 2:
@@ -266,7 +266,7 @@ def _segment_binary(image: np.ndarray, *, threshold: str = "otsu", invert: bool 
     return g, bw
 
 
-def _segment_components(image: np.ndarray, *, threshold: str = "otsu", invert: bool = False, morph_open: int = 0, morph_close: int = 0, connectivity: int = 8):
+def _segment_components(image: np.ndarray, *, threshold: str = "triangle", invert: bool = False, morph_open: int = 0, morph_close: int = 0, connectivity: int = 8):
     g, bw = _segment_binary(
         image,
         threshold=threshold,
@@ -281,7 +281,7 @@ def _segment_components(image: np.ndarray, *, threshold: str = "otsu", invert: b
 def detect_centers_cpu(
     image: np.ndarray,
     *,
-    threshold: str = "otsu",
+    threshold: str = "triangle",
     invert: bool = False,
     area_min: int = 1,
     area_max: int = 50,
