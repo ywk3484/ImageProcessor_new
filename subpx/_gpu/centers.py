@@ -1468,10 +1468,15 @@ def detect_centers_gpu(
     _VORONOI_METHODS = {"radial_symmetry", "isophote_curvature"}
     if refine in _VORONOI_METHODS:
         # Collect component stats (same filtering as method_rows path)
+        H_img, W_img = g.shape
         rows = []
         for lab in range(1, num):
             x, y, w, h, area = stats[lab]
             if area < int(area_min) or area > int(area_max):
+                continue
+            # Exclude blobs whose bbox touches the image boundary
+            # (partial blobs produce unreliable radial symmetry estimates)
+            if x <= 0 or y <= 0 or x + w >= W_img or y + h >= H_img:
                 continue
             cx, cy = comp.centroids[lab]
             rows.append([x, y, w, h, cx, cy])
@@ -1766,42 +1771,58 @@ def _detect_centers_tiled_gpu(
                         # Voronoi path: per-tile Voronoi → ROI extraction → batch GPU
                         stats_np = cp.asnumpy(filtered_stats)
                         cents_np = cp.asnumpy(filtered_cents)
-                        rows = np.column_stack([
-                            stats_np[:, :4], cents_np,
-                        ]).tolist()
-                        coarse_centers = cents_np.astype(np.float64)
-
-                        from .voronoi import compute_voronoi_labels_gpu
                         tile_local_h = y1 - y0
-                        voronoi_labels = compute_voronoi_labels_gpu(
-                            coarse_centers, (tile_local_h, W), device=device,
-                        )
 
-                        tile_f64 = tile.astype(np.float64)
-                        rois_stack, masks_stack, origins = _extract_voronoi_rois(
-                            tile_f64, voronoi_labels, rows, pad=pad,
-                        )
+                        # Exclude blobs whose bbox touches the image boundary
+                        keep = np.ones(stats_np.shape[0], dtype=bool)
+                        bx, by = stats_np[:, 0], stats_np[:, 1]
+                        bw, bh = stats_np[:, 2], stats_np[:, 3]
+                        keep &= (bx > 0) & (bx + bw < W)
+                        if y0 == 0:
+                            keep &= (by > 0)
+                        if y1 == H:
+                            keep &= (by + bh < tile_local_h)
+                        stats_np = stats_np[keep]
+                        cents_np = cents_np[keep]
 
-                        if refine == "radial_symmetry":
-                            local_centers, quality = _radial_symmetry_batch_gpu(
-                                rois_stack, masks_stack,
-                                upsample_factor=upsample_factor, device=device,
-                            )
+                        if stats_np.shape[0] == 0:
+                            refined = np.zeros((0, 2), dtype=np.float64)
                         else:
-                            local_centers, quality = _isophote_curvature_batch_gpu(
-                                rois_stack, masks_stack,
-                                upsample_factor=upsample_factor, device=device,
+                            rows_v = np.column_stack([
+                                stats_np[:, :4], cents_np,
+                            ]).tolist()
+                            coarse_centers = cents_np.astype(np.float64)
+
+                            from .voronoi import compute_voronoi_labels_gpu
+                            voronoi_labels = compute_voronoi_labels_gpu(
+                                coarse_centers, (tile_local_h, W), device=device,
                             )
 
-                        # Transform ROI-local → tile-local coordinates
-                        K = local_centers.shape[0]
-                        refined = np.full((K, 2), np.nan, dtype=np.float64)
-                        for j in range(K):
-                            x0_r, y0_r = origins[j]
-                            refined[j, 0] = x0_r + local_centers[j, 0]
-                            refined[j, 1] = y0_r + local_centers[j, 1]
-                        good = np.all(np.isfinite(refined), axis=1)
-                        refined = refined[good]
+                            tile_f64 = tile.astype(np.float64)
+                            rois_stack, masks_stack, origins = _extract_voronoi_rois(
+                                tile_f64, voronoi_labels, rows_v, pad=pad,
+                            )
+
+                            if refine == "radial_symmetry":
+                                local_centers, quality = _radial_symmetry_batch_gpu(
+                                    rois_stack, masks_stack,
+                                    upsample_factor=upsample_factor, device=device,
+                                )
+                            else:
+                                local_centers, quality = _isophote_curvature_batch_gpu(
+                                    rois_stack, masks_stack,
+                                    upsample_factor=upsample_factor, device=device,
+                                )
+
+                            # Transform ROI-local → tile-local coordinates
+                            K_v = local_centers.shape[0]
+                            refined = np.full((K_v, 2), np.nan, dtype=np.float64)
+                            for jj in range(K_v):
+                                x0_r, y0_r = origins[jj]
+                                refined[jj, 0] = x0_r + local_centers[jj, 0]
+                                refined[jj, 1] = y0_r + local_centers[jj, 1]
+                            good = np.all(np.isfinite(refined), axis=1)
+                            refined = refined[good]
                     else:
                         # Non-Voronoi path: all on GPU via core functions
                         tile_gpu = cp.asarray(tile, dtype=cp.float32)

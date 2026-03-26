@@ -4,8 +4,9 @@ Processes (N, H, W) → (N, H*factor, W*factor) in a single kernel launch,
 replacing per-ROI ``cndi.zoom`` loops that required 2N launches.
 
 The bicubic kernel uses Keys' cubic (Catmull-Rom, a=-0.5), an interpolating
-cubic that requires no pre-filter — unlike scipy's B-spline default.  Center
-estimation difference vs. scipy is < 0.02 px for Gaussian-like blobs.
+cubic that requires no pre-filter — unlike scipy's B-spline default.  Both
+use the same edge-aligned coordinate mapping as ``scipy.ndimage.zoom``
+(``output[0] → input[0]``, ``output[last] → input[last]``).
 """
 from __future__ import annotations
 
@@ -35,9 +36,12 @@ void batch_bicubic_upsample(
     int oy = rem / Wout;
     int ox = rem % Wout;
 
-    // Center-aligned coordinate mapping (matches ndimage.zoom default)
-    double sy = ((double)oy + 0.5) / (double)factor - 0.5;
-    double sx = ((double)ox + 0.5) / (double)factor - 0.5;
+    // Edge-aligned coordinate mapping (matches scipy ndimage.zoom default):
+    // output[0] -> input[0], output[last] -> input[last]
+    double scale_y = (Hout > 1) ? ((double)Hin - 1.0) / ((double)Hout - 1.0) : 0.0;
+    double scale_x = (Wout > 1) ? ((double)Win - 1.0) / ((double)Wout - 1.0) : 0.0;
+    double sy = (double)oy * scale_y;
+    double sx = (double)ox * scale_x;
 
     int iy = (int)floor(sy);
     int ix = (int)floor(sx);
@@ -110,8 +114,11 @@ void batch_nn_upsample(
     int oy = rem / Wout;
     int ox = rem % Wout;
 
-    int sy = oy / factor;
-    int sx = ox / factor;
+    // Edge-aligned coordinate mapping matching scipy ndimage.zoom order=0
+    double scale_y = (Hout > 1) ? ((double)Hin - 1.0) / ((double)Hout - 1.0) : 0.0;
+    double scale_x = (Wout > 1) ? ((double)Win - 1.0) / ((double)Wout - 1.0) : 0.0;
+    int sy = (int)((double)oy * scale_y + 0.5);
+    int sx = (int)((double)ox * scale_x + 0.5);
     if (sy >= Hin) sy = Hin - 1;
     if (sx >= Win) sx = Win - 1;
 

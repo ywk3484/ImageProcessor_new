@@ -277,35 +277,36 @@ def inspect_blob(diag: dict, blob_idx: int):
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
     # 1a: Original image crop around blob (20px context)
+    # Use local pixel coordinates (no extent) to avoid half-pixel offset bugs
     ctx = 20
     vy0 = max(0, int(cy) - ctx)
     vy1 = min(H_img, int(cy) + ctx)
     vx0 = max(0, int(cx) - ctx)
     vx1 = min(W_img, int(cx) + ctx)
     ax = axes[0]
-    ax.imshow(g[vy0:vy1, vx0:vx1], cmap="gray", origin="upper",
-              extent=[vx0, vx1, vy1, vy0])
-    ax.plot(gc[0], gc[1], "r+", ms=12, mew=2, label="radial_sym")
-    ax.plot(cx, cy, "bx", ms=10, mew=2, label="coarse")
+    ax.imshow(g[vy0:vy1, vx0:vx1], cmap="gray", origin="upper")
+    # Convert global coords → local crop coords
+    ax.plot(gc[0] - vx0, gc[1] - vy0, "r+", ms=12, mew=2, label="radial_sym")
+    ax.plot(cx - vx0, cy - vy0, "bx", ms=10, mew=2, label="coarse")
     # Find nearest logquad center
     if logquad_centers.shape[0] > 0:
         from scipy.spatial import cKDTree
         tree = cKDTree(logquad_centers)
         d, idx = tree.query([gc[0], gc[1]])
         lq_pt = logquad_centers[idx]
-        ax.plot(lq_pt[0], lq_pt[1], "g+", ms=12, mew=2, label=f"logquad (d={d:.2f})")
-    rect = mpatches.Rectangle((x0_bb, y0_bb), roi_w, roi_h,
+        ax.plot(lq_pt[0] - vx0, lq_pt[1] - vy0, "g+", ms=12, mew=2,
+                label=f"logquad (d={d:.2f})")
+    rect = mpatches.Rectangle((x0_bb - vx0, y0_bb - vy0), roi_w, roi_h,
                                 linewidth=1, edgecolor="yellow", facecolor="none")
     ax.add_patch(rect)
     ax.legend(fontsize=8)
-    ax.set_title(f"Blob {j}: Image context")
+    ax.set_title(f"Blob {j}: Image context (crop [{vy0}:{vy1}, {vx0}:{vx1}])")
 
     # 1b: Voronoi labels around blob
     ax = axes[1]
     vlabels = voronoi_labels[vy0:vy1, vx0:vx1]
-    ax.imshow(vlabels, cmap="tab20", origin="upper",
-              extent=[vx0, vx1, vy1, vy0])
-    ax.plot(gc[0], gc[1], "r+", ms=12, mew=2)
+    ax.imshow(vlabels, cmap="tab20", origin="upper")
+    ax.plot(gc[0] - vx0, gc[1] - vy0, "r+", ms=12, mew=2)
     ax.set_title(f"Voronoi labels (this blob = {j})")
 
     # 1c: ROI with mask overlay
@@ -539,53 +540,62 @@ def _inspect_radial_symmetry_steps(
     print(f"  Center (original px): xc={xc_orig:.4f}, yc={yc_orig:.4f}")
     print(f"  Residual: {residual_val:.6f}")
 
-    # ---- Figure 3: Internal steps ----
+    # ---- Figure 3: Radial symmetry algorithm steps ----
+    # The Parthasarathy algorithm works as follows:
+    #   1. Upsample ROI (bicubic) for sub-pixel accuracy
+    #   2. Erode mask to exclude boundary artifacts
+    #   3. Compute diagonal gradients dI/du, dI/dv at midpoints between pixels
+    #   4. Each gradient defines a "symmetry line" through the midpoint
+    #   5. Weighted least-squares fit finds the point where all lines converge
+    #      (weight = gradient_magnitude^2 / distance_to_centroid)
     fig, axes = plt.subplots(2, 4, figsize=(24, 12))
 
-    # 3a: Upsampled ROI with center
+    # 3a: Step 1 result — upsampled ROI with estimated center
     ax = axes[0, 0]
     ax.imshow(g_np, cmap="gray", origin="upper")
     ax.plot(xc_pix, yc_pix, "r+", ms=15, mew=2, label="estimated")
     ax.plot((up_w - 1) / 2, (up_h - 1) / 2, "bx", ms=10, mew=2, label="ROI center")
     ax.legend(fontsize=8)
-    ax.set_title(f"Upsampled ROI + center")
+    ax.set_title(f"Step 1: Upsampled ROI ({orig_h}→{up_h}px, {factor}×)")
 
-    # 3b: Mask (upsampled) + eroded mask
+    # 3b: Step 2 — Voronoi mask after NN upsample + erosion boundary
     ax = axes[0, 1]
     ax.imshow(m_np, cmap="gray", origin="upper")
-    # Overlay eroded mask boundary
     ax.contour(m_eroded_np, levels=[0.5], colors="red", linewidths=1)
-    ax.set_title(f"Mask + eroded boundary (margin={eff_margin})")
+    ax.set_title(f"Step 2: Mask (white) + erosion boundary (red, {eff_margin}px)")
 
-    # 3c: Gradient magnitude at midpoints
+    # 3c: Step 3 — gradient magnitude at diagonal midpoints
     ax = axes[0, 2]
     im = ax.imshow(grad_mag, cmap="hot", origin="upper")
     plt.colorbar(im, ax=ax)
-    ax.set_title("Gradient magnitude (midpoints)")
+    ax.set_title("Step 3: |∇I| at midpoints (dIdu² + dIdv²)^½")
 
-    # 3d: Valid midpoints
+    # 3d: Step 3b — valid midpoints (all 4 neighbors inside eroded mask)
     ax = axes[0, 3]
     ax.imshow(valid_np, cmap="gray", origin="upper")
-    ax.set_title(f"Valid midpoints ({valid_np.sum()})")
+    ax.set_title(f"Step 3b: Valid midpoints = {valid_np.sum()} / {Hp * Wp}")
 
-    # 3e: Slope field (clamped for visualization)
+    # 3e: Step 4 — slope of symmetry line at each midpoint
     ax = axes[1, 0]
     slope_vis = np.clip(slope_np, -10, 10)
     im = ax.imshow(slope_vis, cmap="RdBu_r", origin="upper", vmin=-5, vmax=5)
     plt.colorbar(im, ax=ax)
-    ax.set_title("Slope (clamped to [-5,5])")
+    ax.set_title("Step 4: Slope m = -(dIdv+dIdu)/(dIdu-dIdv)")
 
-    # 3f: Weights
+    # 3f: Step 5 — weights used in the WLS center fit
     ax = axes[1, 1]
     im = ax.imshow(np.where(valid_np, w_np, 0), cmap="hot", origin="upper")
     plt.colorbar(im, ax=ax)
-    ax.set_title("Weights (grad^2 / dist)")
+    ax.set_title("Step 5: WLS weights = |∇I|² / dist_to_centroid")
 
-    # 3g: Symmetry lines (subsample for clarity)
+    # 3g: Step 6 — symmetry lines overlaid on upsampled ROI
     ax = axes[1, 2]
     ax.imshow(g_np, cmap="gray", origin="upper")
-    # Draw a subset of symmetry lines through the estimated center
-    rows_mp, cols_mp = np.where(valid_np & (grad_mag > np.percentile(grad_mag[valid_np], 70)))
+    # Draw the top-30% gradient midpoints' symmetry lines
+    if valid_np.sum() > 0:
+        rows_mp, cols_mp = np.where(valid_np & (grad_mag > np.percentile(grad_mag[valid_np], 70)))
+    else:
+        rows_mp, cols_mp = np.array([]), np.array([])
     step = max(1, len(rows_mp) // 40)
     for ii in range(0, len(rows_mp), step):
         r, c = rows_mp[ii], cols_mp[ii]
@@ -593,8 +603,7 @@ def _inspect_radial_symmetry_steps(
         my = ym_np[r, c]
         s = slope_np[r, c]
         bi = b_np[r, c]
-        # Line: y = s * x + bi (in centered coords)
-        # Convert to pixel coords for plotting
+        # Line: y = s * x + bi (centered coords) → pixel coords
         x_line = np.linspace(mx - 5, mx + 5, 20)
         y_line = s * x_line + bi
         x_line_px = x_line + (up_w - 1) / 2
@@ -603,18 +612,21 @@ def _inspect_radial_symmetry_steps(
     ax.plot(xc_pix, yc_pix, "r+", ms=15, mew=2)
     ax.set_xlim(0, up_w)
     ax.set_ylim(up_h, 0)
-    ax.set_title("Symmetry lines → center")
+    ax.set_title("Step 6: Symmetry lines (top 30% |∇I|) → WLS center")
 
-    # 3h: Center on original-scale ROI
+    # 3h: Final result — center mapped back to original-scale ROI
     ax = axes[1, 3]
     ax.imshow(rois[0], cmap="gray", origin="upper")
     ax.plot(xc_orig, yc_orig, "r+", ms=15, mew=2, label="radial_sym")
     ax.plot((orig_w - 1) / 2, (orig_h - 1) / 2, "bx", ms=10, mew=2, label="ROI center")
     ax.legend(fontsize=8)
-    ax.set_title(f"Original ROI + center (x={xc_orig:.2f}, y={yc_orig:.2f})")
+    ax.set_title(f"Result: center in ROI coords (x={xc_orig:.2f}, y={yc_orig:.2f})")
 
-    plt.suptitle(f"Blob {blob_idx}: Radial Symmetry Steps  |  residual={residual_val:.6f}",
-                 fontsize=14, y=1.02)
+    plt.suptitle(
+        f"Blob {blob_idx}: Radial Symmetry Algorithm Steps  |  "
+        f"residual={residual_val:.6f}  |  factor={factor}×",
+        fontsize=14, y=1.02,
+    )
     plt.tight_layout()
     plt.show()
 
@@ -655,14 +667,14 @@ def plot_overview(diag: dict, region: tuple[int, int, int, int] | None = None):
         (axes[0], "Logquad", lq, "lime", "+"),
         (axes[1], "Radial symmetry", gc[valid], "red", "+"),
     ]:
-        ax.imshow(g[y0:y1, x0:x1], cmap="gray", origin="upper",
-                  extent=[x0, x1, y1, y0])
+        ax.imshow(g[y0:y1, x0:x1], cmap="gray", origin="upper")
         in_region = (
             (centers[:, 0] >= x0) & (centers[:, 0] < x1) &
             (centers[:, 1] >= y0) & (centers[:, 1] < y1)
         )
         pts = centers[in_region]
-        ax.plot(pts[:, 0], pts[:, 1], marker, color=color, ms=8, mew=1.5)
+        # Convert global → local crop coordinates
+        ax.plot(pts[:, 0] - x0, pts[:, 1] - y0, marker, color=color, ms=8, mew=1.5)
         ax.set_title(f"{title} ({pts.shape[0]} centers in view)")
 
     plt.suptitle(f"Region [{y0}:{y1}, {x0}:{x1}]", fontsize=12)
