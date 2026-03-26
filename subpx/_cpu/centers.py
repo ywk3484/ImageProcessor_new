@@ -249,11 +249,13 @@ def _segment_binary(image: np.ndarray, *, threshold: str = "otsu", invert: bool 
     g = np.asarray(image)
     if g.ndim != 2:
         raise ValueError("Expected 2D grayscale image.")
-    if threshold != "otsu":
-        raise ValueError("Currently supported threshold values: 'otsu'")
+    _THRESHOLD_METHODS = {"otsu": cv2.THRESH_OTSU, "triangle": cv2.THRESH_TRIANGLE}
+    if threshold not in _THRESHOLD_METHODS:
+        raise ValueError(f"Unsupported threshold method: {threshold!r}. "
+                         f"Supported: {sorted(_THRESHOLD_METHODS)}")
 
     thr_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
-    _, bw = cv2.threshold(g, 0, 255, thr_type | cv2.THRESH_OTSU)
+    _, bw = cv2.threshold(g, 0, 255, thr_type | _THRESHOLD_METHODS[threshold])
 
     if morph_open > 0:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))

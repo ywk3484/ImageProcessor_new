@@ -195,3 +195,53 @@ def test_radial_symmetry_no_neighbor_bias():
     # Both errors should be small (< 0.3 px) despite close packing
     assert err1 < 0.3, f"Blob 1 error {err1:.4f} px — possible neighbor bias"
     assert err2 < 0.3, f"Blob 2 error {err2:.4f} px — possible neighbor bias"
+
+
+def test_segment_binary_triangle_threshold():
+    """_segment_binary accepts threshold='triangle' and produces a valid binary mask."""
+    from subpx._cpu.centers import _segment_binary
+
+    # Create image with faint blobs on dark background
+    img = np.zeros((64, 64), dtype=np.uint8)
+    # Bright blob
+    yy, xx = np.mgrid[:64, :64]
+    img += (100 * np.exp(-((xx - 32)**2 + (yy - 32)**2) / (2 * 2.0**2))).astype(np.uint8)
+
+    g, bw = _segment_binary(img, threshold="triangle")
+    assert bw.shape == (64, 64)
+    assert bw.dtype == np.uint8
+    assert bw.max() == 255  # at least some foreground pixels
+
+
+def test_triangle_detects_more_faint_blobs_than_otsu():
+    """Triangle threshold captures faint blobs that Otsu misses.
+
+    Creates a grid of blobs with varying brightness on a large dark background.
+    The faintest blobs should be detected by Triangle but missed by Otsu
+    because Otsu's threshold is pulled too high by the dominant background.
+    """
+    import cv2
+    from subpx._cpu.centers import _segment_binary
+    from subpx._cpu.components import connected_components_stats_cpu
+
+    img = np.zeros((200, 200), dtype=np.uint8)
+    yy, xx = np.mgrid[:200, :200]
+    # 4x4 grid of blobs with decreasing brightness
+    positions = [(30 + 40*i, 30 + 40*j) for i in range(4) for j in range(4)]
+    brightnesses = [200, 180, 150, 120, 100, 80, 70, 60,
+                    55, 50, 45, 40, 35, 30, 25, 20]
+    for (cx, cy), brightness in zip(positions, brightnesses):
+        img += (brightness * np.exp(-((xx - cx)**2 + (yy - cy)**2) / (2 * 1.5**2))).astype(np.uint8)
+
+    _, bw_otsu = _segment_binary(img, threshold="otsu")
+    _, bw_tri = _segment_binary(img, threshold="triangle")
+
+    comp_otsu = connected_components_stats_cpu(bw_otsu, connectivity=8)
+    comp_tri = connected_components_stats_cpu(bw_tri, connectivity=8)
+    # num_labels includes background (label 0), so subtract 1
+    n_otsu = comp_otsu.num_labels - 1
+    n_tri = comp_tri.num_labels - 1
+
+    assert n_tri > n_otsu, (
+        f"Triangle ({n_tri} blobs) should detect more blobs than Otsu ({n_otsu} blobs)"
+    )
