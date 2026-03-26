@@ -220,7 +220,6 @@ def test_triangle_detects_more_faint_blobs_than_otsu():
     The faintest blobs should be detected by Triangle but missed by Otsu
     because Otsu's threshold is pulled too high by the dominant background.
     """
-    import cv2
     from subpx._cpu.centers import _segment_binary
     from subpx._cpu.components import connected_components_stats_cpu
 
