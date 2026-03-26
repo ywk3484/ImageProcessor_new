@@ -240,9 +240,9 @@ def test_radial_symmetry_rejects_out_of_bounds_center():
 def test_radial_symmetry_rejects_edge_blobs():
     """Blobs at the image boundary should be rejected by quality gates.
 
-    Creates an image with one center blob (should be detected) and four
-    edge blobs (one on each side, partially outside image). The edge blobs
-    should be rejected because their asymmetric ROIs produce poor fits.
+    Creates an image with one center blob (should be detected) and two
+    edge blobs (near left and top boundaries). The edge blobs should be
+    rejected because their asymmetric ROIs produce poor fits.
     """
     from subpx.centers import detect_centers
 
