@@ -21,7 +21,7 @@ import matplotlib.patches as mpatches
 # ---------------------------------------------------------------------------
 
 def run_diagnosis(
-    image_path: str,
+    image,
     *,
     invert: bool = True,
     area_min: int = 1,
@@ -37,7 +37,7 @@ def run_diagnosis(
 
     Parameters
     ----------
-    image_path : path to grayscale image
+    image : numpy array or path to grayscale image
     crop_region : (y0, y1, x0, x1) to work on a sub-region (faster)
     n_worst : number of worst-discrepancy blobs to select
     n_random : number of random blobs to select
@@ -47,7 +47,6 @@ def run_diagnosis(
     dict with all intermediate data for inspection
     """
     import cupy as cp
-    import tifffile
     from subpx._gpu.centers import (
         _segment_binary,
         _extract_voronoi_rois,
@@ -57,7 +56,11 @@ def run_diagnosis(
     from subpx.components import connected_components_stats_cpu
 
     # -- Load image --
-    img = tifffile.imread(image_path) if image_path.endswith(('.tif', '.tiff')) else plt.imread(image_path)
+    if isinstance(image, np.ndarray):
+        img = image
+    else:
+        import tifffile
+        img = tifffile.imread(image) if str(image).endswith(('.tif', '.tiff')) else plt.imread(image)
     if img.ndim == 3:
         img = img[:, :, 0]
     img = np.asarray(img)
@@ -507,8 +510,10 @@ def _inspect_radial_symmetry_steps(
         grad_mag = cp.asnumpy(cp.sqrt(grad_mag_sq[0]))
         w_np = cp.asnumpy(w[0])
         b_np = cp.asnumpy(b[0])
-        xm_np = cp.asnumpy(xm[0])
-        ym_np = cp.asnumpy(ym[0])
+        xm_full = cp.broadcast_to(xm, (1, Hp, Wp))
+        ym_full = cp.broadcast_to(ym, (1, Hp, Wp))
+        xm_np = cp.asnumpy(xm_full[0])
+        ym_np = cp.asnumpy(ym_full[0])
         xc_val = float(cp.asnumpy(xc[0]))
         yc_val = float(cp.asnumpy(yc[0]))
         residual_val = float(cp.asnumpy(residual[0]))
@@ -715,7 +720,7 @@ if __name__ == "__main__":
     print("  from scripts.diagnose_radial_symmetry import *")
     print()
     print("  # Run diagnosis (adjust path and params)")
-    print('  diag = run_diagnosis("path/to/image.tif", invert=True)')
+    print('  diag = run_diagnosis(img_array, invert=True)  # or "path/to/image.tif"')
     print()
     print("  # Overview plots")
     print("  plot_overview(diag)")
