@@ -165,20 +165,16 @@ def run_diagnosis(
     print(f"Logquad found {res_lq.centers_xy.shape[0]} centers")
 
     # -- Step I: Match centers between methods --
-    # Match by COARSE centroid (same connected component → same blob identity),
-    # then measure error between the correctly-paired refined centers.
-    # Using the refined radial symmetry center for matching would pair with
-    # the wrong blob when spacing is tight (3-6 px) and the estimate is off.
+    # For each radial_symmetry center, find nearest logquad center
     from scipy.spatial import cKDTree
     if res_lq.centers_xy.shape[0] > 0 and valid_mask.sum() > 0:
         tree_lq = cKDTree(res_lq.centers_xy)
-        _, match_idxs = tree_lq.query(coarse_centers[valid_mask])
-        matched_lq = res_lq.centers_xy[match_idxs]
-        dists = np.sqrt(np.sum((global_centers[valid_mask] - matched_lq)**2, axis=1))
+        dists, idxs = tree_lq.query(global_centers[valid_mask])
     else:
         dists = np.array([])
+        idxs = np.array([])
 
-    print(f"Distance (radial_sym vs logquad, matched by coarse centroid): "
+    print(f"Distance to nearest logquad center: "
           f"median={np.median(dists):.3f}, 95th={np.percentile(dists, 95):.3f}, "
           f"max={dists.max():.3f}")
 
@@ -311,13 +307,12 @@ def inspect_blob(diag: dict, blob_idx: int):
     # Convert global coords → local crop coords
     ax.plot(gc[0] - vx0, gc[1] - vy0, "r+", ms=12, mew=2, label="radial_sym")
     ax.plot(cx - vx0, cy - vy0, "bx", ms=10, mew=2, label="coarse")
-    # Find matching logquad center (match by coarse centroid, not refined)
+    # Find nearest logquad center
     if logquad_centers.shape[0] > 0:
         from scipy.spatial import cKDTree
         tree = cKDTree(logquad_centers)
-        _, idx = tree.query([cx, cy])
+        d, idx = tree.query([gc[0], gc[1]])
         lq_pt = logquad_centers[idx]
-        d = np.sqrt((gc[0] - lq_pt[0])**2 + (gc[1] - lq_pt[1])**2)
         ax.plot(lq_pt[0] - vx0, lq_pt[1] - vy0, "g+", ms=12, mew=2,
                 label=f"logquad (d={d:.2f})")
     rect = mpatches.Rectangle((x0_bb - vx0, y0_bb - vy0), roi_w, roi_h,
