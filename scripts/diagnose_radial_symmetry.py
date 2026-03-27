@@ -53,6 +53,7 @@ def run_diagnosis(
         _segment_binary,
         _extract_voronoi_rois,
         _radial_symmetry_batch_gpu,
+        refine_centers_logquad_gpu_match_cpu,
     )
     from subpx._gpu.voronoi import compute_voronoi_labels_gpu
     from subpx.components import connected_components_stats_cpu
@@ -86,6 +87,7 @@ def run_diagnosis(
     # -- Step C: Filter by area + edge (exact same filter as detect_centers_gpu) --
     H_img, W_img = g.shape
     rows = []
+    lab_ids = []
     for lab in range(1, num):
         x, y, w, h, area = comp.stats[lab]
         if area < int(area_min) or area > int(area_max):
@@ -94,6 +96,7 @@ def run_diagnosis(
             continue
         cx, cy = comp.centroids[lab]
         rows.append([x, y, w, h, cx, cy])
+        lab_ids.append(lab)
     print(f"After area + edge filter: {len(rows)} components")
 
     if len(rows) == 0:
@@ -153,52 +156,61 @@ def run_diagnosis(
     valid_mask = np.all(np.isfinite(global_centers), axis=1)
     print(f"Valid centers: {valid_mask.sum()} / {N}")
 
-    # -- Step H: Run logquad for comparison --
-    # Free GPU memory from radial symmetry before launching logquad pipeline
+    # -- Step H: Run logquad on the SAME blob set --
+    # Use refine_centers_logquad_gpu_match_cpu directly on the same blobs
+    # so we get 1:1 correspondence (no KDTree matching needed).
     cp.get_default_memory_pool().free_all_blocks()
-    print("Running logquad for comparison...")
-    from subpx.centers import detect_centers
-    res_lq = detect_centers(
-        img, backend="gpu", refine="logquad", invert=invert,
-        threshold=threshold, area_min=area_min, area_max=area_max, device=device,
+    print("Running logquad on same blob set for comparison...")
+    from subpx.backends import gpu_device
+    with gpu_device(device):
+        g_gpu = cp.asarray(np.asarray(g, dtype=np.float32), dtype=cp.float32)
+        lab_gpu = cp.asarray(np.asarray(comp.labels, dtype=np.int32), dtype=cp.int32)
+        stats_gpu = cp.asarray(np.asarray(rows, dtype=np.float32), dtype=cp.float32)
+        lab_ids_gpu = cp.asarray(np.asarray(lab_ids, dtype=np.int32), dtype=cp.int32)
+        refined_gpu, ok_gpu = refine_centers_logquad_gpu_match_cpu(
+            g_gpu, lab_gpu, stats_gpu, lab_ids_gpu,
+            pad=pad, batch=max(1, int(gpu_batch)),
+        )
+        logquad_centers = cp.asnumpy(refined_gpu)  # (N, 2) [x, y]
+        logquad_ok = cp.asnumpy(ok_gpu).astype(bool)
+    print(f"Logquad OK: {logquad_ok.sum()} / {N}")
+
+    # -- Step I: Per-blob distance (1:1 correspondence) --
+    both_valid = valid_mask & logquad_ok
+    dists = np.full(N, np.inf)
+    dists[both_valid] = np.sqrt(
+        (global_centers[both_valid, 0] - logquad_centers[both_valid, 0]) ** 2
+        + (global_centers[both_valid, 1] - logquad_centers[both_valid, 1]) ** 2
     )
-    print(f"Logquad found {res_lq.centers_xy.shape[0]} centers")
-
-    # -- Step I: Match centers between methods --
-    # For each radial_symmetry center, find nearest logquad center
-    from scipy.spatial import cKDTree
-    if res_lq.centers_xy.shape[0] > 0 and valid_mask.sum() > 0:
-        tree_lq = cKDTree(res_lq.centers_xy)
-        dists, idxs = tree_lq.query(global_centers[valid_mask])
+    valid_dists = dists[both_valid]
+    if valid_dists.size > 0:
+        print(f"Distance (same-blob): "
+              f"median={np.median(valid_dists):.3f}, 95th={np.percentile(valid_dists, 95):.3f}, "
+              f"max={valid_dists.max():.3f}")
     else:
-        dists = np.array([])
-        idxs = np.array([])
-
-    print(f"Distance to nearest logquad center: "
-          f"median={np.median(dists):.3f}, 95th={np.percentile(dists, 95):.3f}, "
-          f"max={dists.max():.3f}")
+        print("No blobs with both valid radial_sym and logquad centers.")
 
     # -- Select sample blobs --
-    valid_indices = np.where(valid_mask)[0]
-    # Map dists back to full-array indices
-    dist_full = np.full(N, np.inf)
-    dist_full[valid_indices] = dists
+    both_indices = np.where(both_valid)[0]
 
     # Worst: largest distance to logquad
-    worst_idx = np.argsort(dist_full[valid_indices])[::-1][:n_worst]
-    worst_blob_ids = valid_indices[worst_idx]
+    worst_idx = np.argsort(dists[both_indices])[::-1][:n_worst]
+    worst_blob_ids = both_indices[worst_idx]
 
     # Random
     rng = np.random.default_rng(42)
-    rand_pool = valid_indices[dist_full[valid_indices] < np.median(dists) * 3]
+    if valid_dists.size > 0:
+        rand_pool = both_indices[dists[both_indices] < np.median(valid_dists) * 3]
+    else:
+        rand_pool = both_indices
     if len(rand_pool) > n_random:
         random_blob_ids = rng.choice(rand_pool, n_random, replace=False)
     else:
         random_blob_ids = rand_pool[:n_random]
 
     # Good: closest to logquad (sanity check)
-    good_idx = np.argsort(dist_full[valid_indices])[:5]
-    good_blob_ids = valid_indices[good_idx]
+    good_idx = np.argsort(dists[both_indices])[:5]
+    good_blob_ids = both_indices[good_idx]
 
     sample_ids = np.unique(np.concatenate([worst_blob_ids, random_blob_ids, good_blob_ids]))
 
@@ -211,7 +223,9 @@ def run_diagnosis(
         "img": img,
         "g": g,
         "bw": bw,
+        "comp": comp,
         "rows": rows,
+        "lab_ids": lab_ids,
         "rows_arr": rows_arr,
         "coarse_centers": coarse_centers,
         "voronoi_labels": voronoi_labels,
@@ -223,8 +237,9 @@ def run_diagnosis(
         "residuals": residuals,
         "global_centers": global_centers,
         "valid_mask": valid_mask,
-        "logquad_centers": res_lq.centers_xy,
-        "dist_to_logquad": dist_full,
+        "logquad_centers": logquad_centers,
+        "logquad_ok": logquad_ok,
+        "dist_to_logquad": dists,
         "sample_ids": sample_ids,
         "worst_blob_ids": worst_blob_ids,
         "good_blob_ids": good_blob_ids,
@@ -307,12 +322,11 @@ def inspect_blob(diag: dict, blob_idx: int):
     # Convert global coords → local crop coords
     ax.plot(gc[0] - vx0, gc[1] - vy0, "r+", ms=12, mew=2, label="radial_sym")
     ax.plot(cx - vx0, cy - vy0, "bx", ms=10, mew=2, label="coarse")
-    # Find nearest logquad center
-    if logquad_centers.shape[0] > 0:
-        from scipy.spatial import cKDTree
-        tree = cKDTree(logquad_centers)
-        d, idx = tree.query([gc[0], gc[1]])
-        lq_pt = logquad_centers[idx]
+    # Show logquad center for the SAME blob (1:1 correspondence)
+    logquad_ok = diag["logquad_ok"]
+    if logquad_ok[j]:
+        lq_pt = logquad_centers[j]
+        d = dist_to_lq[j]
         ax.plot(lq_pt[0] - vx0, lq_pt[1] - vy0, "g+", ms=12, mew=2,
                 label=f"logquad (d={d:.2f})")
     rect = mpatches.Rectangle((x0_bb - vx0, y0_bb - vy0), roi_w, roi_h,
