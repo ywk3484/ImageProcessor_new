@@ -30,6 +30,7 @@ def run_diagnosis(
     pad: int = 3,
     upsample_factor: int = 4,
     device: int = 0,
+    gpu_batch: int = 4096,
     n_worst: int = 10,
     n_random: int = 5,
     crop_region: tuple[int, int, int, int] | None = None,
@@ -82,15 +83,18 @@ def run_diagnosis(
     num = comp.num_labels
     print(f"Connected components: {num - 1} (excluding background)")
 
-    # -- Step C: Filter by area --
+    # -- Step C: Filter by area + edge (exact same filter as detect_centers_gpu) --
+    H_img, W_img = g.shape
     rows = []
     for lab in range(1, num):
         x, y, w, h, area = comp.stats[lab]
-        if area < area_min or area > area_max:
+        if area < int(area_min) or area > int(area_max):
+            continue
+        if x <= 0 or y <= 0 or x + w >= W_img or y + h >= H_img:
             continue
         cx, cy = comp.centroids[lab]
         rows.append([x, y, w, h, cx, cy])
-    print(f"After area filter: {len(rows)} components")
+    print(f"After area + edge filter: {len(rows)} components")
 
     if len(rows) == 0:
         print("No components found! Check area_min/area_max.")
@@ -117,17 +121,29 @@ def run_diagnosis(
     print(f"ROI stack shape: {rois_stack.shape}")
     print(f"Mask stack shape: {masks_stack.shape}")
 
-    # -- Step F: Run radial symmetry --
-    print("Running radial symmetry refinement...")
-    local_centers, residuals = _radial_symmetry_batch_gpu(
-        rois_stack, masks_stack, upsample_factor=upsample_factor, device=device,
-    )
+    # -- Step F: Run radial symmetry (batched to avoid GPU OOM) --
+    # _radial_symmetry_batch_gpu does 4× upsample + ~10 intermediate arrays of
+    # size (N, H*4, W*4).  Processing all N at once easily exceeds VRAM.
+    N = len(rows)
+    print(f"Running radial symmetry refinement ({N} blobs, batch={gpu_batch})...")
+    local_centers_parts = []
+    residuals_parts = []
+    for bi in range(0, N, gpu_batch):
+        be = min(bi + gpu_batch, N)
+        lc, res = _radial_symmetry_batch_gpu(
+            rois_stack[bi:be], masks_stack[bi:be],
+            upsample_factor=upsample_factor, device=device,
+        )
+        local_centers_parts.append(lc)
+        residuals_parts.append(res)
+        cp.get_default_memory_pool().free_all_blocks()
+    local_centers = np.concatenate(local_centers_parts)
+    residuals = np.concatenate(residuals_parts)
     print(f"Local centers shape: {local_centers.shape}")
     print(f"Residuals: min={residuals.min():.6f}, max={residuals.max():.6f}, "
           f"median={np.median(residuals):.6f}")
 
     # -- Step G: Transform to image coordinates --
-    N = len(rows)
     global_centers = np.empty((N, 2), dtype=np.float64)
     for j in range(N):
         x0, y0 = origins[j]
@@ -138,11 +154,13 @@ def run_diagnosis(
     print(f"Valid centers: {valid_mask.sum()} / {N}")
 
     # -- Step H: Run logquad for comparison --
+    # Free GPU memory from radial symmetry before launching logquad pipeline
+    cp.get_default_memory_pool().free_all_blocks()
     print("Running logquad for comparison...")
     from subpx.centers import detect_centers
     res_lq = detect_centers(
         img, backend="gpu", refine="logquad", invert=invert,
-        area_min=area_min, area_max=area_max, device=device,
+        threshold=threshold, area_min=area_min, area_max=area_max, device=device,
     )
     print(f"Logquad found {res_lq.centers_xy.shape[0]} centers")
 
