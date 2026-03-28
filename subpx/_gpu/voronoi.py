@@ -223,21 +223,39 @@ def compute_voronoi_labels_gpu(
                  np.int64(HW), np.int32(W), np.int32(N)),
             )
         else:
-            # Cell size ≈ average seed spacing; search 5×5 neighborhood
+            # Cell size ≈ average seed spacing
             cell_size = max(16, int(np.sqrt(HW / N)))
-            search_radius = 2
 
-            sorted_idx, cell_start, gw, gh = _bin_seeds_to_grid(
-                seeds_gpu, H, W, cell_size,
-            )
-            kernel = _get_kernel(device, "voronoi_grid")
-            kernel(
-                (grid,), (block,),
-                (seeds_gpu, sorted_idx, cell_start, labels_gpu,
-                 np.int64(HW), np.int32(W),
-                 np.int32(gw), np.int32(gh),
-                 np.int32(cell_size), np.int32(search_radius)),
-            )
+            # Compute max nearest-neighbor distance to set search_radius
+            # O(N^2) on GPU — N is small (typically <50k seeds)
+            diffs = seeds_gpu[:, None, :] - seeds_gpu[None, :, :]  # (N, N, 2)
+            d2 = (diffs * diffs).sum(axis=2)  # (N, N)
+            # Set self-distance to inf
+            d2[cp.arange(N), cp.arange(N)] = cp.float32(1e30)
+            max_nn_dist = float(cp.sqrt(d2.min(axis=1).max()))
+
+            search_radius = int(np.ceil(max_nn_dist / cell_size)) + 1
+
+            # Fall back to brute-force if search would be too wide
+            if search_radius > 5:
+                kernel = _get_kernel(device, "voronoi_brute")
+                kernel(
+                    (grid,), (block,),
+                    (seeds_gpu, labels_gpu,
+                     np.int64(HW), np.int32(W), np.int32(N)),
+                )
+            else:
+                sorted_idx, cell_start, gw, gh = _bin_seeds_to_grid(
+                    seeds_gpu, H, W, cell_size,
+                )
+                kernel = _get_kernel(device, "voronoi_grid")
+                kernel(
+                    (grid,), (block,),
+                    (seeds_gpu, sorted_idx, cell_start, labels_gpu,
+                     np.int64(HW), np.int32(W),
+                     np.int32(gw), np.int32(gh),
+                     np.int32(cell_size), np.int32(search_radius)),
+                )
 
         labels_gpu = labels_gpu.reshape(H, W)
         return cp.asnumpy(labels_gpu)
