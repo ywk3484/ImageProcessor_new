@@ -336,9 +336,16 @@ def inspect_blob(diag: dict, blob_idx: int):
     ax.set_title(f"Blob {j}: Image context (crop [{vy0}:{vy1}, {vx0}:{vx1}])")
 
     # 1b: Voronoi labels around blob
+    # Use shuffled random colors — tab20 has only 20 colors, causing
+    # cells with indices differing by 20 to look identical (false merging).
     ax = axes[1]
     vlabels = voronoi_labels[vy0:vy1, vx0:vx1]
-    ax.imshow(vlabels, cmap="tab20", origin="upper")
+    n_labels = int(voronoi_labels.max()) + 1
+    from matplotlib.colors import ListedColormap
+    _rng_colors = np.random.default_rng(0)
+    _label_colors = _rng_colors.random((max(n_labels, 1), 3))
+    voronoi_cmap = ListedColormap(_label_colors)
+    ax.imshow(vlabels, cmap=voronoi_cmap, origin="upper", interpolation="nearest")
     ax.plot(gc[0] - vx0, gc[1] - vy0, "r+", ms=12, mew=2)
     ax.set_title(f"Voronoi labels (this blob = {j})")
 
@@ -444,7 +451,7 @@ def _inspect_radial_symmetry_steps(
     from subpx.backends import gpu_device
 
     N = 1  # single ROI
-    boundary_margin = factor
+    boundary_margin = max(1, factor // 2)
 
     with gpu_device(device):
         orig_h, orig_w = rois.shape[1], rois.shape[2]
@@ -478,6 +485,18 @@ def _inspect_radial_symmetry_steps(
 
         dIdu = I[:, :Hp, 1:Wp+1] - I[:, 1:Hp+1, :Wp]
         dIdv = I[:, :Hp, :Wp]    - I[:, 1:Hp+1, 1:Wp+1]
+
+        # Step 5b: Smooth gradients with 3x3 averaging (matching production)
+        if Hp >= 3 and Wp >= 3:
+            def _smooth3x3(arr):
+                p = cp.pad(arr, ((0, 0), (1, 1), (1, 1)), mode="edge")
+                return (
+                    p[:, 0:-2, 0:-2] + p[:, 0:-2, 1:-1] + p[:, 0:-2, 2:]
+                    + p[:, 1:-1, 0:-2] + p[:, 1:-1, 1:-1] + p[:, 1:-1, 2:]
+                    + p[:, 2:,   0:-2] + p[:, 2:,   1:-1] + p[:, 2:,   2:]
+                ) / 9.0
+            dIdu = _smooth3x3(dIdu)
+            dIdv = _smooth3x3(dIdv)
 
         # Step 6: Valid midpoints
         m00 = m_eroded[:, :Hp, :Wp]
@@ -518,12 +537,13 @@ def _inspect_radial_symmetry_steps(
         dist = cp.sqrt(cp.maximum(dist_sq, cp.float64(1e-30)))
         w = cp.where(valid, grad_mag_sq / dist, cp.float64(0.0))
 
-        # Step 11: Solve
-        sw = w.sum(axis=(1, 2))
-        smmw = (slope**2 * w).sum(axis=(1, 2))
-        smw = (slope * w).sum(axis=(1, 2))
-        smbw = (slope * b * w).sum(axis=(1, 2))
-        sbw = (b * w).sum(axis=(1, 2))
+        # Step 11: Solve (with perpendicular-distance normalization)
+        wm2p1 = w / (slope**2 + 1.0)
+        sw = wm2p1.sum(axis=(1, 2))
+        smmw = (slope**2 * wm2p1).sum(axis=(1, 2))
+        smw = (slope * wm2p1).sum(axis=(1, 2))
+        smbw = (slope * b * wm2p1).sum(axis=(1, 2))
+        sbw = (b * wm2p1).sum(axis=(1, 2))
         det = smmw * sw - smw * smw
         det_safe = cp.where(cp.abs(det) < 1e-30, cp.float64(1e-30), det)
         xc = (-smbw * sw + smw * sbw) / det_safe

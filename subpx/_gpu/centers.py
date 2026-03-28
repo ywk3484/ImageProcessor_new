@@ -1004,7 +1004,7 @@ def _radial_symmetry_batch_gpu(
         return np.empty((0, 2), dtype=np.float64), np.empty((0,), dtype=np.float64)
 
     if boundary_margin is None:
-        boundary_margin = upsample_factor
+        boundary_margin = max(1, upsample_factor // 2)
 
     with gpu_device(device):
         # -- Step 1: Track per-ROI original dimensions (from mask extent) --
@@ -1066,6 +1066,20 @@ def _radial_symmetry_batch_gpu(
         dIdu = I[:, :Hp, 1:Wp+1] - I[:, 1:Hp+1, :Wp]       # (N, Hp, Wp)
         dIdv = I[:, :Hp, :Wp]    - I[:, 1:Hp+1, 1:Wp+1]     # (N, Hp, Wp)
 
+        # -- Step 5b: Smooth gradients with 3x3 averaging (Parthasarathy reference) --
+        # Reduces noise in gradient field; original paper reports error reduction
+        # from 0.04 to 0.027 pixels with this smoothing.
+        if Hp >= 3 and Wp >= 3:
+            def _smooth3x3(arr):
+                p = cp.pad(arr, ((0, 0), (1, 1), (1, 1)), mode="edge")
+                return (
+                    p[:, 0:-2, 0:-2] + p[:, 0:-2, 1:-1] + p[:, 0:-2, 2:]
+                    + p[:, 1:-1, 0:-2] + p[:, 1:-1, 1:-1] + p[:, 1:-1, 2:]
+                    + p[:, 2:,   0:-2] + p[:, 2:,   1:-1] + p[:, 2:,   2:]
+                ) / 9.0
+            dIdu = _smooth3x3(dIdu)
+            dIdv = _smooth3x3(dIdv)
+
         # -- Step 6: Midpoint validity mask: all 4 surrounding pixels inside eroded mask --
         m00 = m_eroded[:, :Hp, :Wp]
         m01 = m_eroded[:, :Hp, 1:Wp+1]
@@ -1118,17 +1132,15 @@ def _radial_symmetry_batch_gpu(
 
         # -- Step 11: Analytic 2x2 solve --
         # Weighted least squares for intersection of lines y = m*x + b
-        # Minimize sum_k w_k * (y_k - m_k * x_k - b_k)^2 over (xc, yc)
-        # where each line constraint is: yc = slope_k * xc + b_k
-        # Rearranging: slope_k * xc - yc + b_k = 0
-        # Normal equations:
-        #   [sum(m^2*w)  -sum(m*w)] [xc]   [-sum(m*b*w)]
-        #   [-sum(m*w)    sum(w)  ] [yc] = [ sum(b*w)  ]
-        sw = w.sum(axis=(1, 2))       # (N,)
-        smmw = (slope**2 * w).sum(axis=(1, 2))  # (N,)
-        smw = (slope * w).sum(axis=(1, 2))       # (N,)
-        smbw = (slope * b * w).sum(axis=(1, 2))  # (N,)
-        sbw = (b * w).sum(axis=(1, 2))           # (N,)
+        # Minimize sum_k w_k * (m_k*xc - yc + b_k)^2 / (m_k^2 + 1)
+        # The 1/(m^2+1) converts from vertical to perpendicular distance.
+        # Reference: Parthasarathy, Nature Methods 9:724 (2012), radialcenter.m
+        wm2p1 = w / (slope**2 + 1.0)    # (N, Hp, Wp) perpendicular-distance normalized
+        sw = wm2p1.sum(axis=(1, 2))       # (N,)
+        smmw = (slope**2 * wm2p1).sum(axis=(1, 2))  # (N,)
+        smw = (slope * wm2p1).sum(axis=(1, 2))       # (N,)
+        smbw = (slope * b * wm2p1).sum(axis=(1, 2))  # (N,)
+        sbw = (b * wm2p1).sum(axis=(1, 2))           # (N,)
 
         det = smmw * sw - smw * smw  # (N,)
         det_safe = cp.where(cp.abs(det) < 1e-30, cp.float64(1e-30), det)
