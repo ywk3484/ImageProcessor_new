@@ -1143,9 +1143,10 @@ def _radial_symmetry_batch_gpu(
         sbw = (b * wm2p1).sum(axis=(1, 2))           # (N,)
 
         det = smmw * sw - smw * smw  # (N,)
-        det_safe = cp.where(cp.abs(det) < 1e-30, cp.float64(1e-30), det)
-        xc = (-smbw * sw + smw * sbw) / det_safe   # (N,)
-        yc = (smmw * sbw - smbw * smw) / det_safe   # (N,)
+        bad_det = cp.abs(det) < cp.float64(1e-30)
+        det_safe = cp.where(bad_det, cp.float64(1.0), det)
+        xc = cp.where(bad_det, cp.nan, (-smbw * sw + smw * sbw) / det_safe)
+        yc = cp.where(bad_det, cp.nan, (smmw * sbw - smbw * smw) / det_safe)
 
         # -- Step 12: Residual: weighted mean perpendicular distance squared --
         # perpendicular distance from point (xm, ym) to line yc = slope*xc + b
