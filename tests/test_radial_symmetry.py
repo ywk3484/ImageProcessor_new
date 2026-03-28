@@ -400,3 +400,50 @@ def test_triangle_detects_more_faint_blobs_than_otsu():
     assert n_tri > n_otsu, (
         f"Triangle ({n_tri} blobs) should detect more blobs than Otsu ({n_otsu} blobs)"
     )
+
+
+@skipno_gpu
+def test_radial_symmetry_roundtrip_accuracy():
+    """Full-pipeline coordinate roundtrip: known subpixel → detect → verify.
+
+    Places a 3×3 grid of Gaussian blobs at known subpixel positions,
+    runs detect_centers(refine="radial_symmetry"), and verifies returned
+    positions match ground truth within 0.15 px.
+    """
+    from subpx.centers import detect_centers
+    from scipy.spatial import cKDTree
+
+    # 3×3 grid of blobs with known subpixel offsets
+    img = np.zeros((100, 100), dtype=np.float64)
+    yy, xx = np.mgrid[:100, :100]
+    true_positions = []
+    for row in range(3):
+        for col in range(3):
+            cx = 20.0 + col * 25.0 + 0.37  # subpixel offset
+            cy = 20.0 + row * 25.0 + 0.62  # subpixel offset
+            img += 200 * np.exp(-((xx - cx)**2 + (yy - cy)**2) / (2 * 2.0**2))
+            true_positions.append([cx, cy])
+    true_positions = np.array(true_positions)
+    img = np.clip(img, 0, 255).astype(np.uint8)
+
+    res = detect_centers(
+        img, backend="gpu", refine="radial_symmetry",
+        area_min=4, area_max=200, upsample_factor=4,
+    )
+
+    assert res.centers_xy.shape[0] == 9, (
+        f"Expected 9 centers, got {res.centers_xy.shape[0]}"
+    )
+
+    # Match detected to true positions
+    tree = cKDTree(true_positions)
+    dists, indices = tree.query(res.centers_xy)
+
+    # Each detected center should match a unique true position
+    assert len(set(indices)) == 9, "Not all true positions matched uniquely"
+
+    # Accuracy check
+    assert np.all(dists < 0.15), (
+        f"Max roundtrip error {dists.max():.4f} px exceeds 0.15 px threshold. "
+        f"Errors: {dists}"
+    )
