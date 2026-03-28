@@ -88,3 +88,38 @@ def test_voronoi_grid_matches_brute_force():
 
     # Both use FP32 — identical distance comparisons → identical labels
     assert np.array_equal(grid_labels, brute_labels)
+
+
+@skipno_gpu
+def test_voronoi_grid_matches_brute_clustered():
+    """Grid-accelerated kernel matches brute-force for CLUSTERED seeds.
+
+    Seeds are clustered in the top-left quadrant, leaving large empty gaps.
+    This is the adversarial case for grid-accelerated lookup — pixels in the
+    empty region must search many grid cells to find their nearest seed.
+    Validates Fix A (adaptive search_radius).
+    """
+    from subpx._gpu.voronoi import compute_voronoi_labels_gpu
+    import subpx._gpu.voronoi as voronoi_mod
+
+    rng = np.random.default_rng(99)
+    N = 400  # above _GRID_THRESHOLD=256
+    H, W = 200, 300
+    # All seeds in top-left quadrant
+    seeds = rng.uniform(0, [W / 2, H / 2], size=(N, 2)).astype(np.float32)
+
+    # Grid-accelerated (default)
+    grid_labels = compute_voronoi_labels_gpu(seeds, (H, W), device=0)
+
+    # Force brute-force
+    old = voronoi_mod._GRID_THRESHOLD
+    voronoi_mod._GRID_THRESHOLD = 10_000
+    try:
+        brute_labels = compute_voronoi_labels_gpu(seeds, (H, W), device=0)
+    finally:
+        voronoi_mod._GRID_THRESHOLD = old
+
+    assert np.array_equal(grid_labels, brute_labels), (
+        f"Grid labels differ from brute-force for clustered seeds: "
+        f"{(grid_labels != brute_labels).sum()} pixels differ"
+    )
