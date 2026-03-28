@@ -977,6 +977,7 @@ def _radial_symmetry_batch_gpu(
     *,
     upsample_factor: int = 4,
     boundary_margin: int | None = None,
+    residual_max: float | None = None,
     device: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Batch Parthasarathy radial symmetry center estimation on GPU.
@@ -987,6 +988,7 @@ def _radial_symmetry_batch_gpu(
     masks : (N, H, W) bool array -- Voronoi cell masks (True = valid pixel)
     upsample_factor : int -- bicubic upsampling factor (1 = disabled)
     boundary_margin : int or None -- gradient margin near Voronoi boundary
+    residual_max : float or None -- if set, reject centers with residual > this value
     device : int -- GPU device
 
     Returns
@@ -1189,6 +1191,12 @@ def _radial_symmetry_batch_gpu(
 
         centers[i, 0] = xc_orig
         centers[i, 1] = yc_orig
+
+    # -- Quality gate 2: residual threshold --
+    if residual_max is not None:
+        bad_residual = residual_cpu > residual_max
+        centers[bad_residual] = np.nan
+        residual_cpu[bad_residual] = np.inf
 
     return centers, residual_cpu
 
