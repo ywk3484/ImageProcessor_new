@@ -123,6 +123,62 @@ void voronoi_grid(
 }
 """
 
+_NN_DIST_KERNEL_SRC = r"""
+extern "C" __global__
+void nn_dist_grid(
+    const float* __restrict__ seeds,
+    const int* __restrict__ sorted_indices,
+    const int* __restrict__ cell_start,
+    float* __restrict__ nn_d2,
+    const int N,
+    const int grid_w, const int grid_h,
+    const int cell_size, const int nn_search_radius
+) {
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= N) return;
+
+    float sx = seeds[2 * i];
+    float sy = seeds[2 * i + 1];
+
+    int cx = (int)(sx / (float)cell_size);
+    int cy = (int)(sy / (float)cell_size);
+    if (cx < 0) cx = 0;
+    if (cx >= grid_w) cx = grid_w - 1;
+    if (cy < 0) cy = 0;
+    if (cy >= grid_h) cy = grid_h - 1;
+
+    float best_d2 = 1e30f;
+
+    int cx_lo = cx - nn_search_radius;
+    int cx_hi = cx + nn_search_radius;
+    int cy_lo = cy - nn_search_radius;
+    int cy_hi = cy + nn_search_radius;
+    if (cx_lo < 0) cx_lo = 0;
+    if (cy_lo < 0) cy_lo = 0;
+    if (cx_hi >= grid_w) cx_hi = grid_w - 1;
+    if (cy_hi >= grid_h) cy_hi = grid_h - 1;
+
+    for (int gy = cy_lo; gy <= cy_hi; gy++) {
+        for (int gx = cx_lo; gx <= cx_hi; gx++) {
+            int cell_idx = gy * grid_w + gx;
+            int start = cell_start[cell_idx];
+            int end   = cell_start[cell_idx + 1];
+
+            for (int k = start; k < end; k++) {
+                int j = sorted_indices[k];
+                if (j == i) continue;
+                float dx = sx - seeds[2 * j];
+                float dy = sy - seeds[2 * j + 1];
+                float d2 = dx * dx + dy * dy;
+                if (d2 < best_d2) best_d2 = d2;
+            }
+        }
+    }
+
+    nn_d2[i] = best_d2;
+}
+"""
+
 _kernel_cache: dict[tuple[int, str], object] = {}
 
 # Auto-select threshold: grid for N >= this, brute-force below
@@ -134,7 +190,8 @@ def _get_kernel(device: int, name: str):
     key = (device, name)
     if key not in _kernel_cache:
         src = {"voronoi_brute": _BRUTE_KERNEL_SRC,
-               "voronoi_grid": _GRID_KERNEL_SRC}[name]
+               "voronoi_grid": _GRID_KERNEL_SRC,
+               "nn_dist_grid": _NN_DIST_KERNEL_SRC}[name]
         _kernel_cache[key] = cp.RawKernel(src, name)
     return _kernel_cache[key]
 
@@ -170,6 +227,34 @@ def _bin_seeds_to_grid(seeds_gpu, H, W, cell_size):
     cp.cumsum(counts, out=cell_start[1:])
 
     return order.astype(cp.int32), cell_start, grid_w, grid_h
+
+
+def _max_nn_dist_via_grid(seeds_gpu, sorted_idx, cell_start,
+                          grid_w, grid_h, cell_size, device):
+    """Max nearest-neighbor distance among seeds via grid-local search.
+
+    Returns float.  If any seed has no neighbor within the search window
+    (5x5 grid cells), returns ``inf`` so the caller falls back to
+    brute-force Voronoi.
+    """
+    N = seeds_gpu.shape[0]
+    nn_search_radius = 2  # 5×5 cells
+
+    nn_d2 = cp.empty(N, dtype=cp.float32)
+    block = 256
+    grid = (N + block - 1) // block
+    kernel = _get_kernel(device, "nn_dist_grid")
+    kernel(
+        (grid,), (block,),
+        (seeds_gpu, sorted_idx, cell_start, nn_d2,
+         np.int32(N), np.int32(grid_w), np.int32(grid_h),
+         np.int32(cell_size), np.int32(nn_search_radius)),
+    )
+
+    max_d2 = float(nn_d2.max())
+    if max_d2 >= 1e29:  # at least one seed found no neighbor
+        return float("inf")
+    return float(cp.sqrt(cp.float32(max_d2)))
 
 
 def compute_voronoi_labels_gpu(
@@ -226,15 +311,22 @@ def compute_voronoi_labels_gpu(
             # Cell size ≈ average seed spacing
             cell_size = max(16, int(np.sqrt(HW / N)))
 
-            # Compute max nearest-neighbor distance to set search_radius
-            # O(N^2) on GPU — N is small (typically <50k seeds)
-            diffs = seeds_gpu[:, None, :] - seeds_gpu[None, :, :]  # (N, N, 2)
-            d2 = (diffs * diffs).sum(axis=2)  # (N, N)
-            # Set self-distance to inf
-            d2[cp.arange(N), cp.arange(N)] = cp.float32(1e30)
-            max_nn_dist = float(cp.sqrt(d2.min(axis=1).max()))
+            # Bin seeds into grid (reused for both NN search and Voronoi)
+            sorted_idx, cell_start, gw, gh = _bin_seeds_to_grid(
+                seeds_gpu, H, W, cell_size,
+            )
 
-            search_radius = int(np.ceil(max_nn_dist / cell_size)) + 1
+            # Compute max nearest-neighbor distance via grid-local
+            # search: O(N*K) instead of O(N^2).
+            max_nn_dist = _max_nn_dist_via_grid(
+                seeds_gpu, sorted_idx, cell_start,
+                gw, gh, cell_size, device,
+            )
+
+            if not np.isfinite(max_nn_dist):
+                search_radius = 999  # force brute-force
+            else:
+                search_radius = int(np.ceil(max_nn_dist / cell_size)) + 1
 
             # Fall back to brute-force if search would be too wide
             if search_radius > 5:
@@ -245,9 +337,6 @@ def compute_voronoi_labels_gpu(
                      np.int64(HW), np.int32(W), np.int32(N)),
                 )
             else:
-                sorted_idx, cell_start, gw, gh = _bin_seeds_to_grid(
-                    seeds_gpu, H, W, cell_size,
-                )
                 kernel = _get_kernel(device, "voronoi_grid")
                 kernel(
                     (grid,), (block,),
