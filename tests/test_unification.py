@@ -123,3 +123,49 @@ def test_detect_single_tile_gpu_exists():
     )
     assert centers.shape == (2, 2)
     assert isinstance(meta, dict)
+
+
+@skipno_gpu
+def test_detect_centers_gpu_tiled_basic():
+    """detect_centers_gpu with tile_h should produce centers from a tall image."""
+    from subpx._gpu.centers import detect_centers_gpu
+    from subpx.types import CenterResult
+
+    def _make_dot_grid(rows, cols, spacing, dot_size, margin):
+        H = 2 * margin + (rows - 1) * spacing + dot_size
+        W = 2 * margin + (cols - 1) * spacing + dot_size
+        img = np.zeros((H, W), dtype=np.uint8)
+        expected = []
+        for r in range(rows):
+            for c in range(cols):
+                y0 = margin + r * spacing
+                x0 = margin + c * spacing
+                img[y0:y0+dot_size, x0:x0+dot_size] = 255
+                expected.append([x0 + (dot_size-1)/2.0, y0 + (dot_size-1)/2.0])
+        return img, np.array(expected, dtype=np.float64)
+
+    img, expected = _make_dot_grid(rows=10, cols=4, spacing=20, dot_size=3, margin=10)
+    H = img.shape[0]
+    result = detect_centers_gpu(
+        img, tile_h=H // 3, overlap=30, threshold_mode="global",
+        area_min=1, area_max=50, refine="weighted",
+    )
+    assert isinstance(result, CenterResult)
+    assert abs(result.centers_xy.shape[0] - expected.shape[0]) <= 2
+
+
+@skipno_gpu
+def test_detect_centers_gpu_tiled_threshold_modes():
+    """Both 'global' and 'per_tile' threshold modes should work."""
+    from subpx._gpu.centers import detect_centers_gpu
+
+    img = np.zeros((200, 100), dtype=np.uint8)
+    img[20:24, 20:24] = 200
+    img[120:124, 60:64] = 200
+
+    for mode in ("global", "per_tile"):
+        result = detect_centers_gpu(
+            img, tile_h=100, overlap=20, threshold_mode=mode,
+            area_min=4, area_max=100, refine="weighted",
+        )
+        assert result.centers_xy.shape[0] == 2, f"mode={mode}: expected 2 centers"

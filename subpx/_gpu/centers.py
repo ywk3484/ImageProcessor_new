@@ -1808,9 +1808,58 @@ def detect_centers_gpu(
     components_backend: str = "cpu",
     small_feature_max: float = 12.0,
     upsample_factor: int = 4,
+    # Tiling parameters (tile_h=None means non-tiled, single-shot detection)
+    tile_h: int | None = None,
+    overlap: int = 128,
+    threshold_mode: str = "auto",
+    otsu_downsample: int = 4,
+    thr_scale: float = 0.8,
+    dedupe_eps: float = 1.5,
 ) -> CenterResult:
-    centers, meta = _detect_single_tile_gpu(
-        image,
+    # --- Non-tiled path: single-shot detection (original behavior) ---
+    if tile_h is None:
+        centers, meta = _detect_single_tile_gpu(
+            image,
+            threshold=threshold, invert=invert,
+            area_min=area_min, area_max=area_max,
+            morph_open=morph_open, morph_close=morph_close,
+            pad=pad, refine=refine, connectivity=connectivity,
+            gpu_batch=gpu_batch, device=device,
+            use_float64=use_float64,
+            components_backend=components_backend,
+            small_feature_max=small_feature_max,
+            upsample_factor=upsample_factor,
+            pre_threshold=None,
+        )
+        return CenterResult(
+            centers_xy=centers,
+            method=f"threshold={threshold}, refine={refine}",
+            backend="gpu",
+            meta=meta,
+        )
+
+    # --- Tiled path: split image into overlapping horizontal tiles ---
+    import cv2
+
+    img = np.asarray(image)
+    if img.ndim != 2:
+        raise ValueError("Expected 2D grayscale image")
+    H, W = img.shape
+
+    if overlap >= tile_h:
+        raise ValueError("overlap must be < tile_h")
+
+    # Compute global threshold if needed
+    pre_threshold = None
+    if threshold_mode in ("global", "auto"):
+        ds = max(1, int(otsu_downsample))
+        thr_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+        g_ds = img[::ds, ::ds]
+        otsu_thresh, _ = cv2.threshold(g_ds, 0, 255, thr_type | cv2.THRESH_OTSU)
+        pre_threshold = float(otsu_thresh) * float(thr_scale)
+
+    # Detection kwargs for _detect_single_tile_gpu
+    detection_kwargs = dict(
         threshold=threshold, invert=invert,
         area_min=area_min, area_max=area_max,
         morph_open=morph_open, morph_close=morph_close,
@@ -1820,282 +1869,39 @@ def detect_centers_gpu(
         components_backend=components_backend,
         small_feature_max=small_feature_max,
         upsample_factor=upsample_factor,
-        pre_threshold=None,
     )
-    return CenterResult(
-        centers_xy=centers,
-        method=f"threshold={threshold}, refine={refine}",
-        backend="gpu",
-        meta=meta,
-    )
-
-
-def _detect_centers_tiled_gpu(
-    image: np.ndarray,
-    *,
-    invert: bool = False,
-    area_min: int = 1,
-    area_max: int = 50,
-    morph_open: int = 0,
-    morph_close: int = 0,
-    tile_h: int = 8192,
-    overlap: int = 128,
-    otsu_downsample: int = 4,
-    thr_scale: float = 0.8,
-    refine: str = "edge_gradmoment",
-    connectivity: int = 8,
-    device: int = 0,
-    # edge_gradmoment / edge_erf shared params
-    band_rad: int = 4,
-    edge_rad: int = 10,
-    smooth_passes: int = 2,
-    loc_rad: int = 3,
-    grad_power: float = 8.0,
-    iters: int = 2,
-    # edge_erf-specific params
-    erf_fit_rad: int = 5,
-    erf_gn_iters: int = 5,
-    erf_init_sigma: float = 1.25,
-    erf_sigma_min: float = 0.35,
-    erf_sigma_max: float = 6.0,
-    erf_max_shift: float = 2.5,
-    erf_damp: float = 1e-4,
-    erf_cond_max: float = 1e8,
-    # logquad/weighted params
-    pad: int = 3,
-    gpu_batch: int = 4096,
-    use_float64: bool = True,
-    small_feature_max: float = 12.0,
-    # Voronoi method params
-    upsample_factor: int = 4,
-) -> CenterResult:
-    """Dedicated tiled GPU center detection pipeline.
-
-    Optimized: single device context, RawKernel CC stats, GPU-side filtering,
-    core refinement functions called directly (no GPU↔CPU transfers in the loop).
-    """
-    _require_cupy()
-    try:
-        import cv2
-    except ImportError as exc:
-        raise RuntimeError("OpenCV is required for tiled GPU center detection.") from exc
-
-    g = np.asarray(image)
-    if g.ndim != 2:
-        raise ValueError("Expected 2D grayscale image")
-    H, W = g.shape
-
-    if overlap >= tile_h:
-        raise ValueError("overlap must be < tile_h")
-
-    # Validate refine method before entering tile loop
-    _supported_refine = {
-        "edge_gradmoment", "edge_erf", "logquad", "logquadratic",
-        "weighted", "auto", "radial_symmetry", "isophote_curvature",
-    }
-    if refine not in _supported_refine:
-        raise ValueError(f"Unknown refine method: {refine}")
-
-    # --- Step 0: Global threshold (once, on downsampled image) ---
-    ds = max(1, int(otsu_downsample))
-    thr_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
-    g_ds = g[::ds, ::ds]
-    otsu_thresh, _ = cv2.threshold(g_ds, 0, 255, thr_type | cv2.THRESH_OTSU)
-    thr = float(otsu_thresh) * float(thr_scale)
 
     step = tile_h - overlap
     all_centers = []
+    y0 = 0
+    while y0 < H:
+        y1 = min(H, y0 + tile_h)
+        tile = img[y0:y1]
 
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)) if (morph_open > 0 or morph_close > 0) else None
+        # per_tile mode: no pre_threshold (each tile auto-thresholds)
+        tile_thr = None if threshold_mode == "per_tile" else pre_threshold
 
-    # Single device context for the entire tile loop
-    with cp.cuda.Device(int(device)):
-        y0 = 0
-        while y0 < H:
-            y1 = min(H, y0 + tile_h)
-            tile = g[y0:y1]
+        centers, _ = _detect_single_tile_gpu(
+            tile, pre_threshold=tile_thr, **detection_kwargs,
+        )
 
-            # --- Per-tile threshold + morphology (CPU) ---
-            _, bw = cv2.threshold(tile, thr, 255, thr_type)
-            if morph_open > 0:
-                bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k, iterations=int(morph_open))
-            if morph_close > 0:
-                bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, k, iterations=int(morph_close))
+        if centers.shape[0] > 0:
+            centers[:, 1] += y0  # tile-local -> global y
+            half = overlap // 2
+            keep_lo = y0 if y0 == 0 else (y0 + half)
+            keep_hi = y1 if y1 == H else (y1 - half)
+            m = (centers[:, 1] >= keep_lo) & (centers[:, 1] < keep_hi)
+            if np.any(m):
+                all_centers.append(centers[m])
 
-            # --- GPU CC via core (stays on GPU, no roundtrip) ---
-            bw_gpu = cp.asarray(bw != 0)
-            labels_gpu, stats_gpu, centroids_gpu, num = (
-                _connected_components_stats_gpu_core(bw_gpu, connectivity=int(connectivity))
-            )
-
-            # num includes background (label 0). num == 1 means no foreground.
-            if num > 1:
-                # --- Vectorized area filter (CuPy, on GPU) ---
-                area = stats_gpu[1:, 4]
-                mask = (area >= int(area_min)) & (area <= int(area_max))
-
-                if cp.any(mask):
-                    # Build (K, 6) stats array on GPU: [x, y, w, h, cx, cy]
-                    filtered_stats = stats_gpu[1:][mask]
-                    filtered_cents = centroids_gpu[1:][mask]
-                    stats_xywh_cc = cp.concatenate([
-                        filtered_stats[:, :4].astype(cp.float32),
-                        filtered_cents.astype(cp.float32),
-                    ], axis=1)
-
-                    # --- Refinement dispatch ---
-                    if refine in ("radial_symmetry", "isophote_curvature"):
-                        # Voronoi path: per-tile Voronoi → ROI extraction → batch GPU
-                        stats_np = cp.asnumpy(filtered_stats)
-                        cents_np = cp.asnumpy(filtered_cents)
-                        tile_local_h = y1 - y0
-
-                        # Exclude blobs whose bbox touches the image boundary
-                        keep = np.ones(stats_np.shape[0], dtype=bool)
-                        bx, by = stats_np[:, 0], stats_np[:, 1]
-                        bw, bh = stats_np[:, 2], stats_np[:, 3]
-                        keep &= (bx > 0) & (bx + bw < W)
-                        if y0 == 0:
-                            keep &= (by > 0)
-                        if y1 == H:
-                            keep &= (by + bh < tile_local_h)
-                        stats_np = stats_np[keep]
-                        cents_np = cents_np[keep]
-
-                        if stats_np.shape[0] == 0:
-                            refined = np.zeros((0, 2), dtype=np.float64)
-                        else:
-                            rows_v = np.column_stack([
-                                stats_np[:, :4], cents_np,
-                            ]).tolist()
-                            coarse_centers = cents_np.astype(np.float64)
-
-                            from .voronoi import compute_voronoi_labels_gpu
-                            voronoi_labels = compute_voronoi_labels_gpu(
-                                coarse_centers, (tile_local_h, W), device=device,
-                            )
-
-                            tile_f64 = tile.astype(np.float64)
-                            rois_stack, masks_stack, origins = _extract_voronoi_rois(
-                                tile_f64, voronoi_labels, rows_v, pad=pad,
-                            )
-
-                            if refine == "radial_symmetry":
-                                local_centers, quality = _radial_symmetry_batch_gpu(
-                                    rois_stack, masks_stack,
-                                    upsample_factor=upsample_factor, device=device,
-                                )
-                            else:
-                                local_centers, quality = _isophote_curvature_batch_gpu(
-                                    rois_stack, masks_stack,
-                                    upsample_factor=upsample_factor, device=device,
-                                )
-
-                            # Transform ROI-local → tile-local coordinates
-                            K_v = local_centers.shape[0]
-                            refined = np.full((K_v, 2), np.nan, dtype=np.float64)
-                            for jj in range(K_v):
-                                x0_r, y0_r = origins[jj]
-                                refined[jj, 0] = x0_r + local_centers[jj, 0]
-                                refined[jj, 1] = y0_r + local_centers[jj, 1]
-                            good = np.all(np.isfinite(refined), axis=1)
-                            refined = refined[good]
-                    else:
-                        # Non-Voronoi path: all on GPU via core functions
-                        tile_gpu = cp.asarray(tile, dtype=cp.float32)
-
-                        if refine == "edge_gradmoment":
-                            refined_gpu, ok_gpu = _refine_edge_moment_core(
-                                tile_gpu, stats_xywh_cc,
-                                band_rad=band_rad, edge_rad=edge_rad,
-                                smooth_passes=smooth_passes, loc_rad=loc_rad,
-                                grad_power=grad_power, iters=iters,
-                            )
-                        elif refine == "edge_erf":
-                            refined_gpu, ok_gpu = _refine_edge_erf_core(
-                                tile_gpu, stats_xywh_cc,
-                                band_rad=band_rad, edge_rad=edge_rad,
-                                smooth_passes=smooth_passes, loc_rad=loc_rad,
-                                grad_power=grad_power, iters=iters,
-                                erf_fit_rad=erf_fit_rad, erf_gn_iters=erf_gn_iters,
-                                erf_init_sigma=erf_init_sigma,
-                                erf_sigma_min=erf_sigma_min,
-                                erf_sigma_max=erf_sigma_max,
-                                erf_max_shift=erf_max_shift,
-                                erf_damp=erf_damp, erf_cond_max=erf_cond_max,
-                            )
-                        elif refine in ("logquad", "logquadratic"):
-                            lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
-                            refined_gpu, ok_gpu = refine_centers_logquad_gpu_match_cpu(
-                                tile_gpu,
-                                labels_gpu.astype(cp.int32),
-                                stats_xywh_cc,
-                                lab_ids_gpu,
-                                pad=pad, batch=max(1, int(gpu_batch)),
-                                use_float64=use_float64,
-                            )
-                        elif refine == "weighted":
-                            lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
-                            refined_gpu, ok_gpu = _refine_weighted_core(
-                                tile_gpu, labels_gpu.astype(cp.int32),
-                                stats_xywh_cc, lab_ids_gpu,
-                                pad=pad, batch=max(1, int(gpu_batch)),
-                                use_float64=use_float64,
-                            )
-                        elif refine == "auto":
-                            lab_ids_gpu = (cp.nonzero(mask)[0] + 1).astype(cp.int32)
-                            max_dim = cp.maximum(stats_xywh_cc[:, 2], stats_xywh_cc[:, 3])
-                            is_small = max_dim <= float(small_feature_max)
-                            is_large = ~is_small
-
-                            K_total = int(stats_xywh_cc.shape[0])
-                            refined_gpu = cp.full((K_total, 2), cp.nan, dtype=cp.float64)
-                            ok_gpu = cp.zeros((K_total,), dtype=cp.bool_)
-
-                            if cp.any(is_small):
-                                si = cp.nonzero(is_small)[0]
-                                r, o = refine_centers_logquad_gpu_match_cpu(
-                                    tile_gpu, labels_gpu.astype(cp.int32),
-                                    stats_xywh_cc[si], lab_ids_gpu[si],
-                                    pad=pad, batch=max(1, int(gpu_batch)),
-                                    use_float64=use_float64,
-                                )
-                                refined_gpu[si] = r
-                                ok_gpu[si] = o
-
-                            if cp.any(is_large):
-                                li = cp.nonzero(is_large)[0]
-                                r, o = _refine_edge_moment_core(
-                                    tile_gpu, stats_xywh_cc[li],
-                                    band_rad=band_rad, edge_rad=edge_rad,
-                                    smooth_passes=smooth_passes, loc_rad=loc_rad,
-                                    grad_power=grad_power, iters=iters,
-                                )
-                                refined_gpu[li] = r
-                                ok_gpu[li] = o
-
-                        refined = cp.asnumpy(refined_gpu).astype(np.float64)
-                        ok = cp.asnumpy(ok_gpu).astype(bool)
-                        good = ok & np.all(np.isfinite(refined), axis=1)
-                        refined = refined[good]
-
-                    # --- Band-based de-dup (common for all methods) ---
-                    if refined.shape[0] > 0:
-                        refined[:, 1] += y0  # tile-local → global
-
-                        half = overlap // 2
-                        keep_lo = y0 if y0 == 0 else (y0 + half)
-                        keep_hi = y1 if y1 == H else (y1 - half)
-                        m = (refined[:, 1] >= keep_lo) & (refined[:, 1] < keep_hi)
-                        if np.any(m):
-                            all_centers.append(refined[m])
-
-            if y1 == H:
-                break
-            y0 += step
+        if y1 == H:
+            break
+        y0 += step
 
     if all_centers:
         centers = np.vstack(all_centers)
+        from ..centers import dedupe_centers
+        centers = dedupe_centers(centers, eps=float(dedupe_eps))
     else:
         centers = np.zeros((0, 2), dtype=np.float64)
 
@@ -2104,18 +1910,18 @@ def _detect_centers_tiled_gpu(
         method=f"tiled_gpu(refine={refine})",
         backend="gpu",
         meta={
-            "tile_h": int(tile_h),
-            "overlap": int(overlap),
-            "otsu_downsample": int(ds),
+            "tile_h": int(tile_h), "overlap": int(overlap),
+            "threshold_mode": str(threshold_mode),
+            "otsu_downsample": int(otsu_downsample),
             "thr_scale": float(thr_scale),
-            "global_otsu_threshold": float(thr),
+            "dedupe_eps": float(dedupe_eps),
             "refine": str(refine),
             "invert": bool(invert),
-            "area_min": int(area_min),
-            "area_max": int(area_max),
+            "area_min": int(area_min), "area_max": int(area_max),
             "device": int(device),
             "small_feature_max": float(small_feature_max),
             "upsample_factor": int(upsample_factor),
-            "implementation": "rawkernel_cc+core_refine",
         },
     )
+
+
