@@ -291,7 +291,77 @@ def detect_centers_cpu(
     refine: str = "logquad",
     connectivity: int = 8,
     small_feature_max: float = 12.0,
+    # Tiling params:
+    tile_h: "int | None" = None,
+    overlap: int = 128,
+    threshold_mode: str = "auto",
+    otsu_downsample: int = 4,
+    thr_scale: float = 0.8,
+    dedupe_eps: float = 1.5,
 ) -> CenterResult:
+    if tile_h is not None:
+        _require_cv2()
+        img = np.asarray(image)
+        if img.ndim != 2:
+            raise ValueError("Expected 2D grayscale image")
+        H, W = img.shape
+
+        if overlap >= tile_h:
+            raise ValueError("overlap must be < tile_h")
+
+        detection_kwargs = dict(
+            threshold=threshold, invert=invert,
+            area_min=area_min, area_max=area_max,
+            morph_open=morph_open, morph_close=morph_close,
+            pad=pad, refine=refine, connectivity=connectivity,
+            small_feature_max=small_feature_max,
+            tile_h=None,  # recurse without tiling
+        )
+
+        step = tile_h - overlap
+        all_centers = []
+        y0 = 0
+        while y0 < H:
+            y1 = min(H, y0 + tile_h)
+            tile = img[y0:y1]
+
+            res = detect_centers_cpu(tile, **detection_kwargs)
+            pts = np.asarray(res.centers_xy, dtype=np.float64)
+
+            if pts.size > 0:
+                pts[:, 1] += y0  # tile-local → global
+                half = overlap // 2
+                keep_lo = y0 if y0 == 0 else (y0 + half)
+                keep_hi = y1 if y1 == H else (y1 - half)
+                m = (pts[:, 1] >= keep_lo) & (pts[:, 1] < keep_hi)
+                if np.any(m):
+                    all_centers.append(pts[m])
+
+            if y1 == H:
+                break
+            y0 += step
+
+        if all_centers:
+            centers = np.vstack(all_centers)
+            from ..centers import dedupe_centers
+            centers = dedupe_centers(centers, eps=float(dedupe_eps))
+        else:
+            centers = np.zeros((0, 2), dtype=np.float64)
+
+        return CenterResult(
+            centers_xy=centers,
+            method=f"tiled_cpu(refine={refine})",
+            backend="cpu",
+            meta={
+                "tile_h": int(tile_h), "overlap": int(overlap),
+                "threshold_mode": str(threshold_mode),
+                "refine": str(refine),
+                "invert": bool(invert),
+                "area_min": int(area_min), "area_max": int(area_max),
+                "small_feature_max": float(small_feature_max),
+            },
+        )
+
     g, _bw, num, labels, stats = _segment_components(
         image,
         threshold=threshold,

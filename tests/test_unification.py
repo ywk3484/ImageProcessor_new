@@ -169,3 +169,18 @@ def test_detect_centers_gpu_tiled_threshold_modes():
             area_min=4, area_max=100, refine="weighted",
         )
         assert result.centers_xy.shape[0] == 2, f"mode={mode}: expected 2 centers"
+
+
+def test_detect_centers_cpu_tiled():
+    """CPU detect_centers_cpu with tile_h should tile and dedupe."""
+    from subpx._cpu.centers import detect_centers_cpu
+
+    img = np.zeros((200, 100), dtype=np.uint8)
+    img[20:24, 20:24] = 200
+    img[120:124, 60:64] = 200
+
+    result = detect_centers_cpu(
+        img, tile_h=100, overlap=20, dedupe_eps=1.5,
+        area_min=4, area_max=100, refine="weighted",
+    )
+    assert result.centers_xy.shape[0] == 2
