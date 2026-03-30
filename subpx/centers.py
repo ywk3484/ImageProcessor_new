@@ -29,8 +29,6 @@ from ._gpu.centers import (
     refine_logquadratic_gpu,
     refine_centers_edge_moment_gpu,
 )
-from .types import CenterResult
-
 _VORONOI_METHODS = {"radial_symmetry", "isophote_curvature"}
 
 

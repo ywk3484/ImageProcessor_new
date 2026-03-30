@@ -286,3 +286,42 @@ def test_extract_voronoi_rois_vectorized_matches():
     assert len(origins) == 4
     for i in range(4):
         assert np.any(masks[i])
+
+
+@skipno_gpu
+def test_full_pipeline_tiled_radial_symmetry():
+    """End-to-end: detect_centers(tile_h=..., refine='radial_symmetry') on GPU."""
+    from subpx.centers import detect_centers
+
+    img = np.zeros((128, 64), dtype=np.uint8)
+    yy, xx = np.mgrid[:128, :64]
+    img += (200 * np.exp(-((xx - 20)**2 + (yy - 20)**2) / (2 * 2.0**2))).astype(np.uint8)
+    img += (200 * np.exp(-((xx - 40)**2 + (yy - 80)**2) / (2 * 2.0**2))).astype(np.uint8)
+
+    result = detect_centers(
+        img, backend="gpu", refine="radial_symmetry",
+        tile_h=64, overlap=16, area_min=4, area_max=200,
+        upsample_factor=4, gpu_batch=1024,
+    )
+    assert result.centers_xy.shape[0] == 2
+    ys = sorted(result.centers_xy[:, 1])
+    assert 15 < ys[0] < 30
+    assert 75 < ys[1] < 90
+
+
+@skipno_gpu
+def test_gpu_batch_param_propagates_to_voronoi():
+    """gpu_batch parameter should be used by Voronoi methods."""
+    from subpx.centers import detect_centers
+
+    img = np.zeros((64, 64), dtype=np.uint8)
+    yy, xx = np.mgrid[:64, :64]
+    for cy, cx in [(15, 15), (15, 45), (45, 15), (45, 45)]:
+        img += (200 * np.exp(-((xx-cx)**2 + (yy-cy)**2) / (2*2.0**2))).astype(np.uint8)
+
+    # Very small gpu_batch to force multiple batches
+    result = detect_centers(
+        img, backend="gpu", refine="radial_symmetry",
+        area_min=4, area_max=200, upsample_factor=4, gpu_batch=2,
+    )
+    assert result.centers_xy.shape[0] == 4

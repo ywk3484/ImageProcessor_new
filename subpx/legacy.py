@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 
-from .centers import detect_centers, detect_centers_tiled, refine_weighted_centroid, refine_logquadratic, filter_centers, dedupe_centers
+from .centers import detect_centers, refine_weighted_centroid, refine_logquadratic, filter_centers, dedupe_centers
 from .pitch import estimate_pitch, estimate_pitch_lines
 from .calibration import find_y_cluster_split_indices
 from .spectra import fft_pitch_error, fft_periodicity_uniform, fft_periodicity_resample
@@ -27,10 +27,10 @@ def find_centers_hybrid_gpu_cpu_logquad(*args, **kwargs):
 
 
 def find_subpixel_centers_tiled_logquad_gpu(*args, **kwargs):
-    _warn("find_subpixel_centers_tiled_logquad_gpu", "detect_centers_tiled(..., backend='gpu', refine='logquad')")
+    _warn("find_subpixel_centers_tiled_logquad_gpu", "detect_centers(..., tile_h=8192, backend='gpu', refine='logquad')")
     if "device_id" in kwargs:
         kwargs["device"] = kwargs.pop("device_id")
-    return detect_centers_tiled(*args, backend="gpu", refine="logquad", **kwargs).centers_xy
+    return detect_centers(*args, tile_h=8192, backend="gpu", refine="logquad", **kwargs).centers_xy
 
 
 def refine_center_weighted_centroid(*args, **kwargs):
@@ -88,3 +88,13 @@ def fft_periodicity_uniform_legacy(*args, **kwargs):
 def fft_periodicity_resample_legacy(*args, **kwargs):
     _warn("fft_periodicity_resample", "fft_periodicity_resample(...)")
     return fft_periodicity_resample(*args, **kwargs)
+
+
+def detect_centers_tiled(image, *, tile_h=8192, **kwargs):
+    _warn("detect_centers_tiled", "detect_centers(image, tile_h=...)")
+    return detect_centers(image, tile_h=tile_h, **kwargs)
+
+
+def detect_centers_tiled_global_otsu(image, *, tile_h=8192, threshold_mode="global", **kwargs):
+    _warn("detect_centers_tiled_global_otsu", "detect_centers(image, tile_h=..., threshold_mode='global')")
+    return detect_centers(image, tile_h=tile_h, threshold_mode=threshold_mode, **kwargs)

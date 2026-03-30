@@ -19,6 +19,7 @@ from .centers import (
     filter_centers,
     dedupe_centers,
 )
+from .legacy import detect_centers_tiled, detect_centers_tiled_global_otsu
 from .components import connected_components_stats
 from .pitch import estimate_pitch, estimate_pitch_lines, pitch_residuals
 from .registration import estimate_shift, apply_shift, crop_overlap
@@ -59,6 +60,8 @@ __all__ = [
     "GLTiledImshow",
     "GLOrtho2D",
     "detect_centers",
+    "detect_centers_tiled",
+    "detect_centers_tiled_global_otsu",
     "refine_centers",
     "refine_weighted_centroid",
     "refine_logquadratic",

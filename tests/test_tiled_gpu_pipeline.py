@@ -70,15 +70,16 @@ def test_cc_public_returns_numpy():
 @gpu
 def test_tiled_gpu_pipeline_basic():
     """Basic: small image, single tile covers everything."""
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
 
     img, expected = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=3, margin=10)
-    result = _detect_centers_tiled_gpu(
+    result = detect_centers_gpu(
         img,
         area_min=1,
         area_max=50,
         tile_h=8192,
         overlap=16,
+        threshold_mode="global",
         refine="edge_gradmoment",
     )
     assert isinstance(result, CenterResult)
@@ -89,17 +90,18 @@ def test_tiled_gpu_pipeline_basic():
 @gpu
 def test_tiled_gpu_pipeline_multi_tile():
     """Multi-tile: image taller than tile_h, tests tiling + band de-dup."""
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
 
     img, expected = _make_dot_grid(rows=10, cols=4, spacing=20, dot_size=3, margin=10)
     H = img.shape[0]
     tile_h = H // 3
-    result = _detect_centers_tiled_gpu(
+    result = detect_centers_gpu(
         img,
         area_min=1,
         area_max=50,
         tile_h=tile_h,
         overlap=30,
+        threshold_mode="global",
         refine="edge_gradmoment",
     )
     assert isinstance(result, CenterResult)
@@ -110,40 +112,40 @@ def test_tiled_gpu_pipeline_multi_tile():
 @gpu
 def test_tiled_gpu_pipeline_empty_image():
     """All-black image should return zero centers."""
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
 
     img = np.zeros((100, 100), dtype=np.uint8)
-    result = _detect_centers_tiled_gpu(img, area_min=1, area_max=50)
+    result = detect_centers_gpu(img, tile_h=8192, threshold_mode="global", area_min=1, area_max=50)
     assert result.centers_xy.shape == (0, 2)
 
 
 @gpu
 def test_tiled_gpu_pipeline_overlap_validation():
     """overlap >= tile_h should raise ValueError."""
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
 
     img = np.zeros((100, 100), dtype=np.uint8)
     with pytest.raises(ValueError, match="overlap must be < tile_h"):
-        _detect_centers_tiled_gpu(img, tile_h=64, overlap=64)
+        detect_centers_gpu(img, tile_h=64, overlap=64, threshold_mode="global")
 
 
 @gpu
 def test_tiled_gpu_pipeline_unknown_refine():
     """Unknown refine method should raise ValueError."""
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
 
     img, _ = _make_dot_grid(rows=2, cols=2, spacing=15, dot_size=3, margin=10)
     with pytest.raises(ValueError, match="Unknown refine method"):
-        _detect_centers_tiled_gpu(img, refine="nonexistent", area_min=1, area_max=50)
+        detect_centers_gpu(img, tile_h=8192, threshold_mode="global", refine="nonexistent", area_min=1, area_max=50)
 
 
 @gpu
 def test_tiled_gpu_pipeline_edge_erf():
     """edge_erf refine should work in tiled pipeline."""
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
 
     img, expected = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=5, margin=10)
-    result = _detect_centers_tiled_gpu(img, area_min=1, area_max=100, refine="edge_erf")
+    result = detect_centers_gpu(img, tile_h=8192, threshold_mode="global", area_min=1, area_max=100, refine="edge_erf")
     assert isinstance(result, CenterResult)
     assert result.centers_xy.shape[0] == expected.shape[0]
 
@@ -151,28 +153,28 @@ def test_tiled_gpu_pipeline_edge_erf():
 @gpu
 def test_tiled_gpu_pipeline_logquad():
     """logquad refine should work in tiled pipeline."""
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
 
     img, expected = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=3, margin=10)
-    result = _detect_centers_tiled_gpu(img, area_min=1, area_max=50, refine="logquad")
+    result = detect_centers_gpu(img, tile_h=8192, threshold_mode="global", area_min=1, area_max=50, refine="logquad")
     assert isinstance(result, CenterResult)
     assert result.centers_xy.shape[0] == expected.shape[0]
 
 
 @gpu
 def test_tiled_gpu_pipeline_weighted():
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
     img, expected = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=3, margin=10)
-    result = _detect_centers_tiled_gpu(img, area_min=1, area_max=50, refine="weighted")
+    result = detect_centers_gpu(img, tile_h=8192, threshold_mode="global", area_min=1, area_max=50, refine="weighted")
     assert isinstance(result, CenterResult)
     assert result.centers_xy.shape[0] == expected.shape[0]
 
 
 @gpu
 def test_tiled_gpu_pipeline_auto():
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
     img, expected = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=3, margin=10)
-    result = _detect_centers_tiled_gpu(img, area_min=1, area_max=50, refine="auto")
+    result = detect_centers_gpu(img, tile_h=8192, threshold_mode="global", area_min=1, area_max=50, refine="auto")
     assert isinstance(result, CenterResult)
     assert result.centers_xy.shape[0] == expected.shape[0]
 
@@ -180,15 +182,16 @@ def test_tiled_gpu_pipeline_auto():
 @gpu
 def test_tiled_gpu_pipeline_auto_mixed_sizes():
     """auto should handle both small and large features."""
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
     H, W = 200, 200
     img = np.zeros((H, W), dtype=np.uint8)
     img[20:23, 20:23] = 255      # small 3x3
     img[20:23, 50:53] = 255      # small 3x3
     img[100:115, 100:115] = 255  # large 15x15
     img[100:115, 150:165] = 255  # large 15x15
-    result = _detect_centers_tiled_gpu(
-        img, area_min=1, area_max=300, refine="auto", small_feature_max=12.0,
+    result = detect_centers_gpu(
+        img, tile_h=8192, threshold_mode="global",
+        area_min=1, area_max=300, refine="auto", small_feature_max=12.0,
     )
     assert isinstance(result, CenterResult)
     assert result.centers_xy.shape[0] == 4
@@ -196,38 +199,41 @@ def test_tiled_gpu_pipeline_auto_mixed_sizes():
 
 @gpu
 def test_tiled_gpu_pipeline_weighted_multi_tile():
-    from subpx._gpu.centers import _detect_centers_tiled_gpu
+    from subpx._gpu.centers import detect_centers_gpu
     img, expected = _make_dot_grid(rows=10, cols=4, spacing=20, dot_size=3, margin=10)
     H = img.shape[0]
-    result = _detect_centers_tiled_gpu(
-        img, area_min=1, area_max=50, tile_h=H // 3, overlap=30, refine="weighted",
+    result = detect_centers_gpu(
+        img, area_min=1, area_max=50, tile_h=H // 3, overlap=30,
+        threshold_mode="global", refine="weighted",
     )
     assert isinstance(result, CenterResult)
     assert abs(result.centers_xy.shape[0] - expected.shape[0]) <= 2
 
 
-# --- Integration tests for detect_centers_tiled public API ---
+# --- Integration tests for detect_centers_tiled public API (deprecated, via legacy) ---
 
 
 @gpu
 def test_detect_centers_tiled_dispatches_to_gpu_pipeline():
-    """detect_centers_tiled(backend='gpu') should use the new tiled GPU pipeline."""
+    """detect_centers_tiled(backend='gpu') should dispatch through the unified API."""
     from subpx import detect_centers_tiled
 
     img, expected = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=3, margin=10)
-    result = detect_centers_tiled(
-        img,
-        backend="gpu",
-        tile_h=8192,
-        overlap=16,
-        refine="edge_gradmoment",
-        area_min=1,
-        area_max=50,
-    )
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        result = detect_centers_tiled(
+            img,
+            backend="gpu",
+            tile_h=8192,
+            overlap=16,
+            refine="edge_gradmoment",
+            area_min=1,
+            area_max=50,
+        )
     assert isinstance(result, CenterResult)
     assert result.centers_xy.shape[1] == 2
     assert result.centers_xy.shape[0] == expected.shape[0]
-    assert "tiled_gpu" in result.method
 
 
 def test_detect_centers_tiled_cpu_still_works():
@@ -235,18 +241,20 @@ def test_detect_centers_tiled_cpu_still_works():
     from subpx import detect_centers_tiled
 
     img, _ = _make_dot_grid(rows=3, cols=3, spacing=15, dot_size=3, margin=10)
-    result = detect_centers_tiled(
-        img,
-        backend="cpu",
-        tile_h=8192,
-        overlap=16,
-        refine="weighted",
-        area_min=1,
-        area_max=50,
-    )
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        result = detect_centers_tiled(
+            img,
+            backend="cpu",
+            tile_h=8192,
+            overlap=16,
+            refine="weighted",
+            area_min=1,
+            area_max=50,
+        )
     assert isinstance(result, CenterResult)
     assert result.centers_xy.shape[1] == 2
-    assert "tiled(cpu)" in result.method
 
 
 def test_detect_centers_tiled_cpu_overlap_validation():
@@ -254,5 +262,8 @@ def test_detect_centers_tiled_cpu_overlap_validation():
     from subpx import detect_centers_tiled
 
     img = np.zeros((100, 100), dtype=np.uint8)
-    with pytest.raises(ValueError, match="overlap must be < tile_h"):
-        detect_centers_tiled(img, backend="cpu", tile_h=64, overlap=64)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        with pytest.raises(ValueError, match="overlap must be < tile_h"):
+            detect_centers_tiled(img, backend="cpu", tile_h=64, overlap=64)

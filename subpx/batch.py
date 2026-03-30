@@ -24,9 +24,11 @@ def detect_centers_batch(frames: Iterable, /, *args, progress: bool = False, **k
     return process_frames(frames, detect_centers, *args, progress=progress, **kwargs)
 
 
-def detect_centers_tiled_batch(frames: Iterable, /, *args, progress: bool = False, **kwargs):
-    from .centers import detect_centers_tiled
-    return process_frames(frames, detect_centers_tiled, *args, progress=progress, **kwargs)
+def detect_centers_tiled_batch(frames: Iterable, /, *args, tile_h: int = 8192, progress: bool = False, **kwargs):
+    from .centers import detect_centers
+    def _tiled(frame, *a, **kw):
+        return detect_centers(frame, *a, tile_h=tile_h, **kw)
+    return process_frames(frames, _tiled, *args, progress=progress, **kwargs)
 
 
 def estimate_shift_batch(ref_frames: Iterable, mov_frames: Iterable, /, *args, progress: bool = False, **kwargs):
