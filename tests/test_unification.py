@@ -43,3 +43,34 @@ def test_nn_upsample_f32_matches_f64():
         out = batch_nn_upsample_f32(cp.asarray(rois, dtype=cp.float32), factor)
         diff = float(cp.max(cp.abs(ref - out.astype(cp.float64))))
     assert diff < 1e-6, f"f32 NN vs f64 max diff: {diff}"
+
+
+@skipno_gpu
+def test_radial_symmetry_batched_matches_unbatched():
+    """Batched processing (gpu_batch=3) must produce same results as full batch."""
+    from subpx._gpu.centers import _radial_symmetry_batch_gpu
+
+    rng = np.random.RandomState(42)
+    N = 10
+    size = 11
+    rois = []
+    for _ in range(N):
+        cx = size / 2 + rng.uniform(-1, 1)
+        cy = size / 2 + rng.uniform(-1, 1)
+        yy, xx = np.mgrid[:size, :size]
+        blob = np.exp(-((xx - cx)**2 + (yy - cy)**2) / (2 * 1.2**2))
+        rois.append(blob)
+    rois = np.stack(rois)
+    masks = np.ones_like(rois, dtype=bool)
+
+    # Full batch (default gpu_batch is large enough for N=10)
+    c_full, r_full = _radial_symmetry_batch_gpu(
+        rois, masks, upsample_factor=4, device=0, gpu_batch=10000,
+    )
+    # Small batches
+    c_batched, r_batched = _radial_symmetry_batch_gpu(
+        rois, masks, upsample_factor=4, device=0, gpu_batch=3,
+    )
+    # Results must be identical (same computation, just chunked)
+    np.testing.assert_allclose(c_full, c_batched, atol=1e-10)
+    np.testing.assert_allclose(r_full, r_batched, atol=1e-10)
