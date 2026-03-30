@@ -102,3 +102,24 @@ def test_isophote_batched_matches_unbatched():
     )
     np.testing.assert_allclose(c_full, c_batched, atol=1e-10)
     np.testing.assert_allclose(s_full, s_batched, atol=1e-10)
+
+
+@skipno_gpu
+def test_detect_single_tile_gpu_exists():
+    """_detect_single_tile_gpu must be importable and produce centers."""
+    from subpx._gpu.centers import _detect_single_tile_gpu
+
+    img = np.zeros((64, 64), dtype=np.uint8)
+    img[10:14, 10:14] = 200
+    img[30:34, 40:44] = 200
+
+    centers, meta = _detect_single_tile_gpu(
+        img, threshold="triangle", invert=False,
+        area_min=4, area_max=100, morph_open=0, morph_close=0,
+        pad=3, refine="weighted", connectivity=8,
+        gpu_batch=4096, device=0, use_float64=True,
+        components_backend="cpu", small_feature_max=12.0,
+        upsample_factor=4, pre_threshold=None,
+    )
+    assert centers.shape == (2, 2)
+    assert isinstance(meta, dict)

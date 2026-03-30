@@ -1532,7 +1532,7 @@ def _extract_voronoi_rois(
     return rois_stack, masks_stack, origins
 
 
-def detect_centers_gpu(
+def _detect_single_tile_gpu(
     image: np.ndarray,
     *,
     threshold: str = "triangle",
@@ -1550,14 +1550,51 @@ def detect_centers_gpu(
     components_backend: str = "cpu",
     small_feature_max: float = 12.0,
     upsample_factor: int = 4,
-) -> CenterResult:
-    g, bw = _segment_binary(
-        image,
-        threshold=threshold,
-        invert=invert,
-        morph_open=morph_open,
-        morph_close=morph_close,
-    )
+    pre_threshold: float | None = None,
+) -> tuple[np.ndarray, dict]:
+    """Process a single image/tile: segmentation -> CC -> area filter -> refinement.
+
+    Parameters
+    ----------
+    image : ndarray
+        2-D grayscale image (or 3-D BGR that will be converted).
+    threshold : str
+        Auto-threshold method ('triangle' or 'otsu'). Ignored when
+        *pre_threshold* is set.
+    pre_threshold : float or None
+        If set, use this fixed threshold for binarisation instead of
+        auto-computing.  The *threshold* parameter is ignored.
+
+    Returns
+    -------
+    centers_xy : (K, 2) float64 array -- detected centres in tile-local coords
+    meta : dict -- metadata about the detection
+    """
+    import cv2
+
+    # ── Segmentation ─────────────────────────────────────────────────────
+    if pre_threshold is not None:
+        g = np.asarray(image)
+        if g.ndim == 3:
+            g = cv2.cvtColor(g, cv2.COLOR_BGR2GRAY)
+        thr_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+        _, bw = cv2.threshold(g, pre_threshold, 255, thr_type)
+        if morph_open > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k, iterations=morph_open)
+        if morph_close > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, k, iterations=morph_close)
+    else:
+        g, bw = _segment_binary(
+            image,
+            threshold=threshold,
+            invert=invert,
+            morph_open=morph_open,
+            morph_close=morph_close,
+        )
+
+    # ── Connected components ─────────────────────────────────────────────
     if components_backend == "gpu":
         comp = connected_components_stats_gpu(bw, connectivity=connectivity, device=device)
     else:
@@ -1596,7 +1633,7 @@ def detect_centers_gpu(
                 "small_feature_max": float(small_feature_max),
                 "upsample_factor": int(upsample_factor),
             }
-            return CenterResult(centers_xy=arr, method=f"threshold={threshold}, refine={refine}", backend="gpu", meta=meta)
+            return arr, meta
 
         rows_arr = np.asarray(rows, dtype=np.float64)
         coarse_centers = rows_arr[:, 4:6]  # [cx, cy] = [x, y] order
@@ -1653,8 +1690,9 @@ def detect_centers_gpu(
             quality_key: np.asarray(quality_kept, dtype=np.float64),
             "voronoi_cell_area": np.asarray(areas_kept, dtype=np.int64),
         }
-        return CenterResult(centers_xy=arr, method=f"threshold={threshold}, refine={refine}", backend="gpu", meta=meta)
+        return arr, meta
 
+    # ── Non-Voronoi refinement methods ───────────────────────────────────
     rows = []
     lab_ids = []
     method_rows = {"logquad": [], "weighted": [], "none": [], "edge_gradmoment": [], "edge_erf": []}
@@ -1735,24 +1773,60 @@ def detect_centers_gpu(
                 centers.append([x0 + float(cx), y0 + float(cy)])
 
     arr = np.asarray(centers, dtype=np.float64) if centers else np.zeros((0, 2), dtype=np.float64)
+    meta = {
+        "invert": bool(invert),
+        "area_min": int(area_min),
+        "area_max": int(area_max),
+        "morph_open": int(morph_open),
+        "morph_close": int(morph_close),
+        "pad": int(pad),
+        "connectivity": int(connectivity),
+        "gpu_batch": int(gpu_batch),
+        "device": int(device),
+        "use_float64": bool(use_float64),
+        "components_backend": str(components_backend),
+        "small_feature_max": float(small_feature_max),
+    }
+    return arr, meta
+
+
+def detect_centers_gpu(
+    image: np.ndarray,
+    *,
+    threshold: str = "triangle",
+    invert: bool = False,
+    area_min: int = 1,
+    area_max: int = 50,
+    morph_open: int = 0,
+    morph_close: int = 0,
+    pad: int = 3,
+    refine: str = "logquad",
+    connectivity: int = 8,
+    gpu_batch: int = 4096,
+    device: int = 0,
+    use_float64: bool = True,
+    components_backend: str = "cpu",
+    small_feature_max: float = 12.0,
+    upsample_factor: int = 4,
+) -> CenterResult:
+    centers, meta = _detect_single_tile_gpu(
+        image,
+        threshold=threshold, invert=invert,
+        area_min=area_min, area_max=area_max,
+        morph_open=morph_open, morph_close=morph_close,
+        pad=pad, refine=refine, connectivity=connectivity,
+        gpu_batch=gpu_batch, device=device,
+        use_float64=use_float64,
+        components_backend=components_backend,
+        small_feature_max=small_feature_max,
+        upsample_factor=upsample_factor,
+        pre_threshold=None,
+    )
     return CenterResult(
-        centers_xy=arr,
+        centers_xy=centers,
         method=f"threshold={threshold}, refine={refine}",
         backend="gpu",
-        meta={
-            "invert": bool(invert),
-            "area_min": int(area_min),
-            "area_max": int(area_max),
-            "morph_open": int(morph_open),
-            "morph_close": int(morph_close),
-            "pad": int(pad),
-            "connectivity": int(connectivity),
-            "gpu_batch": int(gpu_batch),
-            "device": int(device),
-            "use_float64": bool(use_float64),
-            "components_backend": str(components_backend),
-            "small_feature_max": float(small_feature_max),
-        },
+        meta=meta,
     )
 
 
