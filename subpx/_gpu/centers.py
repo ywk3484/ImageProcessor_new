@@ -1216,29 +1216,28 @@ def _radial_symmetry_batch_gpu(
     return centers_all, residuals_all
 
 
-def _isophote_curvature_batch_gpu(
+def _isophote_curvature_inner_gpu(
     rois: np.ndarray,
     masks: np.ndarray,
     *,
-    upsample_factor: int = 4,
-    boundary_margin: int | None = None,
-    pre_smooth_sigma: float = 0.5,
-    device: int = 0,
+    factor: int,
+    boundary_margin: int,
+    pre_smooth_sigma: float,
+    device: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Batch isophote curvature center estimation on GPU.
+    """GPU inner kernel for isophote curvature -- processes one batch.
 
-    Each pixel's gradient defines a displacement vector toward the local
-    curvature center.  The weighted average of these voted centers (weighted
-    by curvedness) gives the subpixel center estimate.
+    Uses float32 for intermediates (upsampling, derivatives, displacements,
+    curvedness weights, vote coordinates) and float64 for the weighted
+    average center accumulation and spread.
 
     Parameters
     ----------
-    rois : (N, H, W) float64 array -- stacked ROIs
-    masks : (N, H, W) bool array -- validity masks (True = valid pixel)
-    upsample_factor : int -- bicubic upsampling factor (1 = disabled)
-    boundary_margin : int or None -- erosion margin near mask boundary
+    rois : (N, H, W) float64 array
+    masks : (N, H, W) bool array
+    factor : int -- upsampling factor
+    boundary_margin : int -- erosion margin near mask boundary
     pre_smooth_sigma : float -- Gaussian smoothing sigma (in upsampled pixels)
-        applied before computing second derivatives.  Set to 0 to disable.
     device : int -- GPU device
 
     Returns
@@ -1246,37 +1245,27 @@ def _isophote_curvature_batch_gpu(
     centers : (N, 2) float64 array -- centers in ROI pixel coordinates [x, y]
     spreads : (N,) float64 array -- weighted spread of voted centers per blob
     """
-    _require_cupy()
-
-    rois = np.asarray(rois, dtype=np.float64)
-    masks = np.asarray(masks, dtype=bool)
     N = rois.shape[0]
-
-    if N == 0:
-        return np.empty((0, 2), dtype=np.float64), np.empty((0,), dtype=np.float64)
-
-    if boundary_margin is None:
-        boundary_margin = upsample_factor
 
     with gpu_device(device):
         # -- Step 1: Track per-ROI original dimensions --
         orig_hs = np.array([rois.shape[1]] * N, dtype=np.int32)
         orig_ws = np.array([rois.shape[2]] * N, dtype=np.int32)
 
-        # -- Step 2 & 3: Upsample (single batch kernel launch) --
-        factor = int(upsample_factor)
+        # -- Step 2 & 3: Upsample (float32 intermediates) --
         if factor > 1:
-            from .upsample import batch_bicubic_upsample, batch_nn_upsample
-            rois_gpu = cp.asarray(rois, dtype=cp.float64)
-            masks_gpu = cp.asarray(masks.astype(np.float64))
-            g_batch = batch_bicubic_upsample(rois_gpu, factor)
-            m_batch = batch_nn_upsample(masks_gpu, factor) > 0.5
+            from .upsample import batch_bicubic_upsample_f32, batch_nn_upsample_f32
+            rois_gpu = cp.asarray(rois, dtype=cp.float32)
+            masks_gpu = cp.asarray(masks.astype(np.float32))
+            g_batch = batch_bicubic_upsample_f32(rois_gpu, factor)
+            m_batch = batch_nn_upsample_f32(masks_gpu, factor) > 0.5
+            del rois_gpu, masks_gpu
             up_hs = np.full(N, g_batch.shape[1], dtype=np.int32)
             up_ws = np.full(N, g_batch.shape[2], dtype=np.int32)
             Hmax = g_batch.shape[1]
             Wmax = g_batch.shape[2]
         else:
-            g_batch = cp.asarray(rois)
+            g_batch = cp.asarray(rois, dtype=cp.float32)
             m_batch = cp.asarray(masks)
             up_hs = orig_hs.copy()
             up_ws = orig_ws.copy()
@@ -1301,8 +1290,7 @@ def _isophote_curvature_batch_gpu(
         else:
             m_eroded = m_batch.copy()
 
-        # -- Step 6: First derivatives via central differences --
-        # Operating on interior pixels [1:-1, 1:-1], producing a grid of size (Hmax-2, Wmax-2)
+        # -- Step 6: First derivatives via central differences (float32) --
         I = g_batch
         Hd = Hmax - 2  # derivative grid height
         Wd = Wmax - 2  # derivative grid width
@@ -1313,104 +1301,168 @@ def _isophote_curvature_batch_gpu(
             spreads = np.full((N,), np.inf, dtype=np.float64)
             return centers, spreads
 
-        Ix = (I[:, 1:-1, 2:] - I[:, 1:-1, :-2]) / 2.0   # (N, Hd, Wd)
-        Iy = (I[:, 2:, 1:-1] - I[:, :-2, 1:-1]) / 2.0   # (N, Hd, Wd)
+        Ix = (I[:, 1:-1, 2:] - I[:, 1:-1, :-2]) / cp.float32(2.0)   # (N, Hd, Wd) f32
+        Iy = (I[:, 2:, 1:-1] - I[:, :-2, 1:-1]) / cp.float32(2.0)   # (N, Hd, Wd) f32
 
-        # -- Step 7: Second derivatives --
-        Ixx = I[:, 1:-1, 2:] - 2.0 * I[:, 1:-1, 1:-1] + I[:, 1:-1, :-2]   # (N, Hd, Wd)
-        Iyy = I[:, 2:, 1:-1] - 2.0 * I[:, 1:-1, 1:-1] + I[:, :-2, 1:-1]   # (N, Hd, Wd)
-        Ixy = (I[:, 2:, 2:] - I[:, 2:, :-2] - I[:, :-2, 2:] + I[:, :-2, :-2]) / 4.0  # (N, Hd, Wd)
+        # -- Step 7: Second derivatives (float32) --
+        Ixx = I[:, 1:-1, 2:] - cp.float32(2.0) * I[:, 1:-1, 1:-1] + I[:, 1:-1, :-2]   # (N, Hd, Wd) f32
+        Iyy = I[:, 2:, 1:-1] - cp.float32(2.0) * I[:, 1:-1, 1:-1] + I[:, :-2, 1:-1]   # (N, Hd, Wd) f32
+        Ixy = (I[:, 2:, 2:] - I[:, 2:, :-2] - I[:, :-2, 2:] + I[:, :-2, :-2]) / cp.float32(4.0)  # (N, Hd, Wd) f32
+        del I, g_batch
 
-        # -- Step 8: Validity mask --
-        eps = cp.float64(1e-12)
-        grad_sq = Ix**2 + Iy**2                              # (N, Hd, Wd)
-        denom = Iy**2 * Ixx - 2.0 * Ix * Ixy * Iy + Ix**2 * Iyy  # (N, Hd, Wd)
+        # -- Step 8: Validity mask (float32 thresholds) --
+        eps = cp.float32(1e-6)
+        grad_sq = Ix**2 + Iy**2                              # (N, Hd, Wd) f32
+        denom = Iy**2 * Ixx - cp.float32(2.0) * Ix * Ixy * Iy + Ix**2 * Iyy  # (N, Hd, Wd) f32
 
         m_interior = m_eroded[:, 1:-1, 1:-1]                  # (N, Hd, Wd)
         valid = m_interior & (cp.abs(denom) > eps) & (grad_sq > eps)
 
-        # -- Step 9 & 10: Displacement to curvature center --
-        safe_denom = cp.where(cp.abs(denom) > eps, denom, cp.float64(1.0))
-        Dx = -Ix * grad_sq / safe_denom   # (N, Hd, Wd)
-        Dy = -Iy * grad_sq / safe_denom   # (N, Hd, Wd)
+        # -- Step 9 & 10: Displacement to curvature center (float32) --
+        safe_denom = cp.where(cp.abs(denom) > eps, denom, cp.float32(1.0))
+        Dx = -Ix * grad_sq / safe_denom   # (N, Hd, Wd) f32
+        Dy = -Iy * grad_sq / safe_denom   # (N, Hd, Wd) f32
+        del Ix, Iy
 
-        # -- Step 11: Curvedness weight --
-        curvedness = cp.sqrt(Ixx**2 + 2.0 * Ixy**2 + Iyy**2)  # (N, Hd, Wd)
+        # -- Step 11: Curvedness weight (float32) --
+        curvedness = cp.sqrt(Ixx**2 + cp.float32(2.0) * Ixy**2 + Iyy**2)  # (N, Hd, Wd) f32
+        del Ixx, Iyy, Ixy
 
-        # -- Step 12: ROI-centered pixel coordinates for derivative grid --
-        # The derivative grid pixels correspond to pixel positions [1, 2, ..., Hmax-2] in y
-        # and [1, 2, ..., Wmax-2] in x of the upsampled image.
-        # Per-ROI centering: center_x = (up_ws[i]-1)/2, center_y = (up_hs[i]-1)/2
-        col_idx = cp.arange(Wd, dtype=cp.float64)[None, None, :] + 1.0  # pixel col in upsampled
-        row_idx = cp.arange(Hd, dtype=cp.float64)[None, :, None] + 1.0  # pixel row in upsampled
+        # -- Step 12: ROI-centered pixel coordinates for derivative grid (float32) --
+        col_idx = cp.arange(Wd, dtype=cp.float32)[None, None, :] + cp.float32(1.0)  # pixel col in upsampled
+        row_idx = cp.arange(Hd, dtype=cp.float32)[None, :, None] + cp.float32(1.0)  # pixel row in upsampled
 
-        up_ws_g = cp.asarray(up_ws, dtype=cp.float64)
-        up_hs_g = cp.asarray(up_hs, dtype=cp.float64)
-        cx_off = (up_ws_g - 1.0) / 2.0  # (N,)
-        cy_off = (up_hs_g - 1.0) / 2.0  # (N,)
+        up_ws_g = cp.asarray(up_ws, dtype=cp.float32)
+        up_hs_g = cp.asarray(up_hs, dtype=cp.float32)
+        cx_off = (up_ws_g - cp.float32(1.0)) / cp.float32(2.0)  # (N,)
+        cy_off = (up_hs_g - cp.float32(1.0)) / cp.float32(2.0)  # (N,)
 
-        xp = col_idx - cx_off[:, None, None]  # (N, Hd, Wd) centered x
-        yp = row_idx - cy_off[:, None, None]  # (N, Hd, Wd) centered y
+        xp = col_idx - cx_off[:, None, None]  # (N, Hd, Wd) centered x, f32
+        yp = row_idx - cy_off[:, None, None]  # (N, Hd, Wd) centered y, f32
 
-        # -- Step 13: Voted center positions --
-        vote_x = xp + Dx  # (N, Hd, Wd)
-        vote_y = yp + Dy  # (N, Hd, Wd)
+        # -- Step 13: Voted center positions (float32) --
+        vote_x = xp + Dx  # (N, Hd, Wd) f32
+        vote_y = yp + Dy  # (N, Hd, Wd) f32
 
         # -- Step 14: Outlier rejection -- skip votes with large displacement
         disp_sq = Dx**2 + Dy**2
+        del Dx, Dy
         # ROI half-size: use max of up_ws, up_hs per ROI
-        roi_half = cp.maximum(up_ws_g, up_hs_g)[:, None, None] / 2.0
+        roi_half = cp.maximum(up_ws_g, up_hs_g)[:, None, None] / cp.float32(2.0)
         within_range = disp_sq < roi_half**2
+        del disp_sq
         valid = valid & within_range
+        del within_range
 
         # Apply validity: zero out invalid votes in weight
-        w = cp.where(valid, curvedness, cp.float64(0.0))  # (N, Hd, Wd)
+        w = cp.where(valid, curvedness, cp.float32(0.0))  # (N, Hd, Wd) f32
+        del valid, curvedness
 
-        # -- Step 15: Weighted average center --
-        w_sum = w.sum(axis=(1, 2))  # (N,)
+        # -- Step 15: Weighted average center (promote to float64) --
+        w_f64 = w.astype(cp.float64)
+        vote_x_f64 = vote_x.astype(cp.float64)
+        vote_y_f64 = vote_y.astype(cp.float64)
+        del w, vote_x, vote_y
+
+        w_sum = w_f64.sum(axis=(1, 2))  # (N,) f64
         w_sum_safe = cp.maximum(w_sum, cp.float64(1e-30))
-        xc = (w * vote_x).sum(axis=(1, 2)) / w_sum_safe  # (N,)
-        yc = (w * vote_y).sum(axis=(1, 2)) / w_sum_safe  # (N,)
+        xc = (w_f64 * vote_x_f64).sum(axis=(1, 2)) / w_sum_safe  # (N,) f64
+        yc = (w_f64 * vote_y_f64).sum(axis=(1, 2)) / w_sum_safe  # (N,) f64
 
-        # -- Step 16: Spread metric --
-        spread_sq = (w * ((vote_x - xc[:, None, None])**2 +
-                          (vote_y - yc[:, None, None])**2)).sum(axis=(1, 2)) / w_sum_safe
-        spread = cp.sqrt(spread_sq)  # (N,)
+        # -- Step 16: Spread metric (float64) --
+        spread_sq = (w_f64 * ((vote_x_f64 - xc[:, None, None])**2 +
+                               (vote_y_f64 - yc[:, None, None])**2)).sum(axis=(1, 2)) / w_sum_safe
+        spread = cp.sqrt(spread_sq)  # (N,) f64
+        del w_f64, vote_x_f64, vote_y_f64
 
-        # -- Step 17: Per-ROI coordinate transform (centered upsampled -> original) --
+        # -- Step 17: Transfer to CPU --
         xc_cpu = cp.asnumpy(xc)   # (N,) centered coords in upsampled grid
         yc_cpu = cp.asnumpy(yc)
         spread_cpu = cp.asnumpy(spread)
 
-    # Convert from centered upsampled coords to original ROI pixel coords
-    centers = np.empty((N, 2), dtype=np.float64)
-    for i in range(N):
-        w_up_i = float(up_ws[i])
-        h_up_i = float(up_hs[i])
-        w_orig_i = float(orig_ws[i])
-        h_orig_i = float(orig_hs[i])
+    # -- Vectorized coordinate transform (no Python loop) --
+    up_ws_f = up_ws.astype(np.float64)
+    up_hs_f = up_hs.astype(np.float64)
+    orig_ws_f = orig_ws.astype(np.float64)
+    orig_hs_f = orig_hs.astype(np.float64)
 
-        # xc is relative to center of upsampled grid: xc_pix_up = xc + (w_up - 1) / 2
-        xc_pix_up = xc_cpu[i] + (w_up_i - 1.0) / 2.0
-        yc_pix_up = yc_cpu[i] + (h_up_i - 1.0) / 2.0
+    xc_pix_up = xc_cpu + (up_ws_f - 1.0) / 2.0
+    yc_pix_up = yc_cpu + (up_hs_f - 1.0) / 2.0
 
-        if factor > 1 and w_up_i > 1 and h_up_i > 1:
-            xc_orig = xc_pix_up * (w_orig_i - 1.0) / (w_up_i - 1.0)
-            yc_orig = yc_pix_up * (h_orig_i - 1.0) / (h_up_i - 1.0)
-        else:
-            xc_orig = xc_pix_up
-            yc_orig = yc_pix_up
+    if factor > 1:
+        centers_x = xc_pix_up * (orig_ws_f - 1.0) / np.maximum(up_ws_f - 1.0, 1.0)
+        centers_y = yc_pix_up * (orig_hs_f - 1.0) / np.maximum(up_hs_f - 1.0, 1.0)
+    else:
+        centers_x = xc_pix_up
+        centers_y = yc_pix_up
 
-        # -- Quality gate: in-bounds check --
-        if not (0 <= xc_orig < w_orig_i and 0 <= yc_orig < h_orig_i):
-            xc_orig = np.nan
-            yc_orig = np.nan
-            spread_cpu[i] = np.inf
+    centers = np.column_stack([centers_x, centers_y])
 
-        centers[i, 0] = xc_orig
-        centers[i, 1] = yc_orig
+    # Quality gate: in-bounds
+    oob = (centers[:, 0] < 0) | (centers[:, 0] >= orig_ws_f) | \
+          (centers[:, 1] < 0) | (centers[:, 1] >= orig_hs_f)
+    centers[oob] = np.nan
+    spread_cpu[oob] = np.inf
 
     return centers, spread_cpu
+
+
+def _isophote_curvature_batch_gpu(
+    rois: np.ndarray,
+    masks: np.ndarray,
+    *,
+    upsample_factor: int = 4,
+    boundary_margin: int | None = None,
+    pre_smooth_sigma: float = 0.5,
+    gpu_batch: int = 2048,
+    device: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Batch isophote curvature center estimation on GPU.
+
+    Each pixel's gradient defines a displacement vector toward the local
+    curvature center.  The weighted average of these voted centers (weighted
+    by curvedness) gives the subpixel center estimate.
+
+    Parameters
+    ----------
+    rois : (N, H, W) float64 array -- stacked ROIs
+    masks : (N, H, W) bool array -- validity masks (True = valid pixel)
+    upsample_factor : int -- bicubic upsampling factor (1 = disabled)
+    boundary_margin : int or None -- erosion margin near mask boundary
+    pre_smooth_sigma : float -- Gaussian smoothing sigma (in upsampled pixels)
+        applied before computing second derivatives.  Set to 0 to disable.
+    gpu_batch : int -- max ROIs per GPU batch (default 2048)
+    device : int -- GPU device
+
+    Returns
+    -------
+    centers : (N, 2) float64 array -- centers in ROI pixel coordinates [x, y]
+    spreads : (N,) float64 array -- weighted spread of voted centers per blob
+    """
+    _require_cupy()
+    rois = np.asarray(rois, dtype=np.float64)
+    masks = np.asarray(masks, dtype=bool)
+    N = rois.shape[0]
+    if N == 0:
+        return np.empty((0, 2), dtype=np.float64), np.empty((0,), dtype=np.float64)
+    if boundary_margin is None:
+        boundary_margin = upsample_factor
+
+    factor = int(upsample_factor)
+    centers_all = np.empty((N, 2), dtype=np.float64)
+    spreads_all = np.empty((N,), dtype=np.float64)
+
+    for s in range(0, N, gpu_batch):
+        e = min(N, s + gpu_batch)
+        c, sp = _isophote_curvature_inner_gpu(
+            rois[s:e], masks[s:e],
+            factor=factor, boundary_margin=boundary_margin,
+            pre_smooth_sigma=pre_smooth_sigma, device=device,
+        )
+        centers_all[s:e] = c
+        spreads_all[s:e] = sp
+
+    return centers_all, spreads_all
 
 
 def _extract_voronoi_rois(

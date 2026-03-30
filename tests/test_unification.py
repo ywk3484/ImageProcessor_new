@@ -74,3 +74,31 @@ def test_radial_symmetry_batched_matches_unbatched():
     # Results must be identical (same computation, just chunked)
     np.testing.assert_allclose(c_full, c_batched, atol=1e-10)
     np.testing.assert_allclose(r_full, r_batched, atol=1e-10)
+
+
+@skipno_gpu
+def test_isophote_batched_matches_unbatched():
+    """Batched isophote curvature (gpu_batch=3) matches full batch."""
+    from subpx._gpu.centers import _isophote_curvature_batch_gpu
+
+    rng = np.random.RandomState(42)
+    N = 10
+    size = 15
+    rois = []
+    for _ in range(N):
+        cx = size / 2 + rng.uniform(-1, 1)
+        cy = size / 2 + rng.uniform(-1, 1)
+        yy, xx = np.mgrid[:size, :size]
+        blob = np.exp(-((xx - cx)**2 + (yy - cy)**2) / (2 * 1.5**2))
+        rois.append(blob)
+    rois = np.stack(rois)
+    masks = np.ones_like(rois, dtype=bool)
+
+    c_full, s_full = _isophote_curvature_batch_gpu(
+        rois, masks, upsample_factor=4, device=0, gpu_batch=10000,
+    )
+    c_batched, s_batched = _isophote_curvature_batch_gpu(
+        rois, masks, upsample_factor=4, device=0, gpu_batch=3,
+    )
+    np.testing.assert_allclose(c_full, c_batched, atol=1e-10)
+    np.testing.assert_allclose(s_full, s_batched, atol=1e-10)
