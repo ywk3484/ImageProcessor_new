@@ -1487,46 +1487,47 @@ def _extract_voronoi_rois(
     origins : list of (x0, y0) top-left corners
     """
     H, W = gray.shape
-    rois_list = []
-    masks_list = []
-    origins = []
-    bg_list = []
+    N = len(rows)
+    if N == 0:
+        return np.zeros((0, 0, 0), dtype=np.float64), np.zeros((0, 0, 0), dtype=bool), []
 
-    for j, (x, y, w, h, cx, cy) in enumerate(rows):
-        x0 = max(0, int(x) - int(pad))
-        y0 = max(0, int(y) - int(pad))
-        x1 = min(W, int(x + w) + int(pad))
-        y1 = min(H, int(y + h) + int(pad))
-        roi = gray[y0:y1, x0:x1].astype(np.float64)
-        vmask = voronoi_labels[y0:y1, x0:x1] == j
+    rows_arr = np.asarray(rows, dtype=np.float64)
 
-        # Background-fill: 10th percentile of border pixels (numpy-only erosion)
+    # Vectorized bounding boxes
+    x0 = np.maximum(0, rows_arr[:, 0].astype(np.int32) - pad)
+    y0 = np.maximum(0, rows_arr[:, 1].astype(np.int32) - pad)
+    x1 = np.minimum(W, (rows_arr[:, 0] + rows_arr[:, 2]).astype(np.int32) + pad)
+    y1 = np.minimum(H, (rows_arr[:, 1] + rows_arr[:, 3]).astype(np.int32) + pad)
+    hs = y1 - y0
+    ws = x1 - x0
+    Hm = int(hs.max())
+    Wm = int(ws.max())
+
+    origins = list(zip(x0.tolist(), y0.tolist()))
+
+    rois_stack = np.zeros((N, Hm, Wm), dtype=np.float64)
+    masks_stack = np.zeros((N, Hm, Wm), dtype=bool)
+
+    for j in range(N):
+        _x0, _y0 = int(x0[j]), int(y0[j])
+        _x1, _y1 = int(x1[j]), int(y1[j])
+        h_r, w_r = int(hs[j]), int(ws[j])
+
+        roi = gray[_y0:_y1, _x0:_x1].astype(np.float64)
+        vmask = voronoi_labels[_y0:_y1, _x0:_x1] == j
+
+        # Background: 10th percentile of border pixels
         inner = vmask.copy()
         inner[0, :] = inner[-1, :] = inner[:, 0] = inner[:, -1] = False
         inner[1:, :] &= vmask[:-1, :]
         inner[:-1, :] &= vmask[1:, :]
         inner[:, 1:] &= vmask[:, :-1]
         inner[:, :-1] &= vmask[:, 1:]
-        border_mask = vmask & ~inner
-        border_vals = roi[border_mask]
+        border_vals = roi[vmask & ~inner]
         bg = float(np.percentile(border_vals, 10)) if border_vals.size > 0 else 0.0
-        roi_filled = np.where(vmask, roi, bg)
 
-        rois_list.append(roi_filled)
-        masks_list.append(vmask)
-        origins.append((x0, y0))
-        bg_list.append(bg)
-
-    # Pad to uniform size and stack
-    hs = [r.shape[0] for r in rois_list]
-    ws = [r.shape[1] for r in rois_list]
-    Hm, Wm = max(hs), max(ws)
-    rois_stack = np.zeros((len(rois_list), Hm, Wm), dtype=np.float64)
-    masks_stack = np.zeros((len(rois_list), Hm, Wm), dtype=bool)
-    for j, (roi, vmask) in enumerate(zip(rois_list, masks_list)):
-        h_r, w_r = roi.shape
-        rois_stack[j, :, :] = bg_list[j]
-        rois_stack[j, :h_r, :w_r] = roi
+        rois_stack[j, :, :] = bg
+        rois_stack[j, :h_r, :w_r] = np.where(vmask, roi, bg)
         masks_stack[j, :h_r, :w_r] = vmask
 
     return rois_stack, masks_stack, origins

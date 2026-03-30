@@ -227,3 +227,62 @@ def test_unified_no_tile_h_unchanged():
 
     result = detect_centers(img, backend="cpu", area_min=4, area_max=100, refine="weighted")
     assert result.centers_xy.shape[0] == 2
+
+
+def test_deprecated_detect_centers_tiled_warns():
+    """Deprecated detect_centers_tiled should warn and still work."""
+    import warnings
+    from subpx.legacy import detect_centers_tiled
+
+    img = np.zeros((64, 64), dtype=np.uint8)
+    img[10:14, 10:14] = 200
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = detect_centers_tiled(img, backend="cpu", area_min=4, area_max=100, refine="weighted")
+        assert len(w) >= 1
+        assert issubclass(w[0].category, DeprecationWarning)
+        assert "detect_centers_tiled" in str(w[0].message)
+    assert result.centers_xy.shape[0] == 1
+
+
+def test_deprecated_detect_centers_tiled_global_otsu_warns():
+    """Deprecated detect_centers_tiled_global_otsu should warn and still work."""
+    import warnings
+    from subpx.legacy import detect_centers_tiled_global_otsu
+
+    img = np.zeros((64, 64), dtype=np.uint8)
+    img[10:14, 10:14] = 200
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = detect_centers_tiled_global_otsu(
+            img, backend="cpu", area_min=4, area_max=100, refine="weighted",
+        )
+        assert len(w) >= 1
+        assert issubclass(w[0].category, DeprecationWarning)
+    assert result.centers_xy.shape[0] == 1
+
+
+@skipno_gpu
+def test_extract_voronoi_rois_vectorized_matches():
+    """Vectorized _extract_voronoi_rois must produce valid results."""
+    from subpx._gpu.centers import _extract_voronoi_rois
+    from subpx._gpu.voronoi import compute_voronoi_labels_gpu
+
+    img = np.zeros((64, 64), dtype=np.float64)
+    yy, xx = np.mgrid[:64, :64]
+    rows = []
+    for cy, cx in [(15, 15), (15, 45), (45, 15), (45, 45)]:
+        img += 200 * np.exp(-((xx - cx)**2 + (yy - cy)**2) / (2 * 2.0**2))
+        rows.append([cx - 4, cy - 4, 8, 8, float(cx), float(cy)])
+
+    seeds = np.array([[r[4], r[5]] for r in rows], dtype=np.float64)
+    voronoi_labels = compute_voronoi_labels_gpu(seeds, (64, 64), device=0)
+
+    rois, masks, origins = _extract_voronoi_rois(img, voronoi_labels, rows, pad=3)
+    assert rois.shape[0] == 4
+    assert masks.shape[0] == 4
+    assert len(origins) == 4
+    for i in range(4):
+        assert np.any(masks[i])
