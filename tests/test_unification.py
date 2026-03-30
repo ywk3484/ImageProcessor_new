@@ -184,3 +184,46 @@ def test_detect_centers_cpu_tiled():
         area_min=4, area_max=100, refine="weighted",
     )
     assert result.centers_xy.shape[0] == 2
+
+
+def test_unified_detect_centers_with_tile_h_cpu():
+    """Public detect_centers with tile_h should work on CPU."""
+    from subpx.centers import detect_centers
+
+    img = np.zeros((200, 100), dtype=np.uint8)
+    img[20:24, 20:24] = 200
+    img[120:124, 60:64] = 200
+
+    result = detect_centers(
+        img, backend="cpu", tile_h=100, overlap=20,
+        area_min=4, area_max=100, refine="weighted",
+    )
+    assert result.centers_xy.shape[0] == 2
+
+
+@skipno_gpu
+def test_unified_detect_centers_with_tile_h_gpu():
+    """Public detect_centers with tile_h should work on GPU."""
+    from subpx.centers import detect_centers
+
+    img = np.zeros((200, 100), dtype=np.uint8)
+    img[20:24, 20:24] = 200
+    img[120:124, 60:64] = 200
+
+    result = detect_centers(
+        img, backend="gpu", tile_h=100, overlap=20,
+        area_min=4, area_max=100, refine="weighted",
+    )
+    assert result.centers_xy.shape[0] == 2
+
+
+def test_unified_no_tile_h_unchanged():
+    """detect_centers without tile_h must behave exactly as before."""
+    from subpx.centers import detect_centers
+
+    img = np.zeros((64, 64), dtype=np.uint8)
+    img[10:14, 10:14] = 200
+    img[30:34, 40:44] = 200
+
+    result = detect_centers(img, backend="cpu", area_min=4, area_max=100, refine="weighted")
+    assert result.centers_xy.shape[0] == 2

@@ -12,8 +12,6 @@ except Exception:
 from .centers import (
     recommend_refine_method,
     detect_centers,
-    detect_centers_tiled,
-    detect_centers_tiled_global_otsu,
     refine_centers,
     refine_weighted_centroid,
     refine_logquadratic,
@@ -61,8 +59,6 @@ __all__ = [
     "GLTiledImshow",
     "GLOrtho2D",
     "detect_centers",
-    "detect_centers_tiled",
-    "detect_centers_tiled_global_otsu",
     "refine_centers",
     "refine_weighted_centroid",
     "refine_logquadratic",
