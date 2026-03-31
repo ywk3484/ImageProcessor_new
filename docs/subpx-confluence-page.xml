@@ -1,0 +1,1074 @@
+<ac:structured-macro ac:name="info">
+  <ac:rich-text-body>
+    <p><strong>subpx</strong> v0.2.0 &mdash; Photomask image-processing utilities for Jupyter notebooks.</p>
+    <p>Python 3.10+ &middot; NumPy core &middot; Optional: OpenCV, CuPy (GPU), scikit-image, scipy, tifffile</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="toc">
+  <ac:parameter ac:name="maxLevel">3</ac:parameter>
+  <ac:parameter ac:name="minLevel">1</ac:parameter>
+  <ac:parameter ac:name="style">square</ac:parameter>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Installation</h1>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:parameter ac:name="title">Install (editable mode)</ac:parameter>
+  <ac:plain-text-body><![CDATA[pip install -e .]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Core Concepts</h1>
+
+<h2>Coordinate Convention</h2>
+
+<table>
+  <colgroup><col /><col /><col /></colgroup>
+  <thead>
+    <tr>
+      <th>Context</th>
+      <th>Order</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Point arrays (centers_xy 등)</td>
+      <td><ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Blue</ac:parameter><ac:parameter ac:name="title">[x, y]</ac:parameter></ac:structured-macro></td>
+      <td>x = column, y = row</td>
+    </tr>
+    <tr>
+      <td>ShiftResult.shift_yx</td>
+      <td><ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Yellow</ac:parameter><ac:parameter ac:name="title">[y, x]</ac:parameter></ac:structured-macro></td>
+      <td>NumPy image axis convention (row, column)</td>
+    </tr>
+    <tr>
+      <td>Image shape</td>
+      <td><ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Grey</ac:parameter><ac:parameter ac:name="title">(H, W)</ac:parameter></ac:structured-macro></td>
+      <td>Standard NumPy shape</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Backend Dispatch</h2>
+
+<p>모든 주요 함수는 <code>backend</code> 파라미터를 통해 CPU/GPU 구현을 선택합니다.</p>
+
+<table>
+  <colgroup><col /><col /><col /></colgroup>
+  <thead>
+    <tr>
+      <th>Value</th>
+      <th>Description</th>
+      <th>Requirements</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>"auto"</code></td>
+      <td>CuPy가 설치되어 있으면 GPU, 아니면 CPU</td>
+      <td>&mdash;</td>
+    </tr>
+    <tr>
+      <td><code>"cpu"</code></td>
+      <td>OpenCV 기반 CPU 구현 사용</td>
+      <td>opencv-python</td>
+    </tr>
+    <tr>
+      <td><code>"gpu"</code></td>
+      <td>CuPy 기반 GPU 구현 사용 (segmentation은 CPU)</td>
+      <td>cupy</td>
+    </tr>
+  </tbody>
+</table>
+
+<ac:structured-macro ac:name="note">
+  <ac:rich-text-body>
+    <p>GPU 구현은 <strong>hybrid</strong> 방식입니다. Connected component labeling은 CPU(OpenCV)에서 수행하고, 비용이 높은 per-ROI refinement만 GPU(CuPy)에서 실행합니다. 모든 public API의 반환값은 NumPy 배열입니다.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<h2>Result Types</h2>
+
+<p>모든 함수는 dataclass 형태의 결과를 반환합니다. <code>subpx.types</code> 모듈에 정의되어 있습니다.</p>
+
+<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">CenterResult</ac:parameter>
+  <ac:rich-text-body>
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[@dataclass
+class CenterResult:
+    centers_xy: np.ndarray   # (N, 2) float64, [x, y] order
+    method: str              # refinement method used (e.g. "logquad")
+    backend: str = "cpu"
+    meta: dict[str, Any] = {}]]></ac:plain-text-body>
+</ac:structured-macro>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">PitchResult</ac:parameter>
+  <ac:rich-text-body>
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[@dataclass
+class PitchResult:
+    values: np.ndarray       # (L,) per-line pitch values
+    axis: str                # "row" or "col"
+    method: str              # e.g. "per-line"
+    backend: str = "cpu"
+    meta: dict[str, Any] = {}
+    # meta keys: line_centers_perp, line_counts, line_ids_per_point]]></ac:plain-text-body>
+</ac:structured-macro>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">ShiftResult</ac:parameter>
+  <ac:rich-text-body>
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[@dataclass
+class ShiftResult:
+    shift_yx: np.ndarray          # [y, x] shift (row, column)
+    error: float | None = None
+    phasediff: float | None = None
+    backend: str = "cpu"
+    method: str = "phase_xcorr"
+    meta: dict[str, Any] = {}]]></ac:plain-text-body>
+</ac:structured-macro>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">SpectrumResult</ac:parameter>
+  <ac:rich-text-body>
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[@dataclass
+class SpectrumResult:
+    frequency: np.ndarray    # spatial frequency in 1/(x units)
+    amplitude: np.ndarray    # amplitude in y units
+    period: np.ndarray       # spatial period in x units
+    method: str = "fft"
+    meta: dict[str, Any] = {}]]></ac:plain-text-body>
+</ac:structured-macro>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">ComponentStatsResult</ac:parameter>
+  <ac:rich-text-body>
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[@dataclass
+class ComponentStatsResult:
+    labels: np.ndarray       # label image (H, W)
+    stats: np.ndarray        # per-component stats (N, ...)
+    centroids: np.ndarray    # per-component centroids
+    num_labels: int
+    backend: str = "cpu"
+    meta: dict[str, Any] = {}]]></ac:plain-text-body>
+</ac:structured-macro>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Center Detection &mdash; <code>subpx.centers</code></h1>
+
+<p>Photomask 이미지에서 feature center를 subpixel 정밀도로 검출합니다.</p>
+
+<h2>detect_centers</h2>
+
+<p>메인 함수. Threshold &rarr; Connected Components &rarr; Subpixel Refinement 파이프라인을 실행합니다.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Signature</ac:parameter>
+  <ac:plain-text-body><![CDATA[def detect_centers(
+    image: np.ndarray,
+    *,
+    backend: str = "auto",
+    threshold: str = "triangle",
+    invert: bool = False,
+    area_min: int = 1,
+    area_max: int = 50,
+    morph_open: int = 0,
+    morph_close: int = 0,
+    pad: int = 3,
+    refine: str = "logquad",
+    connectivity: int = 8,
+    gpu_batch: int = 4096,
+    device: int = 0,
+    use_float64: bool = True,
+    components_backend: str = "cpu",
+    small_feature_max: float = 12.0,
+    upsample_factor: int = 4,
+    tile_h: int | None = None,
+    overlap: int = 128,
+    threshold_mode: str = "auto",
+    otsu_downsample: int = 4,
+    thr_scale: float = 0.8,
+    dedupe_eps: float = 1.5,
+) -> CenterResult]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">Parameter Reference (click to expand)</ac:parameter>
+  <ac:rich-text-body>
+    <table>
+      <colgroup><col /><col /><col /><col /></colgroup>
+      <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>image</code></td><td>ndarray</td><td>&mdash;</td><td>입력 grayscale 이미지 (H, W)</td></tr>
+        <tr><td><code>backend</code></td><td>str</td><td><code>"auto"</code></td><td><code>"auto"</code> / <code>"cpu"</code> / <code>"gpu"</code></td></tr>
+        <tr><td><code>threshold</code></td><td>str</td><td><code>"triangle"</code></td><td>Thresholding algorithm: <code>"triangle"</code> or <code>"otsu"</code></td></tr>
+        <tr><td><code>invert</code></td><td>bool</td><td><code>False</code></td><td>밝은 배경 위 어두운 feature인 경우 <code>True</code></td></tr>
+        <tr><td><code>area_min</code></td><td>int</td><td><code>1</code></td><td>Connected component 최소 면적 (pixels)</td></tr>
+        <tr><td><code>area_max</code></td><td>int</td><td><code>50</code></td><td>Connected component 최대 면적 (pixels)</td></tr>
+        <tr><td><code>morph_open</code></td><td>int</td><td><code>0</code></td><td>Morphological opening kernel size (0 = skip)</td></tr>
+        <tr><td><code>morph_close</code></td><td>int</td><td><code>0</code></td><td>Morphological closing kernel size (0 = skip)</td></tr>
+        <tr><td><code>pad</code></td><td>int</td><td><code>3</code></td><td>Bounding box 주변 padding (pixels)</td></tr>
+        <tr><td><code>refine</code></td><td>str</td><td><code>"logquad"</code></td><td>Refinement method (아래 표 참조)</td></tr>
+        <tr><td><code>connectivity</code></td><td>int</td><td><code>8</code></td><td>Connected component connectivity (4 or 8)</td></tr>
+        <tr><td><code>gpu_batch</code></td><td>int</td><td><code>4096</code></td><td>GPU 배치 크기 (ROI 개수)</td></tr>
+        <tr><td><code>device</code></td><td>int</td><td><code>0</code></td><td>CUDA device index</td></tr>
+        <tr><td><code>tile_h</code></td><td>int?</td><td><code>None</code></td><td>타일 높이. 설정 시 이미지를 수평 타일로 분할 처리</td></tr>
+        <tr><td><code>overlap</code></td><td>int</td><td><code>128</code></td><td>타일 간 overlap (pixels)</td></tr>
+        <tr><td><code>threshold_mode</code></td><td>str</td><td><code>"auto"</code></td><td><code>"auto"</code> / <code>"local"</code> / <code>"global"</code></td></tr>
+        <tr><td><code>dedupe_eps</code></td><td>float</td><td><code>1.5</code></td><td>타일 병합 후 중복 제거 반경 (pixels)</td></tr>
+      </tbody>
+    </table>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<h3>Refinement Methods</h3>
+
+<table>
+  <colgroup><col /><col /><col /><col /></colgroup>
+  <thead>
+    <tr><th>refine=</th><th>Method</th><th>Best For</th><th>Backend</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>"weighted"</code></td>
+      <td>Intensity-weighted centroid</td>
+      <td>Small blobs, fast processing</td>
+      <td><ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Green</ac:parameter><ac:parameter ac:name="title">CPU</ac:parameter></ac:structured-macro> <ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Green</ac:parameter><ac:parameter ac:name="title">GPU</ac:parameter></ac:structured-macro></td>
+    </tr>
+    <tr>
+      <td><code>"logquad"</code></td>
+      <td>Log-quadratic fitting</td>
+      <td>Small-to-medium features, good accuracy</td>
+      <td><ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Green</ac:parameter><ac:parameter ac:name="title">CPU</ac:parameter></ac:structured-macro> <ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Green</ac:parameter><ac:parameter ac:name="title">GPU</ac:parameter></ac:structured-macro></td>
+    </tr>
+    <tr>
+      <td><code>"edge_gradmoment"</code></td>
+      <td>Gradient-moment edge localization</td>
+      <td>Large features with clear edges</td>
+      <td><ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Red</ac:parameter><ac:parameter ac:name="title">GPU only</ac:parameter></ac:structured-macro></td>
+    </tr>
+    <tr>
+      <td><code>"radial_symmetry"</code></td>
+      <td>Parthasarathy radial symmetry + Voronoi</td>
+      <td>Closely-packed small blobs (3-6 px)</td>
+      <td><ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Red</ac:parameter><ac:parameter ac:name="title">GPU only</ac:parameter></ac:structured-macro></td>
+    </tr>
+    <tr>
+      <td><code>"isophote_curvature"</code></td>
+      <td>Isophote curvature + Voronoi</td>
+      <td>Small blobs, alternative to radial symmetry</td>
+      <td><ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Red</ac:parameter><ac:parameter ac:name="title">GPU only</ac:parameter></ac:structured-macro></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Basic Usage</h3>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Basic center detection</ac:parameter>
+  <ac:plain-text-body><![CDATA[import subpx
+import numpy as np
+
+# 이미지 로드
+image = ...  # (H, W) grayscale ndarray
+
+# 기본 사용법 (log-quadratic refinement, auto backend)
+result = subpx.detect_centers(image, area_min=5, area_max=200)
+print(result.centers_xy.shape)  # (N, 2) in [x, y] order
+print(result.method)            # "logquad"]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Large image with tiling</ac:parameter>
+  <ac:plain-text-body><![CDATA[# 대형 이미지: 타일 분할 처리
+result = subpx.detect_centers(
+    large_image,
+    tile_h=8192,             # 8192px 높이 타일로 분할
+    overlap=128,             # 타일 간 128px overlap
+    threshold_mode="global", # 전체 이미지 기준 global threshold
+    area_min=5,
+    area_max=200,
+    refine="logquad",
+)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">GPU + edge_gradmoment (large features)</ac:parameter>
+  <ac:plain-text-body><![CDATA[# 큰 feature에 대한 edge 기반 refinement (GPU 필요)
+result = subpx.detect_centers(
+    image,
+    backend="gpu",
+    refine="edge_gradmoment",
+    area_min=50,
+    area_max=5000,
+)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>recommend_refine_method</h2>
+
+<p>Feature 크기에 따라 적절한 refinement method를 추천합니다.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[def recommend_refine_method(
+    width_px: float,
+    height_px: float,
+    *,
+    small_feature_max: float = 12.0,
+) -> str
+
+# Example
+method = subpx.recommend_refine_method(width_px=8, height_px=8)
+# Returns "logquad" (small feature)
+
+method = subpx.recommend_refine_method(width_px=30, height_px=30)
+# Returns "edge_gradmoment" (large feature)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>filter_centers</h2>
+
+<p>이미지 가장자리 근처의 center를 제거합니다.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[filtered = subpx.filter_centers(
+    result.centers_xy,
+    image_shape_hw=image.shape,  # (H, W)
+    margin=5.0,                  # 가장자리에서 5px 이내 제거
+)
+# Returns (M, 2) float64 in [x, y] order]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>dedupe_centers</h2>
+
+<p>근접 중복 center를 병합합니다. 타일 병합 후에 유용합니다.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[deduped = subpx.dedupe_centers(
+    centers_xy,
+    eps=1.5,  # 1.5px 이내의 center를 평균 위치로 병합
+)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Pitch Estimation &mdash; <code>subpx.pitch</code></h1>
+
+<p>검출된 center 좌표로부터 lattice pitch (feature 간 간격)를 추정합니다.</p>
+
+<h2>estimate_pitch</h2>
+
+<p>Global pitch를 KNN 기반으로 추정합니다.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Signature</ac:parameter>
+  <ac:plain-text-body><![CDATA[def estimate_pitch(
+    centers_xy: np.ndarray,
+    *,
+    mode: str = "global",
+    method: str = "knn",
+    k: int = 8,
+    theta_deg: float = 15.0,
+    min_sep: float = 0.5,
+    max_sep: float | None = None,
+    refine: bool = True,
+) -> dict]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">Parameter Reference</ac:parameter>
+  <ac:rich-text-body>
+    <table>
+      <colgroup><col /><col /><col /><col /></colgroup>
+      <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>centers_xy</code></td><td>ndarray</td><td>&mdash;</td><td>(N, 2) center 좌표 [x, y]</td></tr>
+        <tr><td><code>k</code></td><td>int</td><td><code>8</code></td><td>KNN에서 각 point 당 고려할 이웃 수</td></tr>
+        <tr><td><code>theta_deg</code></td><td>float</td><td><code>15.0</code></td><td>x/y 방향 분류 각도 허용범위 (degrees)</td></tr>
+        <tr><td><code>min_sep</code></td><td>float</td><td><code>0.5</code></td><td>이웃 벡터 최소 거리 필터</td></tr>
+        <tr><td><code>max_sep</code></td><td>float?</td><td><code>None</code></td><td>이웃 벡터 최대 거리 필터</td></tr>
+        <tr><td><code>refine</code></td><td>bool</td><td><code>True</code></td><td>index regression 기반 refinement 수행 여부</td></tr>
+      </tbody>
+    </table>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Example</ac:parameter>
+  <ac:plain-text-body><![CDATA[pitch_info = subpx.estimate_pitch(result.centers_xy, k=8, refine=True)
+
+print(pitch_info["refined"]["pitch_x"])  # x 방향 pitch (pixels)
+print(pitch_info["refined"]["pitch_y"])  # y 방향 pitch (pixels)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h3>Return Structure</h3>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[{
+    "initial": {
+        "pitch_x": float,           # KNN median x-pitch
+        "pitch_y": float,           # KNN median y-pitch
+        "dx_candidates": np.ndarray,
+        "dy_candidates": np.ndarray,
+    },
+    "refined": {                    # None if refine=False
+        "pitch_x": float,          # refined x-pitch
+        "pitch_y": float,          # refined y-pitch
+        "kept_count": int,          # number of points used
+    }
+}]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>estimate_pitch_lines</h2>
+
+<p>Row 또는 column 단위로 그룹핑한 후 line별 pitch를 추정합니다.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Signature</ac:parameter>
+  <ac:plain-text-body><![CDATA[def estimate_pitch_lines(
+    centers_xy: np.ndarray,
+    *,
+    line_axis: str = "row",         # "row" or "col"
+    tol: float = 1.5,              # line grouping tolerance (px)
+    min_points_per_line: int = 3,  # minimum points for a line
+    backend: str = "auto",
+    device: int = 0,
+    pitch_var_max: float = 0.25,   # GPU-only row consistency filter
+) -> PitchResult]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Example</ac:parameter>
+  <ac:plain-text-body><![CDATA[pitch_result = subpx.estimate_pitch_lines(
+    result.centers_xy,
+    line_axis="row",
+    tol=1.5,
+    min_points_per_line=5,
+)
+
+print(pitch_result.values)                    # (L,) per-line pitch
+print(pitch_result.meta["line_centers_perp"]) # 각 line의 y좌표
+print(np.nanmedian(pitch_result.values))      # 전체 median pitch]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>pitch_residuals</h2>
+
+<p>알려진 pitch에 대한 각 center의 x-residual을 계산합니다.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Example</ac:parameter>
+  <ac:plain-text-body><![CDATA[res = subpx.pitch_residuals(
+    result.centers_xy,
+    pitch_x=10.5,  # known or estimated pitch
+)
+
+print(res["residual"])  # per-point residual
+print(res["index"])     # nearest lattice index per point]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Image Registration &mdash; <code>subpx.registration</code></h1>
+
+<p>Phase cross-correlation 기반 sub-pixel shift 추정.</p>
+
+<h2>estimate_shift</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Signature</ac:parameter>
+  <ac:plain-text-body><![CDATA[def estimate_shift(
+    ref: np.ndarray,
+    mov: np.ndarray,
+    *,
+    method: str = "phase_xcorr",
+    backend: str = "auto",
+    upsample_factor: int = 20,
+    device: int = 0,
+    use_float64: bool = True,
+) -> ShiftResult]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">Parameter Reference</ac:parameter>
+  <ac:rich-text-body>
+    <table>
+      <colgroup><col /><col /><col /><col /></colgroup>
+      <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>ref</code></td><td>ndarray</td><td>&mdash;</td><td>Reference 이미지</td></tr>
+        <tr><td><code>mov</code></td><td>ndarray</td><td>&mdash;</td><td>이동된(moved) 이미지</td></tr>
+        <tr><td><code>upsample_factor</code></td><td>int</td><td><code>20</code></td><td>Sub-pixel precision factor. CPU: iterative DFT refinement. GPU: parabolic peak fit (이 값 무시)</td></tr>
+      </tbody>
+    </table>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="warning">
+  <ac:rich-text-body>
+    <p><code>ShiftResult.shift_yx</code>는 <strong>[y, x]</strong> 순서입니다. 다른 함수들의 <code>[x, y]</code> 순서와 다르므로 주의하세요.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Example</ac:parameter>
+  <ac:plain-text-body><![CDATA[shift = subpx.estimate_shift(ref_image, moved_image, upsample_factor=20)
+
+print(shift.shift_yx)    # [dy, dx] in pixels
+print(shift.error)       # estimation error (if available)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>apply_shift</h2>
+
+<p>이미지에 sub-pixel shift를 적용합니다.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[aligned = subpx.apply_shift(
+    moved_image,
+    shift.shift_yx,  # [y, x] order
+    order=1,         # 1=bilinear, 0=nearest
+    cval=0.0,        # boundary fill value
+)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>crop_overlap</h2>
+
+<p>두 이미지의 overlap 영역만 crop합니다.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[ref_crop, mov_crop = subpx.crop_overlap(ref_image, moved_image, shift.shift_yx)
+# ref_crop, mov_crop은 동일한 spatial region을 나타냄]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Spectral Analysis &mdash; <code>subpx.spectra</code></h1>
+
+<p>Pitch error의 FFT 기반 주기 분석. 장비 진동, 격자 왜곡 등 주기적 오차를 검출합니다.</p>
+
+<h2>fft_pitch_error</h2>
+
+<p>위치에 따른 residual/error의 FFT spectral analysis.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Signature</ac:parameter>
+  <ac:plain-text-body><![CDATA[def fft_pitch_error(
+    x,                                # position values
+    y,                                # residual/error values
+    *,
+    dx: float | None = None,         # resampling grid spacing (auto if None)
+    detrend: str = "linear",         # "none" / "mean" / "linear"
+    window: str = "hann",            # "hann" / "none"
+    one_sided: bool = True,          # positive frequencies only
+    amplitude_units: str = "same_as_y",
+) -> SpectrumResult]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Example</ac:parameter>
+  <ac:plain-text-body><![CDATA[# pitch residual로부터 주기적 오차 분석
+res = subpx.pitch_residuals(centers_xy, pitch_x=10.5)
+
+spec = subpx.fft_pitch_error(
+    res["x"],
+    res["residual"],
+    detrend="linear",
+    window="hann",
+)
+
+print(spec.frequency)   # spatial frequencies
+print(spec.amplitude)   # amplitudes
+print(spec.period)      # spatial periods]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>top_periodic_errors</h2>
+
+<p>스펙트럼에서 가장 강한 주기 성분 Top-N을 추출합니다.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[peaks = subpx.top_periodic_errors(spec, n=5, min_frequency=0.001)
+
+for i in range(len(peaks["frequency"])):
+    print(f"Period: {peaks['period'][i]:.1f} px, "
+          f"Amplitude: {peaks['amplitude'][i]:.4f} px")]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>fft_periodicity_uniform / fft_periodicity_resample</h2>
+
+<table>
+  <colgroup><col /><col /></colgroup>
+  <thead>
+    <tr><th>Function</th><th>Use Case</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>fft_periodicity_uniform</code></td>
+      <td>Uniformly sampled data (예: row당 하나의 pitch 값)</td>
+    </tr>
+    <tr>
+      <td><code>fft_periodicity_resample</code></td>
+      <td>Irregularly spaced data (linear interpolation으로 resampling 후 FFT)</td>
+    </tr>
+  </tbody>
+</table>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[# Uniform sampling
+result = subpx.fft_periodicity_uniform(x_um, pitch_values, detrend_order=1)
+
+# Irregular sampling (auto-resample)
+result = subpx.fft_periodicity_resample(x_um, pitch_values, dx_um=0.5)
+
+# Both return:
+# { "freq_cyc_per_um": ndarray, "period_um": ndarray, "amplitude": ndarray }]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Calibration &mdash; <code>subpx.calibration</code></h1>
+
+<p>Center 좌표로부터 residual map 생성, distortion field fitting 등 calibration 관련 기능.</p>
+
+<h2>Workflow Overview</h2>
+
+<ac:structured-macro ac:name="panel">
+  <ac:parameter ac:name="title">Calibration Pipeline</ac:parameter>
+  <ac:parameter ac:name="borderStyle">solid</ac:parameter>
+  <ac:rich-text-body>
+    <ol>
+      <li><code>residuals_vs_x_by_line</code> &mdash; center를 line별로 그룹핑, per-point residual 계산</li>
+      <li><code>build_row_residual_map</code> &mdash; 2D residual map 생성 (line &times; x-bin)</li>
+      <li><code>smooth_row_residual_map</code> &mdash; Gaussian smoothing (NaN-aware)</li>
+      <li><code>interpolate_row_residual_field</code> &mdash; 임의 좌표에서 residual 보간</li>
+    </ol>
+    <p>또는 <code>fit_rowwise_distortion_field</code>로 2-4 단계를 한번에 실행.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<h2>residuals_vs_x_by_line</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[cloud = subpx.residuals_vs_x_by_line(
+    centers_xy,
+    line_axis="row",          # group by y-coordinate
+    line_threshold=10.0,      # gap threshold for line clustering
+    pitch=None,               # auto-estimate if None
+)
+
+# Returns dict with keys:
+# "x", "residual", "line_id", "line_coord", "pitch"]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>build_row_residual_map</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[rmap = subpx.build_row_residual_map(
+    centers_xy,
+    line_axis="row",
+    line_threshold=10.0,
+    bin_px=32.0,             # x-direction bin width
+    min_count_per_bin=1,     # minimum points per bin
+)
+
+# rmap["residual_map"]   : (R, K) float64, NaN where sparse
+# rmap["x_bin_centers"]  : (K,) bin center x-coordinates
+# rmap["line_coord"]     : (R,) y-coordinate per line]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>smooth_row_residual_map</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[smoothed = subpx.smooth_row_residual_map(
+    rmap["residual_map"],
+    rmap["support_map"],
+    sigma_x_bins=3.0,        # Gaussian sigma along x-bin axis
+    sigma_row=1.5,           # Gaussian sigma along row axis
+)
+
+# smoothed["smoothed_map"] : (R, K) float64]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>fit_rowwise_distortion_field (All-in-One)</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Convenience function</ac:parameter>
+  <ac:plain-text-body><![CDATA[field = subpx.fit_rowwise_distortion_field(
+    centers_xy,
+    line_axis="row",
+    line_threshold=10.0,
+    pitch=None,             # auto-estimate
+    bin_px=32.0,
+    sigma_x_bins=3.0,
+    sigma_row=1.5,
+)
+
+# Returns merged dict with all keys from
+# build_row_residual_map + smooth_row_residual_map]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>Utility Functions</h2>
+
+<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">assign_clusters_1d / split_clusters_1d</ac:parameter>
+  <ac:rich-text-body>
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[# 1D 값을 gap threshold 기준으로 cluster 분할
+labels, centers, bounds = subpx.assign_clusters_1d(
+    y_values,
+    threshold=10.0,  # gap > 10.0 이면 새 cluster
+)
+
+# split_clusters_1d: sorted array에서 split indices 반환
+split_idx, bounds = subpx.split_clusters_1d(y_values, threshold=10.0)]]></ac:plain-text-body>
+</ac:structured-macro>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">line_offset_summary</ac:parameter>
+  <ac:rich-text-body>
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[# Per-line median offset 계산
+summary = subpx.line_offset_summary(cloud)
+
+# summary["line_id"] : unique line IDs
+# summary["offset"]  : median residual per line
+# summary["count"]   : point count per line]]></ac:plain-text-body>
+</ac:structured-macro>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Mosaic &mdash; <code>subpx.mosaic</code></h1>
+
+<p>TIFF stripe/board 파일 파싱, 페이지 순회, global 좌표 매핑. 대형 photomask 이미지 처리에 사용.</p>
+
+<h2>TIFF Index 구성</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[from pathlib import Path
+import subpx
+
+# 파일명 형식: {stripe}_{vertical}_{board}.tiff
+tiff_files = list(Path("data/").glob("*.tiff"))
+
+# TiffKey 파싱
+key = subpx.parse_tiff_key("3_1_2.tiff")
+print(key.stripe, key.vertical, key.board)  # 3, 1, 2
+
+# (stripe, board) -> [files sorted by vertical] 인덱스 생성
+index = subpx.build_tiff_index(tiff_files)
+# {(3, 2): [Path("3_0_2.tiff"), Path("3_1_2.tiff"), ...], ...}]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>Page Iteration</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[files_v = index[(stripe, board)]
+
+# 모든 vertical 파일의 모든 page를 순서대로 순회
+for k, page_image in subpx.iter_pages_across_vertical(files_v):
+    print(f"Page {k}: shape={page_image.shape}")
+
+# canonical ordering (reverse_pages 옵션)
+for k_canon, page_image in subpx.iter_pages_canonical(files_v, reverse_pages=True):
+    # k_canon은 항상 0부터 증가, 물리적 순서만 역전
+    pass]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>Global Coordinate Mapping</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[# page-local 좌표 -> global 좌표 변환
+global_xy = subpx.map_centers_to_global(
+    local_centers_xy,
+    stripe_meta={"Hprime": 100000, "x0": 0, "y0": 0},
+    board_meta={"x0": 5000},
+    k_canon=42,         # page index
+    H=2048,             # page height
+    crop_top=0,
+    flipud=False,
+)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>process_stripe_board (End-to-End)</h2>
+
+<p>하나의 stripe/board에 대한 전체 파이프라인: page 순회 &rarr; center 검출 &rarr; margin filter &rarr; dedupe &rarr; global mapping.</p>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[all_centers = subpx.process_stripe_board(
+    files_v=index[(stripe, board)],
+    stripe_meta={"Hprime": 100000},
+    board_meta={"x0": 5000},
+    cell_only_mask=cell_mask,   # bool array, True for cell pages
+    H=2048,
+    reverse_pages=False,
+    flipud=False,
+    detect_kwargs=dict(
+        area_min=5,
+        area_max=200,
+        refine="logquad",
+    ),
+    margin=5.0,
+    dedupe_eps=1.5,
+)
+# Returns (N, 2) float64 global [x, y] coordinates]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Batch Processing &mdash; <code>subpx.batch</code></h1>
+
+<p>이미지 스택/시퀀스에 대한 일괄 처리 wrapper.</p>
+
+<table>
+  <colgroup><col /><col /></colgroup>
+  <thead>
+    <tr><th>Function</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>process_frames(frames, operation, ...)</code></td>
+      <td>각 frame에 <code>operation(frame, ...)</code> 적용</td>
+    </tr>
+    <tr>
+      <td><code>process_stack(stack, operation, ...)</code></td>
+      <td><code>process_frames</code>의 alias</td>
+    </tr>
+    <tr>
+      <td><code>detect_centers_batch(frames, ...)</code></td>
+      <td>각 frame에 <code>detect_centers</code> 적용</td>
+    </tr>
+    <tr>
+      <td><code>detect_centers_tiled_batch(frames, tile_h=8192, ...)</code></td>
+      <td>각 frame에 tiled <code>detect_centers</code> 적용</td>
+    </tr>
+    <tr>
+      <td><code>estimate_shift_batch(ref_frames, mov_frames, ...)</code></td>
+      <td>쌍으로 된 frame에 <code>estimate_shift</code> 적용</td>
+    </tr>
+  </tbody>
+</table>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Example</ac:parameter>
+  <ac:plain-text-body><![CDATA[# 이미지 스택에 대해 일괄 center 검출
+results = subpx.detect_centers_batch(
+    image_stack,
+    area_min=5,
+    area_max=200,
+    progress=True,  # 50 frame마다 진행률 출력
+)
+
+# 대형 이미지 스택에 tiled 처리
+results = subpx.detect_centers_tiled_batch(
+    image_stack,
+    tile_h=8192,
+    area_min=5,
+    area_max=200,
+    progress=True,
+)
+
+# 일괄 shift 추정
+shifts = subpx.estimate_shift_batch(
+    ref_frames,
+    mov_frames,
+    upsample_factor=20,
+    progress=True,
+)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Connected Components &mdash; <code>subpx.components</code></h1>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[comp = subpx.connected_components_stats(
+    binary_mask,
+    backend="auto",
+    connectivity=8,
+)
+
+print(comp.num_labels)    # number of components (excluding background)
+print(comp.labels.shape)  # (H, W) label image
+print(comp.stats.shape)   # (N, ...) per-component stats
+print(comp.centroids)     # per-component centroids]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Common Workflows</h1>
+
+<h2>Workflow 1: Basic Center Detection + Pitch Estimation</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Complete workflow</ac:parameter>
+  <ac:plain-text-body><![CDATA[import subpx
+import numpy as np
+
+# 1. Load image
+image = ...  # (H, W) grayscale
+
+# 2. Detect centers
+result = subpx.detect_centers(
+    image,
+    area_min=5,
+    area_max=200,
+    refine="logquad",
+)
+centers = result.centers_xy  # (N, 2) [x, y]
+
+# 3. Filter edge centers
+centers = subpx.filter_centers(centers, image.shape, margin=10)
+
+# 4. Estimate pitch
+pitch_info = subpx.estimate_pitch(centers, k=8, refine=True)
+px = pitch_info["refined"]["pitch_x"]
+py = pitch_info["refined"]["pitch_y"]
+print(f"Pitch: x={px:.3f}, y={py:.3f} pixels")
+
+# 5. Per-line pitch analysis
+pitch_lines = subpx.estimate_pitch_lines(
+    centers,
+    line_axis="row",
+    tol=1.5,
+)
+print(f"Median per-line pitch: {np.nanmedian(pitch_lines.values):.3f}")]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>Workflow 2: Residual Analysis + Distortion Field</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Calibration workflow</ac:parameter>
+  <ac:plain-text-body><![CDATA[# 1. Detect centers (assumed done)
+centers = result.centers_xy
+
+# 2. Build and smooth distortion field
+field = subpx.fit_rowwise_distortion_field(
+    centers,
+    line_axis="row",
+    line_threshold=10.0,
+    bin_px=32.0,
+    sigma_x_bins=3.0,
+    sigma_row=1.5,
+)
+
+# 3. Analyze periodic errors in residuals
+cloud = subpx.residuals_vs_x_by_line(centers, line_axis="row")
+spec = subpx.fft_pitch_error(cloud["x"], cloud["residual"])
+
+# 4. Top periodic error components
+peaks = subpx.top_periodic_errors(spec, n=5)
+for i in range(len(peaks["frequency"])):
+    print(f"Period: {peaks['period'][i]:.1f} px, "
+          f"Amp: {peaks['amplitude'][i]:.4f} px")]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>Workflow 3: Image Registration</h2>
+
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:parameter ac:name="title">Registration workflow</ac:parameter>
+  <ac:plain-text-body><![CDATA[# 1. Estimate shift between two images
+shift = subpx.estimate_shift(ref_image, mov_image, upsample_factor=20)
+print(f"Shift: dy={shift.shift_yx[0]:.3f}, dx={shift.shift_yx[1]:.3f}")
+
+# 2. Apply shift to align
+aligned = subpx.apply_shift(mov_image, shift.shift_yx)
+
+# 3. Crop to overlapping region
+ref_crop, mov_crop = subpx.crop_overlap(ref_image, mov_image, shift.shift_yx)]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h1>Legacy Functions</h1>
+
+<ac:structured-macro ac:name="warning">
+  <ac:rich-text-body>
+    <p>아래 함수들은 <strong>deprecated</strong>입니다. <code>DeprecationWarning</code>을 발생시키며 새 API로 redirect됩니다.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<table>
+  <colgroup><col /><col /></colgroup>
+  <thead>
+    <tr><th>Legacy Function</th><th>Replacement</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>detect_centers_tiled(image, tile_h=8192, ...)</code></td>
+      <td><code>detect_centers(image, tile_h=8192, ...)</code></td>
+    </tr>
+    <tr>
+      <td><code>detect_centers_tiled_global_otsu(image, ...)</code></td>
+      <td><code>detect_centers(image, tile_h=..., threshold_mode="global", ...)</code></td>
+    </tr>
+  </tbody>
+</table>
