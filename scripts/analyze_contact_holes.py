@@ -72,7 +72,14 @@ def save_figures(result, output: Path, metric: str, *, shared_scale: bool = Fals
                              constrained_layout=True)
     for ax, (method, measurement) in zip(axes[0], result.measurements.items()):
         values = measurement.metrics["cd_equivalent_px"][measurement.valid] * result.pixel_size
-        ax.hist(values, bins=40, color="#327da8", alpha=0.85)
+        # Nearly identical CDs can span fewer than 40 representable floats.
+        # Give their single bin a visible width instead of plotting roundoff.
+        bins, hist_range = 40, None
+        if len(values) and np.isclose(values.min(), values.max(), rtol=1e-12, atol=0):
+            center = float(values[0])
+            half_width = max(0.5, 0.05 * abs(center))
+            bins, hist_range = 1, (center - half_width, center + half_width)
+        ax.hist(values, bins=bins, range=hist_range, color="#327da8", alpha=0.85)
         if len(values):
             ax.axvline(np.median(values), color="#d35333", ls="--", label=f"Median {np.median(values):.3f}")
             ax.legend(frameon=False)
