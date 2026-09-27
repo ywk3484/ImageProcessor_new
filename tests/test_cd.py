@@ -217,25 +217,108 @@ def test_gpu_cell_partition_parity():
         np.testing.assert_allclose(cpu.measurements[method].contours_xy, gpu.measurements[method].contours_xy)
 
 
-def test_cli_writes_maps_and_provenance(tmp_path):
+def test_load_image_decodes_only_selected_tiff_pages(tmp_path, monkeypatch):
+    import tifffile
+    from scripts.analyze_contact_holes import load_image
+
+    image_path = tmp_path / "stack.tiff"
+    stack = np.broadcast_to(np.arange(1500, dtype=np.uint16)[:, None, None], (1500, 8, 12))
+    tifffile.imwrite(image_path, stack, photometric="minisblack")
+    decoded = []
+    original_asarray = tifffile.TiffPage.asarray
+
+    def record_decode(self, *args, **kwargs):
+        decoded.append(self.index)
+        return original_asarray(self, *args, **kwargs)
+
+    monkeypatch.setattr(tifffile.TiffPage, "asarray", record_decode)
+    first = load_image(image_path)
+    last = load_image(image_path, page=1499)
+    np.testing.assert_array_equal(first, stack[0])
+    np.testing.assert_array_equal(last, stack[1499])
+    assert first.dtype == last.dtype == np.uint16
+    assert decoded == [0, 1499]
+
+
+@pytest.mark.parametrize("suffix,page,message", [
+    (".tiff", -1, "--page must be >= 0"),
+    (".tiff", 3, "has 3 pages"),
+    (".png", 1, "only supported for TIFF"),
+])
+def test_cli_rejects_invalid_page_before_export(tmp_path, capsys, suffix, page, message):
+    import tifffile
     from PIL import Image
     from scripts.analyze_contact_holes import main
 
-    image_path = tmp_path / "input.png"
-    Image.fromarray(np.rint(gaussian_image()).astype(np.uint8)).save(image_path)
+    image_path = tmp_path / f"input{suffix}"
+    if suffix == ".tiff":
+        tifffile.imwrite(image_path, np.zeros((3, 8, 12), dtype=np.uint8), photometric="minisblack")
+    else:
+        Image.fromarray(np.zeros((8, 12), dtype=np.uint8)).save(image_path)
     output = tmp_path / "results"
-    main([str(image_path), "--output", str(output), "--area-max", "200", "--pad", "10",
-          "--methods", "logquad", "--pixel-size", "2", "--unit", "nm"])
+    with pytest.raises(SystemExit) as exc:
+        main([str(image_path), "--page", str(page), "--output", str(output)])
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_source_checksum_uses_bounded_reads(tmp_path, monkeypatch):
+    import hashlib
+    import io
+    from pathlib import Path
+    from scripts.analyze_contact_holes import _file_sha256
+
+    data = b"0123456789abcdef" * (128 * 1024 + 1)
+    reads = []
+
+    class BoundedReader(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 < size <= 1024 * 1024
+            reads.append(size)
+            return super().read(size)
+
+    monkeypatch.setattr(Path, "open", lambda self, mode: BoundedReader(data))
+    assert _file_sha256(tmp_path / "source.tiff") == hashlib.sha256(data).hexdigest()
+    assert len(reads) > 2
+
+
+@pytest.mark.parametrize("suffix,page", [(".png", None), (".tif", 2)])
+def test_cli_writes_maps_and_provenance(tmp_path, suffix, page):
+    import hashlib
+    import tifffile
+    from PIL import Image
+    from scripts.analyze_contact_holes import main
+
+    image_path = tmp_path / f"input{suffix}"
+    image = np.rint(gaussian_image()).astype(np.uint8)
+    if page is None:
+        Image.fromarray(image).save(image_path)
+    else:
+        image = image.astype(np.uint16) * 256
+        stack = np.zeros((3, *image.shape), dtype=image.dtype)
+        stack[page] = image
+        tifffile.imwrite(image_path, stack, photometric="minisblack")
+    output = tmp_path / "results"
+    args = [str(image_path), "--output", str(output), "--area-max", "200", "--pad", "10",
+            "--methods", "logquad", "--pixel-size", "2", "--unit", "nm"]
+    if page is not None:
+        args += ["--page", str(page)]
+    main(args)
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["cells"] == 1
     assert manifest["methods"]["logquad"]["valid"] == 1
     assert manifest["input_image"] == str(image_path.resolve())
-    assert len(manifest["input_sha256"]) == 64
+    assert manifest["input_page"] == page
+    assert manifest["input_sha256"] == hashlib.sha256(image_path.read_bytes()).hexdigest()
     assert manifest["unit"] == "nm"
     assert manifest["interactive_viewer"] == "contours.html"
     assert "intensity_map.png" in manifest["figures"]
     for name in manifest["files"]:
         assert (output / name).is_file()
+    with np.load(output / "raw_data.npz", allow_pickle=False) as raw:
+        np.testing.assert_array_equal(raw["image"], image)
+        assert raw["image"].dtype == image.dtype
 
 
 @pytest.mark.parametrize("kwargs", [

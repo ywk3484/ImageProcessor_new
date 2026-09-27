@@ -47,6 +47,8 @@ every contour vertex, and the extracted cell arrays.
 The three methods are Gaussian FWHM (`logquad`), radial gradient maxima, and
 half-height contours. See [CD pipeline usage and definitions](docs/contact_holes_cd.md)
 for physical calibration, other images, notebook usage, and accuracy measurements.
+For your own images on a remote Windows server, see the
+[remote pipeline guide](docs/remote_server.md).
 
 ## Quick start
 

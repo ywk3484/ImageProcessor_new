@@ -6,6 +6,10 @@ several edge definitions, and export spatial maps, contours, and numerical data.
 The reusable API is `measure_cds`, `plot_cd_map`, `save_cd_results`, and
 `save_cd_viewer`.
 
+For real data on a Windows server, follow the
+[short run guide](remote_server.md) for the command, input parameters, image
+loading, and output files.
+
 ## Run the pipeline
 
 From the repository root, using the existing Windows environment:
@@ -33,7 +37,16 @@ For another image, including an isotropic physical calibration:
 ```
 
 Use `--invert` only for dark holes on a bright background. The script accepts
-single-channel images and single TIFF pages. To select methods, pass e.g.
+single-channel PNGs and individual TIFF pages. For a multipage TIFF, select a
+zero-based page index (default `0`, the first image):
+
+```powershell
+python scripts/analyze_contact_holes.py images.tiff --page 10 --output artifacts/page_10
+```
+
+Only that page is decoded; the source-file checksum is streamed in chunks.
+`manifest.json` records the index as `input_page` (`null` for PNG).
+To select methods, pass e.g.
 `--methods logquad gradient`. The map quantity can be `--metric cd_equivalent_px`,
 `cd_x_px`, `cd_y_px`, or `area_px2`. Each method normally has its own color range
 to reveal spatial variation; `--shared-color-scale` uses a common range.

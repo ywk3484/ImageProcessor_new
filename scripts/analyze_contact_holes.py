@@ -3,6 +3,7 @@
 Run from the repository root:
     python scripts/analyze_contact_holes.py
     python scripts/analyze_contact_holes.py image.tif --invert --pixel-size 2 --unit nm
+    python scripts/analyze_contact_holes.py stack.tiff --page 10 --output artifacts/page_10
 """
 
 from __future__ import annotations
@@ -26,17 +27,35 @@ from subpx import measure_cds, plot_cd_map, save_cd_results, save_cd_viewer
 from subpx.cd import METHOD_LABELS
 
 
-def load_image(path: Path) -> np.ndarray:
+def load_image(path: Path, *, page: int = 0) -> np.ndarray:
+    """Read one grayscale image, decoding only the selected zero-based TIFF page."""
+    if page < 0:
+        raise ValueError("--page must be >= 0 (page indexes start at 0)")
     if path.suffix.lower() in {".tif", ".tiff"}:
         import tifffile
-        image = tifffile.imread(path)
+        with tifffile.TiffFile(path) as tif:
+            count = len(tif.pages)
+            if page >= count:
+                raise ValueError(f"TIFF page {page} is out of range: {path.name} has {count} pages (indexes start at 0)")
+            image = tif.pages[page].asarray()
     else:
+        if page != 0:
+            raise ValueError("Nonzero --page is only supported for TIFF files")
         from PIL import Image
         with Image.open(path) as loaded:
             image = np.asarray(loaded).copy()
     if image.ndim != 2:
-        raise ValueError("Input must be a single grayscale image; select a channel/page before analysis.")
+        raise ValueError("Selected image must be 2D grayscale; export a grayscale plane before analysis.")
     return image
+
+
+def _file_sha256(path: Path) -> str:
+    """Hash the source file without loading a potentially large TIFF into RAM."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def save_figures(result, output: Path, metric: str, *, shared_scale: bool = False) -> list[str]:
@@ -161,6 +180,7 @@ def compare_ground_truth(result, path: Path, output: Path) -> dict:
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("image", type=Path, nargs="?", default=ROOT / "examples/data/synthetic_ch/contact_holes.png")
+    parser.add_argument("--page", type=int, default=0, help="Zero-based TIFF page index (default: 0, the first image)")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/contact_holes_cd")
     parser.add_argument("--methods", nargs="+", choices=list(METHOD_LABELS), default=list(METHOD_LABELS))
     parser.add_argument("--threshold", choices=("otsu", "triangle"), default="otsu")
@@ -185,8 +205,13 @@ def main(argv=None) -> None:
     matplotlib.use("Agg")
 
     start = time.perf_counter()
-    image = load_image(args.image)
-    print(f"Input: {args.image} | shape={image.shape}, dtype={image.dtype}", flush=True)
+    try:
+        image = load_image(args.image, page=args.page)
+    except ValueError as exc:
+        parser.error(str(exc))
+    input_page = args.page if args.image.suffix.lower() in {".tif", ".tiff"} else None
+    page_info = f", page={input_page}" if input_page is not None else ""
+    print(f"Input: {args.image} | shape={image.shape}, dtype={image.dtype}{page_info}", flush=True)
     result = measure_cds(
         image, methods=tuple(args.methods), threshold=args.threshold, invert=args.invert,
         area_min=args.area_min, area_max=args.area_max, pad=args.pad,
@@ -206,7 +231,7 @@ def main(argv=None) -> None:
     viewer = save_cd_viewer(result, args.output / "contours.html", metric=args.metric)
     manifest = json.loads(paths["manifest.json"].read_text(encoding="utf-8"))
     manifest.update(
-        input_image=str(args.image.resolve()), input_sha256=hashlib.sha256(args.image.read_bytes()).hexdigest(),
+        input_image=str(args.image.resolve()), input_page=input_page, input_sha256=_file_sha256(args.image),
         pipeline_source=str(Path(__file__).resolve()), measurement_seconds=measurement_seconds,
         plot_metric=args.metric, shared_color_scale=args.shared_color_scale, figures=figures,
         interactive_viewer=viewer.name,
