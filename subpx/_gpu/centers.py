@@ -7,6 +7,7 @@ from ..backends import gpu_device
 from .._cpu.centers import _segment_binary, _bg_from_border, choose_refine_method_for_bbox
 from .components import connected_components_stats_gpu, _connected_components_stats_gpu_core
 from .._cpu.components import connected_components_stats_cpu
+from .._cpu.cells import _extract_voronoi_rois
 
 try:
     import cupy as cp  # type: ignore
@@ -1463,74 +1464,6 @@ def _isophote_curvature_batch_gpu(
         spreads_all[s:e] = sp
 
     return centers_all, spreads_all
-
-
-def _extract_voronoi_rois(
-    gray: np.ndarray,
-    voronoi_labels: np.ndarray,
-    rows: list,
-    pad: int = 3,
-) -> tuple[np.ndarray, np.ndarray, list[tuple[int, int]]]:
-    """Extract Voronoi-masked ROIs with border-pixel background fill.
-
-    Parameters
-    ----------
-    gray : (H, W) float64 grayscale image
-    voronoi_labels : (H, W) int32 Voronoi label map
-    rows : list of (x, y, w, h, cx, cy) per component
-    pad : border padding in pixels
-
-    Returns
-    -------
-    rois_stack : (N, Hmax, Wmax) float64 — padded ROIs
-    masks_stack : (N, Hmax, Wmax) bool — Voronoi masks
-    origins : list of (x0, y0) top-left corners
-    """
-    H, W = gray.shape
-    N = len(rows)
-    if N == 0:
-        return np.zeros((0, 0, 0), dtype=np.float64), np.zeros((0, 0, 0), dtype=bool), []
-
-    rows_arr = np.asarray(rows, dtype=np.float64)
-
-    # Vectorized bounding boxes
-    x0 = np.maximum(0, rows_arr[:, 0].astype(np.int32) - pad)
-    y0 = np.maximum(0, rows_arr[:, 1].astype(np.int32) - pad)
-    x1 = np.minimum(W, (rows_arr[:, 0] + rows_arr[:, 2]).astype(np.int32) + pad)
-    y1 = np.minimum(H, (rows_arr[:, 1] + rows_arr[:, 3]).astype(np.int32) + pad)
-    hs = y1 - y0
-    ws = x1 - x0
-    Hm = int(hs.max())
-    Wm = int(ws.max())
-
-    origins = list(zip(x0.tolist(), y0.tolist()))
-
-    rois_stack = np.zeros((N, Hm, Wm), dtype=np.float64)
-    masks_stack = np.zeros((N, Hm, Wm), dtype=bool)
-
-    for j in range(N):
-        _x0, _y0 = int(x0[j]), int(y0[j])
-        _x1, _y1 = int(x1[j]), int(y1[j])
-        h_r, w_r = int(hs[j]), int(ws[j])
-
-        roi = gray[_y0:_y1, _x0:_x1].astype(np.float64)
-        vmask = voronoi_labels[_y0:_y1, _x0:_x1] == j
-
-        # Background: 10th percentile of border pixels
-        inner = vmask.copy()
-        inner[0, :] = inner[-1, :] = inner[:, 0] = inner[:, -1] = False
-        inner[1:, :] &= vmask[:-1, :]
-        inner[:-1, :] &= vmask[1:, :]
-        inner[:, 1:] &= vmask[:, :-1]
-        inner[:, :-1] &= vmask[:, 1:]
-        border_vals = roi[vmask & ~inner]
-        bg = float(np.percentile(border_vals, 10)) if border_vals.size > 0 else 0.0
-
-        rois_stack[j, :, :] = bg
-        rois_stack[j, :h_r, :w_r] = np.where(vmask, roi, bg)
-        masks_stack[j, :h_r, :w_r] = vmask
-
-    return rois_stack, masks_stack, origins
 
 
 def _detect_single_tile_gpu(

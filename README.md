@@ -9,6 +9,7 @@ Python 3.10+ | NumPy-only core | Optional GPU acceleration via CuPy
 | Module | What it does |
 |---|---|
 | `detect_centers` | Otsu threshold, connected components, subpixel refinement (weighted / log-quadratic / edge gradient-moment) |
+| `measure_cds` | Voronoi cell extraction, Gaussian/gradient/half-height contours, CD maps, and CSV/NPZ exports |
 | `estimate_pitch` | KNN or index-regression pitch estimation, global and per-line |
 | `estimate_shift` | Phase cross-correlation image registration |
 | `fft_pitch_error` | FFT-based periodic error / spectral analysis |
@@ -31,6 +32,21 @@ pip install opencv-python scikit-image scipy tifffile matplotlib
 pip install cupy-cuda12x   # for GPU acceleration
 pip install PyQt5 pyqtgraph pyopengl  # for the viewer
 ```
+
+### Contact-hole contours and CD maps
+
+Run the contour/CD pipeline on a grayscale image:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/analyze_contact_holes.py image.tif
+```
+
+Results in `artifacts/contact_holes_cd` include CD and mean-intensity colorbar
+maps, an offline interactive `contours.html` viewer, per-cell measurements,
+every contour vertex, and the extracted cell arrays.
+The three methods are Gaussian FWHM (`logquad`), radial gradient maxima, and
+half-height contours. See [CD pipeline usage and definitions](docs/contact_holes_cd.md)
+for physical calibration, other images, notebook usage, and accuracy measurements.
 
 ## Quick start
 
@@ -59,10 +75,13 @@ result = detect_centers_tiled(huge_image, tile_h=8192, overlap=128)
 
 ### Backend selection
 
-Every public function accepts `backend=`:
+Functions with CPU/GPU implementations accept `backend=`:
 - `"gpu"` — CuPy-accelerated (default for center detection and tiled functions)
 - `"cpu"` — OpenCV / scikit-image
 - `"auto"` — GPU if CuPy is available, else CPU
+
+CD measurements run on the CPU; `measure_cds(..., cell_backend="gpu")` selects
+GPU acceleration for the Voronoi partition.
 
 ## Tests
 

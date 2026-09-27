@@ -12,6 +12,16 @@ dependencies = [
     "numpy",
 ]
 
+[project.optional-dependencies]
+analysis = [
+    "opencv-python>=4.10",
+    "scikit-image>=0.24",
+    "scipy>=1.14",
+    "tifffile>=2024.8.30",
+    "matplotlib>=3.9",
+    "pillow>=10.4",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["subpx*"]
