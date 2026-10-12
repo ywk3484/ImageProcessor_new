@@ -53,7 +53,13 @@ class ComponentStatsResult:
 
 @dataclass
 class CDMethodResult:
-    """One contour per cell; invalid measurements retain their cell index."""
+    """One contour per cell; invalid measurements retain their cell index.
+
+    ``geometry`` holds the arrays each contour was built from (radial methods:
+    ``center_local`` and per-ray ``edge_px``; ellipse methods: ``eigenvalues``
+    and ``axes`` of the precision matrix, plus ``center_local`` for logquad),
+    so compact exports can rebuild ``contours_xy`` exactly.
+    """
 
     method: str
     centers_xy: np.ndarray
@@ -61,6 +67,7 @@ class CDMethodResult:
     valid: np.ndarray
     status: np.ndarray
     metrics: dict[str, np.ndarray]
+    geometry: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass
@@ -68,7 +75,11 @@ class CDResult:
     """Cell extraction, per-method CDs, and calibration for one image.
 
     Coordinates and geometric metrics are stored in pixels. ``pixel_size``
-    converts lengths to ``unit``; areas use its square.
+    converts lengths to ``unit``; areas use its square. ``deblend_model``
+    (``background='model'`` only) holds the fitted global Gaussian ``params`` of
+    every modelled hole, the ``report`` indices of the measured cells among
+    them, and the background ``tile_medians`` / ``tile_px`` when available;
+    with ``masks`` it rebuilds ``rois`` and ``background_map`` exactly.
     """
 
     image: np.ndarray
@@ -86,6 +97,7 @@ class CDResult:
     pixel_size: float = 1.0
     unit: str = "px"
     background_map: np.ndarray | None = None
+    deblend_model: dict[str, Any] | None = None
     meta: dict[str, Any] = field(default_factory=dict)
     mean_intensity: np.ndarray = field(init=False)
 

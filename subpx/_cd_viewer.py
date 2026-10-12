@@ -15,27 +15,43 @@ def _packed(array, dtype: str) -> str:
     return base64.b64encode(np.asarray(array, dtype=dtype).tobytes()).decode("ascii")
 
 
-def write_viewer(result: CDResult, path, *, metric: str) -> Path:
+def write_viewer(result: CDResult, path, *, metric: str, region=None) -> Path:
     from matplotlib import colormaps
     from .cd import METHOD_LABELS
 
     if metric not in {"cd_equivalent_px", "cd_x_px", "cd_y_px", "area_px2"}:
         raise ValueError("unsupported CD map metric")
-    lo, hi = float(result.image.min()), float(result.image.max())
-    display = np.zeros(result.image.shape, np.uint8)
+    height, width = result.image.shape
+    cells = np.arange(len(result.seeds_xy))
+    x0, y0, x1, y1 = 0, 0, width, height
+    if region is not None:
+        x, y, w, h = (int(v) for v in region)
+        x0, y0, x1, y1 = max(0, x), max(0, y), min(width, x + w), min(height, y + h)
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError(f"region {tuple(region)} does not overlap the {width}x{height} image")
+        seeds = result.seeds_xy
+        cells = np.flatnonzero((seeds[:, 0] >= x0) & (seeds[:, 0] < x1) & (seeds[:, 1] >= y0) & (seeds[:, 1] < y1))
+    image = result.image[y0:y1, x0:x1]
+    # Cells outside the region, like unmeasured ones, become -1 (the extra slot).
+    lookup = np.full(len(result.seeds_xy) + 1, -1, np.int32)
+    lookup[cells] = np.arange(len(cells), dtype=np.int32)
+    offset = np.array([x0, y0])
+    lo, hi = float(image.min()), float(image.max())
+    display = np.zeros(image.shape, np.uint8)
     if hi > lo:
-        display = np.rint((result.image.astype(float) - lo) * (255 / (hi - lo))).astype(np.uint8)
+        display = np.rint((image.astype(float) - lo) * (255 / (hi - lo))).astype(np.uint8)
     palette = np.rint(colormaps["viridis"](np.linspace(0, 1, 256))[:, :3] * 255).astype(np.uint8)
     payload = {
-        "shape": list(result.image.shape), "count": len(result.seeds_xy),
+        "shape": list(image.shape), "count": len(cells),
         "pixel_size": result.pixel_size, "unit": result.unit, "metric": metric,
         "image": _packed(display, "u1"), "display_range": [lo, hi],
-        "labels": _packed(result.cell_labels, "<i4"),
-        "means": _packed(result.mean_intensity, "<f8"),
-        "seeds": _packed(result.seeds_xy, "<f8"),
-        "origins": _packed(result.origins_xy, "<i4"),
-        "areas": _packed(result.cell_areas_px2, "<i4"),
-        "roi_shape": list(result.rois.shape[1:]),
+        "labels": _packed(lookup[result.cell_labels[y0:y1, x0:x1]], "<i4"),
+        "means": _packed(result.mean_intensity[cells], "<f8"),
+        "seeds": _packed(result.seeds_xy[cells] - offset, "<f8"),
+        "origins": _packed(result.origins_xy[cells] - offset, "<i4"),
+        "areas": _packed(result.cell_areas_px2[cells], "<i4"),
+        "ids": _packed(cells, "<i4"), "offset": offset.tolist(), "full_shape": [height, width],
+        "roi_shape": list(result.masks.shape[1:]),
         "palette": palette.tolist(), "methods": {},
         "radial_step": result.meta.get("radial_step"),
         "smooth_sigma": result.meta.get("smooth_sigma"),
@@ -43,12 +59,12 @@ def write_viewer(result: CDResult, path, *, metric: str) -> Path:
     for name, measured in result.measurements.items():
         # Local offsets retain subpixel precision at large global coordinates
         # without a large JSON list of individual floating-point vertices.
-        local = measured.contours_xy - result.origins_xy[:, None, :]
+        local = measured.contours_xy[cells] - result.origins_xy[cells][:, None, :]
         payload["methods"][name] = {
             "label": METHOD_LABELS[name], "vertices": local.shape[1],
-            "points": _packed(local, "<f4"), "valid": _packed(measured.valid, "u1"),
-            "status": measured.status.tolist(),
-            "metrics": {key: _packed(values, "<f8") for key, values in measured.metrics.items()},
+            "points": _packed(local, "<f4"), "valid": _packed(measured.valid[cells], "u1"),
+            "status": measured.status[cells].tolist(),
+            "metrics": {key: _packed(values[cells], "<f8") for key, values in measured.metrics.items()},
         }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,9 +150,12 @@ const [H,W] = data.shape, N=data.count;
 const labels=unpack(data.labels,Int32Array), means=unpack(data.means,Float64Array);
 const seeds=unpack(data.seeds,Float64Array), origins=unpack(data.origins,Int32Array);
 const areas=unpack(data.areas,Int32Array), gray=unpack(data.image,Uint8Array);
-delete data.labels; delete data.means; delete data.seeds; delete data.origins; delete data.areas; delete data.image;
+// Cell IDs and coordinates of the full image; a region viewer holds a crop of it.
+const ids=unpack(data.ids,Int32Array), offset=data.offset, index=new Map();
+ids.forEach((id,i)=>index.set(id,i));
+delete data.labels; delete data.means; delete data.seeds; delete data.origins; delete data.areas; delete data.image; delete data.ids;
 const names=Object.keys(data.methods), methods=data.methods;
-const methodColors={logquad:"#ffb000",gradient:"#00cfec",halfmax:"#ff5aa5"};
+const methodColors={gaussian:"#7cfc00",logquad:"#ffb000",gradient:"#00cfec",halfmax:"#ff5aa5"};
 const metricLabels={cd_equivalent_px:"Area-equivalent CD",cd_x_px:"Horizontal CD",cd_y_px:"Vertical CD",area_px2:"Contour area"};
 for(const name of names){
   const m=methods[name]; m.points=unpack(m.points,Float32Array); m.valid=unpack(m.valid,Uint8Array);
@@ -146,8 +165,9 @@ for(const name of names){
   swatch.className="swatch";swatch.style.background=methodColors[name];item.append(swatch,document.createTextNode(m.label));$("method-legend").appendChild(item);
 }
 $("metric").value=data.metric;
-$("summary").textContent=`${N.toLocaleString()} cells · ${W} × ${H} pixels · offline viewer`;
-$("cell-id").max=Math.max(N-1,0);
+const cropped=W!==data.full_shape[1]||H!==data.full_shape[0];
+$("summary").textContent=`${N.toLocaleString()} cells · ${W} × ${H} pixels`+(cropped?` (region x ${offset[0]}–${offset[0]+W}, y ${offset[1]}–${offset[1]+H} of ${data.full_shape[1]} × ${data.full_shape[0]})`:"")+" · offline viewer";
+$("cell-id").max=N?ids[N-1]:0;
 $("sampling-note").textContent=`Gradient edges use cubic-interpolated radial profiles, sampled at ${data.radial_step} px. Source smoothing σ = ${data.smooth_sigma} px. The display-smoothing toggle changes only the background image.`;
 $("ramp").style.background="linear-gradient(to right,"+data.palette.filter((_,i)=>i%16===0||i===255).map(c=>`rgb(${c.join(",")})`).join(",")+")";
 const image=document.createElement("canvas");image.width=W;image.height=H;
@@ -258,9 +278,9 @@ function addRow(body,label,value,color){
   row.append(a,b);body.appendChild(row);
 }
 function select(i){
-  if(!Number.isInteger(i)||i<0||i>=N){$("cell-meta").textContent=N?`Enter a cell ID from 0 to ${N-1}.`:"No detected cells.";return;}
-  selected=i;$("cell-id").value=i;$("focus").disabled=false;
-  $("cell-meta").textContent=`Cell ${i}\nx = ${fmt(seeds[2*i])}, y = ${fmt(seeds[2*i+1])} px\nVoronoi area = ${areas[i]} px²\nMean intensity = ${fmt(means[i])}`;
+  if(!Number.isInteger(i)||i<0||i>=N){$("cell-meta").textContent=N?(cropped?`Enter a cell ID inside this region (${ids[0]}–${ids[N-1]}).`:`Enter a cell ID from 0 to ${N-1}.`):"No detected cells.";return;}
+  selected=i;$("cell-id").value=ids[i];$("focus").disabled=false;
+  $("cell-meta").textContent=`Cell ${ids[i]}\nx = ${fmt(seeds[2*i]+offset[0])}, y = ${fmt(seeds[2*i+1]+offset[1])} px\nVoronoi area = ${areas[i]} px²\nMean intensity = ${fmt(means[i])}`;
   const body=$("measurements").querySelector("tbody");body.replaceChildren();
   for(const name of names){
     const m=methods[name];
@@ -283,7 +303,7 @@ canvas.addEventListener("pointermove",event=>{
   const i=cellAt(p),tip=$("tooltip");
   if(i<0){tip.style.display="none";return;}
   const m=current(),value=m.metrics[$("metric").value][i]*scale();
-  tip.textContent=`Cell ${i}\nMean intensity ${fmt(means[i])}\n${m.label}: ${m.valid[i]?fmt(value)+" "+unit():m.status[i]}`;
+  tip.textContent=`Cell ${ids[i]}\nMean intensity ${fmt(means[i])}\n${m.label}: ${m.valid[i]?fmt(value)+" "+unit():m.status[i]}`;
   tip.style.display="block";tip.style.left=Math.max(4,Math.min(p.x+14,width-tip.offsetWidth-8))+"px";tip.style.top=Math.max(4,Math.min(p.y+14,height-tip.offsetHeight-8))+"px";
 });
 canvas.addEventListener("pointerup",event=>{if(drag&&!drag.moved){const i=cellAt(screen(event));if(i>=0)select(i);}drag=null;if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);});
@@ -293,7 +313,8 @@ canvas.addEventListener("dblclick",event=>{const i=cellAt(screen(event));if(i>=0
 canvas.addEventListener("wheel",event=>{event.preventDefault();const p=screen(event);zoom(Math.exp(-event.deltaY*.0015),p.x,p.y);$("tooltip").style.display="none";},{passive:false});
 canvas.addEventListener("keydown",event=>{if(["+","=","-","0"].includes(event.key)){event.preventDefault();if(event.key==="0")fit();else zoom(event.key==="-"?1/1.5:1.5);}});
 $("zoom-in").addEventListener("click",()=>zoom(1.6));$("zoom-out").addEventListener("click",()=>zoom(1/1.6));$("fit").addEventListener("click",fit);
-$("select-cell").addEventListener("click",()=>select($("cell-id").valueAsNumber));$("cell-id").addEventListener("keydown",event=>{if(event.key==="Enter")select($("cell-id").valueAsNumber);});$("focus").addEventListener("click",focus);
+function selectId(id){select(index.has(id)?index.get(id):-1);}
+$("select-cell").addEventListener("click",()=>selectId($("cell-id").valueAsNumber));$("cell-id").addEventListener("keydown",event=>{if(event.key==="Enter")selectId($("cell-id").valueAsNumber);});$("focus").addEventListener("click",focus);
 for(const id of ["view","method","metric","compare","vertices","smooth"]){$(id).addEventListener("change",()=>{updateColors();requestDraw();});}
 new ResizeObserver(resize).observe(stage);updateColors();resize();
 if(N===0){$("cell-meta").textContent="No detected cells.";$("select-cell").disabled=true;}

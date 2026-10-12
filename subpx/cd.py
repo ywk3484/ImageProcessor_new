@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .types import CDResult
+from .types import CDMethodResult, CDResult
 
 
 METHOD_LABELS = {
@@ -40,7 +40,8 @@ def measure_cds(
     deblend_iterations: int = 30,
     pixel_size: float = 1.0,
     unit: str = "px",
-    cell_backend: str = "cpu",
+    backend: str = "cpu",
+    cell_backend: str | None = None,
     device: int = 0,
 ) -> CDResult:
     """Extract Voronoi cells and measure their contours and critical dimensions.
@@ -98,10 +99,17 @@ def measure_cds(
         Isotropic length per pixel, used by plots and calibrated CSV columns.
     unit : str
         Length unit, e.g. 'px' or 'nm'. Array metrics remain in pixels.
-    cell_backend : {'cpu', 'gpu'}
-        Backend for the Voronoi partition only. Fits run on the CPU.
+    backend : {'cpu', 'gpu', 'auto'}
+        Where cells, deblending and measurements run. ``gpu`` (CuPy, FP64)
+        reproduces each CPU step to rounding (CDs typically within ~1e-8 px)
+        and is 40-70x faster on images of ~1e5 holes; threshold decisions on
+        values within rounding of the threshold (marginal noise seeds in dense,
+        noisy arrays) can differ. Requires ``background='model'``. ``auto``
+        uses the GPU when one is available and ``background='model'``.
+    cell_backend : {'cpu', 'gpu'}, optional
+        Backend for the Voronoi partition alone; default follows ``backend``.
     device : int
-        CUDA device when cell_backend='gpu'.
+        CUDA device for the GPU backends.
 
     Returns
     -------
@@ -110,10 +118,9 @@ def measure_cds(
         ID. Failed cells remain present with a status and NaN geometry.
         Contours and centers are global [x, y] pixel coordinates.
     """
-    from ._cpu.centers import _segment_binary
-    from ._cpu.components import connected_components_stats_cpu
-    from ._cpu.cells import _extract_voronoi_rois, compute_voronoi_labels_cpu
-    from ._cpu.cd import gaussian_method, measure_cells
+    from contextlib import nullcontext
+
+    from .backends import gpu_device
 
     img = np.asarray(image)
     if img.ndim != 2 or img.size == 0 or not np.issubdtype(img.dtype, np.number):
@@ -153,8 +160,54 @@ def measure_cds(
         raise ValueError("unit must be a nonempty length-unit label")
     if unit == "px" and pixel_size != 1:
         raise ValueError("supply a physical unit when pixel_size differs from 1")
-    if cell_backend not in {"cpu", "gpu"}:
+    backend, cell_backend = _resolve_backends(backend, cell_backend, background)
+    with gpu_device(device) if "gpu" in (backend, cell_backend) else nullcontext():
+        return _measure_cds(
+            img, methods=methods, background=background, seeds=seeds, threshold=threshold, invert=invert,
+            area_min=area_min, area_max=area_max, pad=pad, n_angles=n_angles, radial_step=radial_step,
+            smooth_sigma=smooth_sigma, fit_fraction=fit_fraction, peak_min_distance=peak_min_distance,
+            background_level=background_level, background_tile=background_tile,
+            deblend_iterations=deblend_iterations, pixel_size=pixel_size, unit=unit, backend=backend,
+            cell_backend=cell_backend, device=device,
+        )
+
+
+def _resolve_backends(backend: str, cell_backend: str | None, background: str) -> tuple[str, str]:
+    """Validated (measurement, cell) backends; 'auto' picks the GPU when usable."""
+    if backend not in {"cpu", "gpu", "auto"}:
+        raise ValueError("backend must be 'cpu', 'gpu' or 'auto'")
+    if cell_backend not in {None, "cpu", "gpu"}:
         raise ValueError("cell_backend must be 'cpu' or 'gpu'")
+    if backend == "auto":
+        from .backends import cp
+        try:
+            usable = cp is not None and cp.cuda.runtime.getDeviceCount() > 0
+        except Exception:
+            usable = False
+        backend = "gpu" if usable and background == "model" else "cpu"
+    elif backend == "gpu":
+        if background != "model":
+            raise ValueError("backend='gpu' requires background='model'; border mode runs on the CPU")
+        from .backends import resolve_backend
+        resolve_backend("gpu")
+    return backend, backend if cell_backend is None else cell_backend
+
+
+def _measure_cds(
+    img, *, methods, background, seeds, threshold, invert, area_min, area_max, pad, n_angles, radial_step,
+    smooth_sigma, fit_fraction, peak_min_distance, background_level, background_tile, deblend_iterations,
+    pixel_size, unit, backend, cell_backend, device,
+) -> CDResult:
+    from ._cpu.centers import _segment_binary
+    from ._cpu.components import connected_components_stats_cpu
+    from ._cpu.cells import _extract_voronoi_rois, compute_voronoi_labels_cpu
+
+    if backend == "gpu":
+        from ._gpu.cd import gaussian_method, measure_cells
+        from ._gpu.deblend import deblend
+    else:
+        from ._cpu.cd import gaussian_method, measure_cells
+        from ._cpu.deblend import deblend
 
     height, width = img.shape
     # Negation preserves contrast and permits the same bright-feature methods
@@ -203,6 +256,11 @@ def measure_cds(
         interior = [True] * len(rows)  # decided after fitting, from each hole's width
     def build_cells(rows):
         seeds_xy = np.asarray(rows, dtype=float).reshape(-1, 6)[:, 4:6].copy()
+        if cell_backend == "gpu" and background == "model":
+            # Deblending reads the image itself: no background-filled ROI stack.
+            from ._gpu.cells import voronoi_cells
+            labels, masks, origins = voronoi_cells(rows, img.shape, pad=int(pad))
+            return seeds_xy, labels, None, masks, origins
         if cell_backend == "gpu":
             from ._gpu.voronoi import compute_voronoi_labels_gpu
             labels = compute_voronoi_labels_gpu(seeds_xy, img.shape, device=device)
@@ -217,11 +275,11 @@ def measure_cds(
         "area_min": int(area_min), "area_max": int(area_max), "pad": int(pad), "n_angles": int(n_angles),
         "radial_step": float(radial_step), "smooth_sigma": float(smooth_sigma),
         "fit_fraction": float(fit_fraction), "cell_backend": cell_backend,
-        "measurement_backend": "cpu", "device": int(device),
+        "measurement_backend": backend, "device": int(device),
         "segmentation_rescaled": rescaled, "components_before_filter": components_before_filter,
         "coordinates": "global [x, y] pixels; images indexed [y, x]",
     }
-    background_map = None
+    background_map = deblend_model = None
     if background == "border":
         measurements = measure_cells(
             rois, masks, origins, all_seeds, methods=methods, n_angles=int(n_angles),
@@ -231,7 +289,7 @@ def measure_cds(
         report = np.arange(len(rows))
     else:
         from scipy.ndimage import binary_dilation, map_coordinates
-        from ._cpu.deblend import FWHM_K, auto_tile, deblend, revise_seeds, sigma_major
+        from ._cpu.deblend import FWHM_K, auto_tile, revise_seeds, sigma_major
 
         component_ids = np.asarray(component_ids, dtype=np.int32)
         interior = np.asarray(interior, dtype=bool)
@@ -327,6 +385,11 @@ def measure_cds(
         remap = np.full(len(rows) + 1, -1, dtype=np.int32)
         remap[report] = np.arange(len(report), dtype=np.int32)
         cell_labels = remap[cell_labels]  # -1 stays -1 through the extra slot
+        params_global = state.params.copy()
+        params_global[:, 1:3] += origins  # every modelled hole, as rendered by deblend
+        deblend_model = {"params": params_global, "report": report, "tile_px": int(state.tile_px)}
+        if "tile_medians" in state.background_info:
+            deblend_model["tile_medians"] = state.background_info["tile_medians"]
         masks, origins = masks[report], origins[report]
     row_array = np.asarray(rows, dtype=float).reshape(-1, 6)
     return CDResult(
@@ -336,7 +399,8 @@ def measure_cds(
         cell_labels=cell_labels,
         cell_areas_px2=np.bincount(cell_labels[cell_labels >= 0], minlength=len(report)),
         origins_xy=origins, rois=rois, masks=masks, measurements=measurements,
-        pixel_size=float(pixel_size), unit=unit, background_map=background_map, meta=meta,
+        pixel_size=float(pixel_size), unit=unit, background_map=background_map,
+        deblend_model=deblend_model, meta=meta,
     )
 
 
@@ -405,7 +469,7 @@ def plot_cd_map(
     return ax
 
 
-def save_cd_viewer(result: CDResult, path, *, metric: str = "cd_equivalent_px") -> Path:
+def save_cd_viewer(result: CDResult, path, *, metric: str = "cd_equivalent_px", region=None) -> Path:
     """Write a self-contained, offline HTML viewer with crisp contour zoom.
 
     Supports pan/zoom, method comparisons, CD and mean-intensity cell maps,
@@ -413,22 +477,47 @@ def save_cd_viewer(result: CDResult, path, *, metric: str = "cd_equivalent_px") 
     The source raster retains its native resolution; contour paths are redrawn
     at the current zoom. Drawing coordinates use local float32 offsets, while
     CSV/NPZ exports retain the original float64 measurements.
+
+    ``region=(x, y, w, h)`` limits the viewer to that crop and the cells whose
+    seeds lie in it, for images too large to view whole (about 1e5 holes and
+    up); cell IDs and coordinates shown remain those of the full image.
     """
     from ._cd_viewer import write_viewer
-    return write_viewer(result, path, metric=metric)
+    return write_viewer(result, path, metric=metric, region=region)
 
 
-def save_cd_results(result: CDResult, output) -> dict[str, Path]:
+_CELL_ARRAYS = ("image", "binary", "component_labels", "component_ids", "boxes_xywh", "seeds_xy",
+                "cell_labels", "cell_areas_px2", "mean_intensity", "origins_xy", "rois", "masks")
+_METHOD_ARRAYS = ("centers_xy", "contours_xy", "valid", "status")
+
+
+def save_cd_results(result: CDResult, output, *, compact: bool = False) -> dict[str, Path]:
     """Save measurements.csv, cells.csv, contours.csv, raw_data.npz and manifest.json.
 
     CSVs include pixel and calibrated values. NPZ contains the input image,
     cell extraction, all contours, validity/status arrays, and every metric;
     it loads with ``allow_pickle=False``. The JSON manifest records parameters,
     definitions, calibration, and valid/failed counts.
+
+    ``compact=True`` is for batches of large images: no contours.csv, and an
+    uncompressed NPZ without the arrays that ``load_cd_results`` rebuilds
+    exactly — contours (from each method's ``geometry``), ``rois``,
+    ``component_labels``, and the background map (from its tile medians).
+    The two halves are ``save_cd_tables`` and ``save_cd_arrays``, for
+    pipelines that write the CSVs in another process.
     """
+    return {**save_cd_tables(result, output, compact=compact), **save_cd_arrays(result, output, compact=compact)}
+
+
+def _output_names(compact: bool) -> tuple[str, ...]:
+    return ("measurements.csv", "cells.csv") + (() if compact else ("contours.csv",)) + ("raw_data.npz", "manifest.json")
+
+
+def save_cd_tables(result: CDResult, output, *, compact: bool = False) -> dict[str, Path]:
+    """The CSV half of ``save_cd_results``: measurements.csv, cells.csv and (unless compact) contours.csv."""
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    paths = {name: output / name for name in ("measurements.csv", "cells.csv", "contours.csv", "raw_data.npz", "manifest.json")}
+    paths = {name: output / name for name in _output_names(compact) if name.endswith(".csv")}
     scale = result.pixel_size
     metric_names = sorted({name for m in result.measurements.values() for name in m.metrics})
     calibrated = {"area_px2": "area", "cd_equivalent_px": "cd_equivalent", "cd_x_px": "cd_x",
@@ -436,46 +525,77 @@ def save_cd_results(result: CDResult, output) -> dict[str, Path]:
                   "fwhm_major_px": "fwhm_major", "fwhm_minor_px": "fwhm_minor"}
     header = ["cell_id", "component_id", "method", "valid", "status", "seed_x_px", "seed_y_px",
               "center_x_px", "center_y_px", "center_x", "center_y", "unit", "pixel_size", "mean_intensity"]
+    # Whole columns go through tolist(): the csv module formats the same Python
+    # floats as before, without per-element NumPy indexing (10x faster at 1e5 cells).
+    n = len(result.seeds_xy)
+    ids, components = list(range(n)), result.component_ids.tolist()
+    seed_x, seed_y = result.seeds_xy[:, 0].tolist(), result.seeds_xy[:, 1].tolist()
+    means, missing = result.mean_intensity.tolist(), [np.nan] * n
     with paths["measurements.csv"].open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(header + metric_names + list(calibrated.values()))
         for method, measured in result.measurements.items():
-            for i, seed in enumerate(result.seeds_xy):
-                row = [i, int(result.component_ids[i]), method, bool(measured.valid[i]), measured.status[i],
-                       *seed, *measured.centers_xy[i], *(measured.centers_xy[i] * scale), result.unit, scale,
-                       float(result.mean_intensity[i])]
-                row += [float(measured.metrics[name][i]) if name in measured.metrics else np.nan for name in metric_names]
-                row += [float(measured.metrics[name][i]) * scale**(2 if name == "area_px2" else 1)
-                        if name in measured.metrics and measured.valid[i] else np.nan for name in calibrated]
-                writer.writerow(row)
+            centers = measured.centers_xy
+            columns = [ids, components, [method] * n, measured.valid.tolist(), measured.status.tolist(),
+                       seed_x, seed_y, centers[:, 0].tolist(), centers[:, 1].tolist(),
+                       (centers[:, 0] * scale).tolist(), (centers[:, 1] * scale).tolist(),
+                       [result.unit] * n, [scale] * n, means]
+            columns += [measured.metrics[name].tolist() if name in measured.metrics else missing
+                        for name in metric_names]
+            columns += [np.where(measured.valid, measured.metrics[name] * scale**(2 if name == "area_px2" else 1),
+                                 np.nan).tolist() if name in measured.metrics else missing for name in calibrated]
+            writer.writerows(zip(*columns))
     with paths["cells.csv"].open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["cell_id", "component_id", "seed_x_px", "seed_y_px", "cell_area_px2", "mean_intensity"])
-        for i, seed in enumerate(result.seeds_xy):
-            writer.writerow([i, int(result.component_ids[i]), *seed,
-                             int(result.cell_areas_px2[i]), float(result.mean_intensity[i])])
-    with paths["contours.csv"].open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["cell_id", "component_id", "method", "valid", "vertex", "x_px", "y_px", "x", "y", "unit"])
-        for method, measured in result.measurements.items():
-            for i, contour in enumerate(measured.contours_xy):
-                for j, (x, y) in enumerate(contour):
-                    writer.writerow([i, int(result.component_ids[i]), method, bool(measured.valid[i]), j,
-                                     x, y, x * scale, y * scale, result.unit])
-    arrays = {name: getattr(result, name) for name in (
-        "image", "binary", "component_labels", "component_ids", "boxes_xywh", "seeds_xy",
-        "cell_labels", "cell_areas_px2", "mean_intensity", "origins_xy", "rois", "masks",
-    )}
+        writer.writerows(zip(ids, components, seed_x, seed_y, result.cell_areas_px2.tolist(), means))
+    if not compact:
+        with paths["contours.csv"].open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["cell_id", "component_id", "method", "valid", "vertex", "x_px", "y_px", "x", "y", "unit"])
+            for method, measured in result.measurements.items():
+                vertices = measured.contours_xy.shape[1]
+                for start in range(0, n, 4096):  # bounds the Python lists for large images
+                    block = measured.contours_xy[start:start + 4096]
+                    count = len(block)
+                    cells = np.repeat(np.arange(start, start + count), vertices)
+                    x, y = block[..., 0].ravel(), block[..., 1].ravel()
+                    writer.writerows(zip(
+                        cells.tolist(), result.component_ids[cells].tolist(), [method] * len(cells),
+                        np.repeat(measured.valid[start:start + count], vertices).tolist(),
+                        np.tile(np.arange(vertices), count).tolist(), x.tolist(), y.tolist(),
+                        (x * scale).tolist(), (y * scale).tolist(), [result.unit] * len(cells)))
+    return paths
+
+
+def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[str, Path]:
+    """The array half of ``save_cd_results``: raw_data.npz and manifest.json (which lists the CSVs too)."""
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    names = _output_names(compact)
+    paths = {name: output / name for name in names[-2:]}
+    scale = result.pixel_size
+    dropped = ("component_labels", "rois") if compact else ()
+    arrays = {name: getattr(result, name) for name in _CELL_ARRAYS if name not in dropped}
     arrays.update(pixel_size=np.asarray(scale), unit=np.asarray(result.unit),
                   methods=np.asarray(list(result.measurements)))
-    if result.background_map is not None:
+    model = result.deblend_model or {}
+    for name, value in model.items():
+        arrays[f"deblend_{name}"] = np.asarray(value)
+    if result.background_map is not None and not (compact and "tile_medians" in model):
         arrays["background_map"] = result.background_map
     summary = {}
     for method, measured in result.measurements.items():
-        for name in ("centers_xy", "contours_xy", "valid", "status"):
-            arrays[f"{method}_{name}"] = getattr(measured, name)
+        for name in _METHOD_ARRAYS:
+            if not (compact and name == "contours_xy"):
+                arrays[f"{method}_{name}"] = getattr(measured, name)
         for name, values in measured.metrics.items():
             arrays[f"{method}_{name}"] = values
+        if compact:
+            if not measured.geometry:
+                raise ValueError(f"compact export needs the contour geometry of method {method!r}")
+            for name, values in measured.geometry.items():
+                arrays[f"{method}_geometry_{name}"] = values
         statuses, counts = np.unique(measured.status, return_counts=True)
         values = measured.metrics["cd_equivalent_px"][measured.valid]
         summary[method] = {
@@ -485,9 +605,15 @@ def save_cd_results(result: CDResult, output) -> dict[str, Path]:
             "mean_cd_px": float(values.mean()) if values.size else None,
             "std_cd_px": float(values.std()) if values.size else None,
         }
-    np.savez_compressed(paths["raw_data.npz"], **arrays)
+    if compact and result.meta.get("background") == "model" and "params" not in model:
+        raise ValueError("compact export of background='model' results needs result.deblend_model")
+    if compact:
+        arrays["compact"] = np.asarray(True)
+        np.savez(paths["raw_data.npz"], **arrays)  # zlib would cost more time than it saves at 1e5 cells
+    else:
+        np.savez_compressed(paths["raw_data.npz"], **arrays)
     manifest = {
-        "schema_version": 2, "shape_hw": list(result.image.shape), "cells": len(result.seeds_xy),
+        "schema_version": 2, "compact": bool(compact), "shape_hw": list(result.image.shape), "cells": len(result.seeds_xy),
         "pixel_size": scale, "unit": result.unit, "parameters": result.meta,
         "definitions": {
             "gaussian": "Half-maximum ellipse of a least-squares 2-D Gaussian fitted jointly with a smooth background map and all neighbouring holes (deblended); FWHM = 2 sqrt(2 ln 2) sigma.",
@@ -501,8 +627,86 @@ def save_cd_results(result: CDResult, output) -> dict[str, Path]:
             "background": result.meta.get("background_definition", ""),
             "background_map": "Fitted background in original intensity units (background='model' only); rois in raw_data.npz are the measured, background- and neighbour-subtracted cells in polarity-normalized units.",
             "mean_intensity": "Arithmetic mean of original image pixels over the full Voronoi cell, including background. No padding fill, background subtraction, polarity inversion, or physical-unit scaling; independent of CD fit validity.",
+            "deblend": "deblend_params: global [amplitude, x0, y0, u1, u2, u3] of every modelled hole (precision = L L^T, L = [[e^u1, 0], [u2, e^u3]]; polarity-normalized amplitude); deblend_report: indices of the measured cells among them; deblend_tile_medians/tile_px: the background map's tiles.",
+            "compact": "Compact raw_data.npz omits contours_xy, rois, component_labels and (when tile medians exist) background_map; subpx.load_cd_results rebuilds them exactly from <method>_geometry_*, deblend_* and masks.",
         },
-        "methods": summary, "files": [p.name for p in paths.values()],
+        "methods": summary, "files": list(names),
     }
     paths["manifest.json"].write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return paths
+
+
+def load_cd_results(path, *, rois: bool = True) -> CDResult:
+    """Load a results folder (or its raw_data.npz) written by ``save_cd_results``.
+
+    Full and compact exports load to the same ``CDResult``: compact files have
+    their contours, ``rois``, ``component_labels`` and background map rebuilt
+    bit-identically from the stored construction data. ``meta`` comes from
+    manifest.json next to the NPZ. ``rois=False`` skips rebuilding the measured
+    cells of a compact file (seconds at 1e5 cells; ``result.rois`` is then None).
+    """
+    from ._cpu.cd import ellipse_contours, radial_contours
+
+    path = Path(path)
+    npz = path / "raw_data.npz" if path.is_dir() else path
+    manifest_path = npz.parent / "manifest.json"
+    meta = json.loads(manifest_path.read_text(encoding="utf-8")).get("parameters", {}) if manifest_path.exists() else {}
+    with np.load(npz, allow_pickle=False) as data:
+        arrays = {name: data[name] for name in data.files}
+    compact = bool(arrays.pop("compact", False))
+    methods = arrays.pop("methods").tolist()
+    model = {name[len("deblend_"):]: arrays.pop(name) for name in list(arrays) if name.startswith("deblend_")}
+    if "tile_px" in model:
+        model["tile_px"] = int(model["tile_px"])
+    origins = arrays["origins_xy"]
+    n_angles = int(meta.get("n_angles", 128))
+    measurements = {}
+    for method in methods:
+        prefix = f"{method}_"
+        fields = {name: arrays.pop(prefix + name) for name in _METHOD_ARRAYS if prefix + name in arrays}
+        geometry = {name[len(prefix + "geometry_"):]: arrays.pop(name)
+                    for name in list(arrays) if name.startswith(prefix + "geometry_")}
+        metrics = {name[len(prefix):]: arrays.pop(name) for name in list(arrays) if name.startswith(prefix)}
+        if "contours_xy" not in fields:
+            if "edge_px" in geometry:
+                fields["contours_xy"] = radial_contours(geometry["center_local"], geometry["edge_px"], origins, n_angles)
+            elif method == "logquad":
+                fields["contours_xy"] = ellipse_contours(geometry["center_local"], geometry["eigenvalues"],
+                                                         geometry["axes"], n_angles, offsets=origins)
+            else:
+                fields["contours_xy"] = ellipse_contours(fields["centers_xy"], geometry["eigenvalues"],
+                                                         geometry["axes"], n_angles)
+        measurements[method] = CDMethodResult(method=method, metrics=metrics, geometry=geometry, **fields)
+    shape = arrays["image"].shape
+    sign = -1.0 if meta.get("invert") else 1.0
+    if "background_map" not in arrays and "tile_medians" in model:
+        from ._cpu.deblend import _upsample_tiles
+        arrays["background_map"] = sign * _upsample_tiles(model["tile_medians"], model["tile_px"], shape)
+    if compact:
+        from ._cpu.components import connected_components_stats_cpu
+        binary = arrays["binary"]
+        arrays["component_labels"] = (connected_components_stats_cpu(binary.astype(np.uint8), connectivity=8).labels
+                                      if binary.any() else np.zeros(shape, np.int32))
+        arrays["rois"] = _rebuild_rois(arrays, model, meta, sign) if rois else None
+    scalars = {"pixel_size": float(arrays.pop("pixel_size")), "unit": str(arrays.pop("unit"))}
+    arrays.pop("mean_intensity", None)  # recomputed by CDResult from image and cell labels
+    return CDResult(measurements=measurements, deblend_model=model or None, meta=meta,
+                    background_map=arrays.pop("background_map", None), **scalars, **arrays)
+
+
+def _rebuild_rois(arrays: dict, model: dict, meta: dict, sign: float) -> np.ndarray:
+    """Measured cells exactly as ``measure_cds`` stored them in ``CDResult.rois``."""
+    signal = arrays["image"].astype(np.float64) * sign
+    masks, origins = arrays["masks"], arrays["origins_xy"]
+    if meta.get("background") == "border":
+        from ._cpu.cells import _extract_voronoi_rois
+        rows = np.column_stack((arrays["boxes_xywh"], arrays["seeds_xy"])).tolist()
+        return _extract_voronoi_rois(signal, arrays["cell_labels"], rows, pad=int(meta["pad"]))[0]
+    from ._cpu.deblend import clean_cells, render_models, windows
+    params = model["params"]
+    roi_shape = masks.shape[1:]
+    radius_cap = int(max(roi_shape))
+    background = sign * arrays["background_map"]
+    model_image = render_models(params, signal.shape, radius_cap=radius_cap)
+    raw = windows(signal, origins, roi_shape)
+    return clean_cells(raw, background, model_image, params[model["report"]], masks, origins, radius_cap)

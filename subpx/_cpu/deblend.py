@@ -125,6 +125,30 @@ def windows(image: np.ndarray, origins_xy: np.ndarray, shape: tuple[int, int]) -
     return np.where(inside, out, 0.0)
 
 
+def roi_grids(origins_xy: np.ndarray, shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    """Global (N, h*w) pixel coordinates of each ROI."""
+    yy, xx = np.indices(shape, dtype=float)
+    gx = (origins_xy[:, 0, None, None] + xx[None]).reshape(len(origins_xy), -1)
+    gy = (origins_xy[:, 1, None, None] + yy[None]).reshape(len(origins_xy), -1)
+    return gx, gy
+
+
+def clean_cells(
+    raw: np.ndarray, background: np.ndarray, model: np.ndarray, params_global: np.ndarray,
+    masks: np.ndarray, origins_xy: np.ndarray, radius_cap: int, grids=None,
+) -> np.ndarray:
+    """Cells minus the background map and every other hole's model; zero outside the cell.
+
+    ``raw`` are the image windows at ``origins_xy``, ``model`` the rendered image
+    of all holes, ``params_global`` these cells' own global parameters.
+    """
+    roi_shape = masks.shape[1:]
+    gx, gy = roi_grids(origins_xy, roi_shape) if grids is None else grids
+    own = _render_on_grids(params_global, gx, gy, _render_radius(params_global, radius_cap)).reshape(masks.shape)
+    others = windows(model, origins_xy, roi_shape) - own
+    return np.where(masks, raw - windows(background, origins_xy, roi_shape) - others, 0.0)
+
+
 def initial_params(data: np.ndarray, masks: np.ndarray, seeds_local: np.ndarray) -> np.ndarray:
     """Amplitude from the cell maximum, width from second moments of the core."""
     n = len(data)
@@ -165,7 +189,7 @@ def fit_gaussians_batch(
         return params, status
     yy, xx = np.indices((h, w), dtype=float)
     xx, yy = xx.ravel(), yy.ravel()
-    sigma_cap = np.maximum(1.0, np.sqrt(masks.reshape(n, -1).sum(axis=1) / np.pi))
+    sigma_cap = sigma_caps(masks)
     chunk = max(1, _CHUNK_ELEMENTS // (h * w * 6))
     for start in range(0, n, chunk):
         sl = slice(start, start + chunk)
@@ -226,16 +250,26 @@ def fit_gaussians_batch(
             cost[idx[better]] = new_cost[better]
             active[idx[done | (lam[idx] > 1e12)]] = False
         params[sl] = p
-        st = status[sl]
-        sig = sigma_major(p)
-        bad = ~np.isfinite(p).all(axis=1)
-        st[bad] = "fit_diverged"
-        st[~bad & ((p[:, 0] <= 0) | (sig >= 0.999 * cap))] = "non_gaussian_fit"
-        ci = np.round(p[:, 2]).astype(int).clip(0, h - 1), np.round(p[:, 1]).astype(int).clip(0, w - 1)
-        inside = (p[:, 1] >= -0.5) & (p[:, 1] <= w - 0.5) & (p[:, 2] >= -0.5) & (p[:, 2] <= h - 0.5)
-        inside &= masks[sl][np.arange(len(p)), ci[0], ci[1]]
-        st[(st == "ok") & ~inside] = "center_outside_cell"
+        fit_status(p, masks[sl], cap, status[sl])
     return params, status
+
+
+def sigma_caps(masks: np.ndarray) -> np.ndarray:
+    """Width cap of each cell's fit: its equivalent radius, at least 1 px."""
+    return np.maximum(1.0, np.sqrt(masks.reshape(len(masks), -1).sum(axis=1) / np.pi))
+
+
+def fit_status(p: np.ndarray, masks: np.ndarray, cap: np.ndarray, status: np.ndarray) -> None:
+    """Mark diverged, non-Gaussian and off-cell fits in ``status`` (in place, from "ok")."""
+    h, w = masks.shape[1:]
+    sig = sigma_major(p)
+    bad = ~np.isfinite(p).all(axis=1)
+    status[bad] = "fit_diverged"
+    status[~bad & ((p[:, 0] <= 0) | (sig >= 0.999 * cap))] = "non_gaussian_fit"
+    ci = np.round(p[:, 2]).astype(int).clip(0, h - 1), np.round(p[:, 1]).astype(int).clip(0, w - 1)
+    inside = (p[:, 1] >= -0.5) & (p[:, 1] <= w - 0.5) & (p[:, 2] >= -0.5) & (p[:, 2] <= h - 0.5)
+    inside &= masks[np.arange(len(p)), ci[0], ci[1]]
+    status[(status == "ok") & ~inside] = "center_outside_cell"
 
 
 def _tile_medians(values: np.ndarray, usable: np.ndarray, tile: int) -> tuple[np.ndarray, np.ndarray]:
@@ -252,17 +286,25 @@ def _tile_medians(values: np.ndarray, usable: np.ndarray, tile: int) -> tuple[np
     return medians, counts
 
 
-def _upsample_tiles(medians: np.ndarray, tile: int, shape: tuple[int, int]) -> np.ndarray:
-    """Bilinear interpolation between tile centers, clamped at the image edges."""
+def _upsample_rows(medians: np.ndarray, tile: int, shape: tuple[int, int]):
+    """Tile rows interpolated along x, plus the row pair and weight of every image row (None if one row)."""
     height, width = shape
     ny, nx = medians.shape
     yc, xc = _tile_centers(tile, shape)
     rows = np.stack([np.interp(np.arange(width), xc, medians[j]) for j in range(ny)])
     if ny == 1:
-        return np.repeat(rows, height, axis=0)
+        return rows, None, None
     y = np.arange(height, dtype=float)
     j1 = np.clip(np.searchsorted(yc, y), 1, ny - 1)
     t = np.clip((y - yc[j1 - 1]) / (yc[j1] - yc[j1 - 1]), 0, 1)[:, None]
+    return rows, j1, t
+
+
+def _upsample_tiles(medians: np.ndarray, tile: int, shape: tuple[int, int]) -> np.ndarray:
+    """Bilinear interpolation between tile centers, clamped at the image edges."""
+    rows, j1, t = _upsample_rows(medians, tile, shape)
+    if j1 is None:
+        return np.repeat(rows, shape[0], axis=0)
     return (1 - t) * rows[j1 - 1] + t * rows[j1]
 
 
@@ -286,7 +328,22 @@ def estimate_background_map(
     relies entirely on the Gaussian model.
     """
     usable = np.ones(residual.shape, bool) if usable is None else usable
-    free_med, free_count = _tile_medians(residual, free & usable, tile)
+    medians, info = background_tiles(lambda mask: _tile_medians(residual, mask, tile), free, usable, tile,
+                                     residual.shape)
+    if medians is None:
+        return np.full(residual.shape, float(np.median(residual))), info
+    return _upsample_tiles(medians, tile, residual.shape), info
+
+
+def background_tiles(tile_medians, free, usable, tile: int, shape: tuple[int, int]):
+    """Tile medians of the background map, or None when no tile has a usable pixel; and info.
+
+    ``tile_medians(mask)`` returns the per-tile median and count of the
+    residual over ``mask``, as ``_tile_medians``. The map is exactly
+    ``_upsample_tiles(medians, tile, shape)``; ``info["tile_medians"]`` keeps
+    the medians, which is all compact exports store of it.
+    """
+    free_med, free_count = tile_medians(free & usable)
     measured = free_count >= max(16, int(0.1 * tile * tile))
     info = {"tiles": int(measured.size), "measured_tiles": int(measured.sum())}
     if measured.all():
@@ -294,7 +351,7 @@ def estimate_background_map(
     elif measured.any():
         from scipy.interpolate import griddata
 
-        yc, xc = _tile_centers(tile, residual.shape)
+        yc, xc = _tile_centers(tile, shape)
         grid = np.stack(np.meshgrid(yc, xc, indexing="ij"), axis=-1)
         known, values = grid[measured], free_med[measured]
         medians = free_med.copy()
@@ -309,12 +366,13 @@ def estimate_background_map(
         medians[still] = griddata(known, values, grid[still], method="nearest")
         info["source"] = "interpolated"
     else:
-        medians, _ = _tile_medians(residual, usable, tile)
+        medians, _ = tile_medians(usable)
         info["source"] = "inferred"
         if np.isnan(medians).all():
-            return np.full(residual.shape, float(np.median(residual))), info
+            return None, info
         medians = np.where(np.isnan(medians), np.nanmedian(medians), medians)
-    return _upsample_tiles(medians, tile, residual.shape), info
+    info["tile_medians"] = medians
+    return medians, info
 
 
 def auto_tile(seeds_xy: np.ndarray, shape: tuple[int, int]) -> tuple[int, float]:
@@ -379,9 +437,7 @@ def deblend(
                             np.zeros(masks.shape), tile, 0, info, True)
     roi_shape = masks.shape[1:]
     raw = windows(image, origins, roi_shape)
-    yy, xx = np.indices(roi_shape, dtype=float)
-    gx = (origins[:, 0, None, None] + xx[None]).reshape(n, -1)
-    gy = (origins[:, 1, None, None] + yy[None]).reshape(n, -1)
+    grids = roi_grids(origins, roi_shape)
     radius_cap = int(max(roi_shape))
 
     # Initialize from the cell-border background; the iterations replace it.
@@ -402,10 +458,7 @@ def deblend(
         return g
 
     def clean(p, background, model):
-        gp = global_params(p)
-        own = _render_on_grids(gp, gx, gy, _render_radius(gp, radius_cap)).reshape(raw.shape)
-        others = windows(model, origins, roi_shape) - own
-        return np.where(masks, raw - windows(background, origins, roi_shape) - others, 0.0)
+        return clean_cells(raw, background, model, global_params(p), masks, origins, radius_cap, grids)
 
     model = render_models(global_params(params), shape, radius_cap=radius_cap)
     used, converged = 0, False

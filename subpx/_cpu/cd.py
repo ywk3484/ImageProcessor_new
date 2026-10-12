@@ -50,18 +50,22 @@ def _geometry(contour: np.ndarray) -> dict[str, float]:
 def _logquad(
     roi: np.ndarray, mask: np.ndarray, seed: np.ndarray,
     background: float, angles: np.ndarray, fit_fraction: float,
-) -> tuple[np.ndarray, np.ndarray, dict[str, float], str]:
-    """Recover covariance from the negative Hessian of log(I - background)."""
+) -> tuple[np.ndarray, np.ndarray, dict[str, float], str, tuple | None]:
+    """Recover covariance from the negative Hessian of log(I - background).
+
+    The last value is ``(eigenvalues, axes)`` of the precision matrix when a
+    contour was drawn, else None.
+    """
     signal = roi - background
     peak = float(signal[mask].max())
     missing = np.full((len(angles) + 1, 2), np.nan)
     extra = {"background": background, "peak_signal": peak}
     if peak <= 0:
-        return seed, missing, extra, "no_signal"
+        return seed, missing, extra, "no_signal", None
     fit_mask = mask & (signal > fit_fraction * peak)
     yy, xx = np.nonzero(fit_mask)
     if len(xx) < 6:
-        return seed, missing, extra, "insufficient_fit_pixels"
+        return seed, missing, extra, "insufficient_fit_pixels", None
     x, y = xx - seed[0], yy - seed[1]
     design = np.column_stack((x * x, y * y, x * y, x, y, np.ones(len(x))))
     z = np.log(signal[fit_mask])
@@ -69,20 +73,20 @@ def _logquad(
     weight = signal[fit_mask] / peak
     coef, _, rank, _ = np.linalg.lstsq(design * weight[:, None], z * weight, rcond=None)
     if rank < 6:
-        return seed, missing, extra, "singular_fit"
+        return seed, missing, extra, "singular_fit", None
     a, b, c, d, e, _ = coef
     precision = -np.array([[2 * a, c], [c, 2 * b]])
     eigenvalues, axes = np.linalg.eigh(precision)
     if eigenvalues[0] <= 1e-10 or eigenvalues[-1] / eigenvalues[0] > 1e8:
-        return seed, missing, extra, "non_gaussian_fit"
+        return seed, missing, extra, "non_gaussian_fit", None
     offset = np.linalg.solve(precision, [d, e])
     center = seed + offset
     contour, sigma, covariance, fit = _half_max_ellipse(center, eigenvalues, axes, angles)
     extra.update(fit, log_fit_rmse=float(np.sqrt(np.average((design @ coef - z) ** 2, weights=weight**2))))
     if not _inside(np.vstack((center, contour)), mask).all():
-        return center, contour, extra, "contour_outside_cell"
+        return center, contour, extra, "contour_outside_cell", (eigenvalues, axes)
     extra.update(_ellipse_geometry(contour, sigma, covariance))
-    return center, contour, extra, "ok"
+    return center, contour, extra, "ok", (eigenvalues, axes)
 
 
 def _half_max_ellipse(center, eigenvalues, axes, angles):
@@ -99,6 +103,27 @@ def _half_max_ellipse(center, eigenvalues, axes, angles):
         angle_deg=float(np.degrees(np.arctan2(axes[1, 0], axes[0, 0])) % 180),
     )
     return contour, sigma, covariance, fit
+
+
+def radial_contours(center_local: np.ndarray, edge_px: np.ndarray, origins_xy: np.ndarray, n_angles: int) -> np.ndarray:
+    """Closed global contours from per-ray edge radii, exactly as ``measure_cells`` builds them."""
+    angles = np.arange(n_angles) * (2 * np.pi / n_angles)
+    directions = np.column_stack((np.cos(angles), np.sin(angles)))
+    points = center_local[:, None, :] + edge_px[:, :, None] * directions[None]
+    return np.concatenate((points, points[:, :1]), axis=1) + origins_xy[:, None, :]
+
+
+def ellipse_contours(
+    centers: np.ndarray, eigenvalues: np.ndarray, axes: np.ndarray, n_angles: int, offsets=None,
+) -> np.ndarray:
+    """Closed half-maximum ellipses (NaN where no ellipse was fitted), as the fits draw them."""
+    angles = np.arange(n_angles) * (2 * np.pi / n_angles)
+    out = np.full((len(centers), n_angles + 1, 2), np.nan)
+    # Per cell, like the measurement: the same small matmul keeps the vertices bit-identical.
+    for i in np.flatnonzero(np.isfinite(eigenvalues).all(axis=1)):
+        contour = _half_max_ellipse(centers[i], eigenvalues[i], axes[i], angles)[0]
+        out[i] = contour if offsets is None else contour + offsets[i]
+    return out
 
 
 def _ellipse_geometry(contour, sigma, covariance) -> dict[str, float]:
@@ -129,6 +154,7 @@ def gaussian_method(
         contours_xy=np.full((n, n_angles + 1, 2), np.nan),
         valid=np.zeros(n, dtype=bool), status=np.asarray(status, dtype="U32").copy(),
         metrics={name: np.full(n, np.nan) for name in names},
+        geometry={"eigenvalues": np.full((n, 2), np.nan), "axes": np.full((n, 2, 2), np.nan)},
     )
     if n == 0:
         return result
@@ -148,6 +174,8 @@ def gaussian_method(
             continue
         contour, sigma, covariance, fit = _half_max_ellipse(center, eigenvalues, axes, angles)
         result.contours_xy[i] = contour
+        result.geometry["eigenvalues"][i] = eigenvalues
+        result.geometry["axes"][i] = axes
         for name, value in fit.items():
             result.metrics[name][i] = value
         if result.status[i] == "ok":
@@ -185,7 +213,8 @@ def _radial_profiles(
 def _radial_contour(
     method: str, center: np.ndarray, radii: np.ndarray, profiles: np.ndarray,
     valid: np.ndarray, angles: np.ndarray, background: float,
-) -> tuple[np.ndarray, np.ndarray, dict[str, float], str]:
+) -> tuple[np.ndarray, np.ndarray, dict[str, float], str, np.ndarray]:
+    """Edge per ray (NaN where none is found); the last value is that edge radius array."""
     n = len(angles)
     edge = np.full(n, np.nan)
     peak = float(profiles[0, 0])
@@ -223,9 +252,9 @@ def _radial_contour(
     contour = np.vstack((points, points[0]))
     extra["ray_coverage"] = float(np.isfinite(edge).mean())
     if not np.isfinite(edge).all():
-        return center, contour, extra, "incomplete_rays"
+        return center, contour, extra, "incomplete_rays", edge
     extra.update(_geometry(contour))
-    return center, contour, extra, "ok"
+    return center, contour, extra, "ok", edge
 
 
 def measure_cells(
@@ -244,11 +273,16 @@ def measure_cells(
     for method in methods:
         names = GEOMETRY_METRICS + ("background", "peak_signal")
         names += FIT_METRICS if method == "logquad" else ("ray_coverage",)
+        geometry = {"center_local": np.full((n, 2), np.nan)}
+        if method == "logquad":
+            geometry.update(eigenvalues=np.full((n, 2), np.nan), axes=np.full((n, 2, 2), np.nan))
+        else:
+            geometry["edge_px"] = np.full((n, n_angles), np.nan)
         results[method] = CDMethodResult(
             method=method, centers_xy=np.full((n, 2), np.nan),
             contours_xy=np.full((n, n_angles + 1, 2), np.nan),
             valid=np.zeros(n, dtype=bool), status=np.full(n, "no_signal", dtype="U32"),
-            metrics={name: np.full(n, np.nan) for name in names},
+            metrics={name: np.full(n, np.nan) for name in names}, geometry=geometry,
         )
     for i, (roi, mask, origin, seed) in enumerate(zip(rois, masks, origins_xy, seeds_xy)):
         if mask.sum() < 6:
@@ -261,13 +295,17 @@ def measure_cells(
         radial = None
         for method, result in results.items():
             if method == "logquad":
-                center, contour, metrics, status = _logquad(
+                center, contour, metrics, status, ellipse = _logquad(
                     roi, mask, seed - origin, background, angles, fit_fraction,
                 )
+                if ellipse is not None:
+                    result.geometry["eigenvalues"][i], result.geometry["axes"][i] = ellipse
             else:
                 if radial is None:
                     radial = _radial_profiles(roi, mask, background, angles, radial_step, smooth_sigma)
-                center, contour, metrics, status = _radial_contour(method, *radial, angles, background)
+                center, contour, metrics, status, edge = _radial_contour(method, *radial, angles, background)
+                result.geometry["edge_px"][i] = edge
+            result.geometry["center_local"][i] = center
             result.centers_xy[i] = center + origin
             result.contours_xy[i] = contour + origin
             result.status[i] = status

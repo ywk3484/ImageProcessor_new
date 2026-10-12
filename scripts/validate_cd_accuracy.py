@@ -5,6 +5,7 @@ the previous per-cell border background and the deblended model background.
 
     python scripts/validate_cd_accuracy.py
     python scripts/validate_cd_accuracy.py --ratios 2.67 2.0 1.6 1.4 --snr 0 20 10 --output artifacts/cd_accuracy.md
+    python scripts/validate_cd_accuracy.py --backend gpu    # model background on the GPU (border stays CPU)
 """
 
 from __future__ import annotations
@@ -51,6 +52,8 @@ def main(argv=None) -> None:
     parser.add_argument("--snr", type=float, nargs="+", default=[0, 20, 10], help="amplitude / noise std; 0 = noise-free")
     parser.add_argument("--fwhm", type=float, default=4.0)
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/cd_accuracy.md")
+    parser.add_argument("--backend", choices=("cpu", "gpu"), default="cpu",
+                        help="Backend for background='model' runs; border runs always use the CPU")
     args = parser.parse_args(argv)
 
     configs = [("border", "threshold"), ("model", "threshold"), ("model", "peaks")]
@@ -61,7 +64,8 @@ def main(argv=None) -> None:
             image, centers = lattice(ratio, fwhm=args.fwhm, snr=snr)
             for background, seeds in configs:
                 start = time.perf_counter()
-                result = measure_cds(image, background=background, seeds=seeds, threshold="triangle", area_max=400)
+                result = measure_cds(image, background=background, seeds=seeds, threshold="triangle", area_max=400,
+                                     backend=args.backend if background == "model" else "cpu")
                 seconds = time.perf_counter() - start
                 distance = cKDTree(centers).query(result.seeds_xy)[0] if len(result.seeds_xy) else np.zeros(0)
                 for method, measured in result.measurements.items():

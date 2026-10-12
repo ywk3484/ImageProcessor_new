@@ -20,7 +20,7 @@ from .centers import (
     dedupe_centers,
 )
 from .legacy import detect_centers_tiled, detect_centers_tiled_global_otsu
-from .cd import measure_cds, plot_cd_map, save_cd_results, save_cd_viewer
+from .cd import load_cd_results, measure_cds, plot_cd_map, save_cd_results, save_cd_viewer
 from .components import connected_components_stats
 from .pitch import estimate_pitch, estimate_pitch_lines, pitch_residuals
 from .registration import estimate_shift, apply_shift, crop_overlap
@@ -62,6 +62,7 @@ __all__ = [
     "GLOrtho2D",
     "detect_centers",
     "measure_cds",
+    "load_cd_results",
     "plot_cd_map",
     "save_cd_results",
     "save_cd_viewer",

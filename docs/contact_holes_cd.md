@@ -54,6 +54,53 @@ to reveal spatial variation; `--shared-color-scale` uses a common range.
 The pipeline also writes a separate `intensity_map.png`, `cells.csv`, and the
 offline interactive viewer `contours.html` automatically.
 
+## Large images and batches (`--backend gpu`, `--outputs compact`)
+
+Images of ~2048×5408 px with a 10 px pitch hold ~1.1e5 holes. On the CPU one
+such image takes ~14 min (pitch/FWHM 2) to ~28 min (pitch/FWHM 1.4), of which
+~6 min is writing the full outputs. For many such images:
+
+```bash
+python scripts/analyze_contact_holes.py data/*.png --backend gpu --outputs compact --output results
+```
+
+- **`--backend gpu`** runs cell extraction, deblending and all four methods on
+  the GPU (CuPy, FP64; requires `--background model`). Each step reproduces the
+  CPU's to rounding; on the test lattices at SNR 20, seeds, Voronoi labels and
+  statuses were identical and CDs agreed to ~1e-8 px. A decision that compares a
+  value with a threshold can still go the other way when the value lies within
+  rounding of it: a pixel at logquad's `--fit-fraction` (2 of 26,750 holes, CD
+  change ≤ 0.02 px), or, in noise-dominated dense arrays (SNR 10, pitch/FWHM
+  ≤ 1.6, peak seeds), which marginal noise maxima the seed revision drops (e.g.
+  507 vs 519 of ~3,300 seeds), which changes a few neighbouring holes. The accuracy
+  statistics are the same (`scripts/validate_cd_accuracy.py --backend gpu`), as
+  they would be on another CPU or BLAS build. Results are identical run to run.
+  `--backend auto` uses the GPU when one is available. Measured on an
+  RTX 4060 Ti (consumer FP64): 26,750 holes in 3.0 s (CPU 119 s) at pitch/FWHM 2,
+  4.5 s (CPU ≈330 s, extrapolated from a 1/16 crop) at 1.4 with peak seeds; peak
+  GPU memory 0.6–0.9 GiB, so ~2.5–4 GiB for a full 1.1e5-hole image.
+- **`--outputs compact`** writes `measurements.csv`, `cells.csv`, `manifest.json`,
+  the CD/background maps and histograms, and an uncompressed `raw_data.npz` of
+  ~0.4 GB instead of ~7 GB per image. It drops `contours.csv`, `contours.png`
+  and the full-image `contours.html` (~750 MB at this size, too large for a
+  browser), and stores contours as their construction data (center + per-ray
+  edge radius, or ellipse eigen-decomposition), the background map as its tile
+  medians, and none of the arrays that can be recomputed. Nothing is lost:
+  `subpx.load_cd_results(folder)` restores every array exactly.
+- **Several inputs** (files, wildcards or folders) give one subfolder per image
+  under `--output` and `batch_summary.csv` (cells, valid counts and median CD per
+  method, timings, failures). The main process measures; a second process writes
+  each image's CSVs and figures while the next image is measured. A failing image
+  is recorded in the summary and the batch continues.
+- **Region viewer**: `python scripts/view_cd_region.py results/img_01 --region X Y W H`
+  writes the interactive viewer for one crop (1000×1000 px ≈ 1e4 holes ≈ 70 MB),
+  showing the full image's cell IDs and coordinates. It is an inspection aid;
+  `raw_data.npz` + `load_cd_results` are the data interface for analysis tools.
+
+`python scripts/benchmark_cd.py` times both backends on a synthetic image of
+this size (options `--shape`, `--fwhm`, `--seeds`, `--backends`) and reports
+the GPU's agreement with the CPU; run it on the processing machine.
+
 ## Interactive contour inspection
 
 Open `artifacts/contact_holes_cd/contours.html` in a browser. It contains its
@@ -254,9 +301,16 @@ Voronoi boundary permits it.
 | `measurements.csv` | One row per cell and method, including failures, metrics, IDs, centers, and calibration |
 | `cells.csv` | One row per cell: ID, centroid, Voronoi area, and mean intensity |
 | `contours.csv` | One row per contour vertex with cell ID, method, validity, and coordinates; the last vertex repeats the first |
-| `raw_data.npz` | Source image, binary/CC/Voronoi labels, component IDs/bboxes, seeds, mean intensities, ROI origins, masked ROI stacks, all contours/metrics/status arrays |
+| `raw_data.npz` | Source image, binary/CC/Voronoi labels, component IDs/bboxes, seeds, mean intensities, ROI origins, masked ROI stacks, all contours/metrics/status arrays, and (`--background model`) every modelled hole's Gaussian parameters (`deblend_*`) |
 | `manifest.json` | Input path/hash, parameters, definitions, counts, summary statistics, timing, and file inventory |
 | `accuracy.json`, `truth_comparison.csv` | Optional comparisons to synthetic Gaussian ground truth |
+| `batch_summary.csv` | With several inputs, in `--output`: one row per image (status, cells, valid counts, median CDs, seconds) |
+
+With `--outputs compact` there is no `contours.csv`, `contours.png`,
+`intensity_map.png`, `cell_examples.png` or `contours.html`, and `raw_data.npz`
+(uncompressed) holds `<method>_geometry_*` instead of `<method>_contours_xy` and
+no `rois`, `component_labels` or (normally) `background_map`. Load either kind
+with `subpx.load_cd_results(folder)`, which rebuilds those arrays exactly.
 
 Maps use the full Voronoi partition as a spatial display, including the outer
 cells extending to the image edge. The colored region is the cell, not the hole's
@@ -297,6 +351,15 @@ ax.set_ylim(140, 100)
 save_cd_results(result, "artifacts/my_cd")
 plot_cd_map(result, metric="mean_intensity")
 save_cd_viewer(result, "artifacts/my_cd/contours.html")
+```
+
+Saved results of either kind load back as a `CDResult`, e.g. to view a region:
+
+```python
+from subpx import load_cd_results, save_cd_viewer
+
+result = load_cd_results("results/img_01")          # full or compact folder
+save_cd_viewer(result, "region.html", region=(2000, 800, 1000, 1000))
 ```
 
 ## Validation on the supplied image
