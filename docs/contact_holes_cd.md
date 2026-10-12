@@ -118,10 +118,57 @@ background. Float inputs (and uint16 with triangle thresholding) are scaled to
 uint8 **only for segmentation**. uint8 and uint16 Otsu inputs retain their native
 segmentation behavior.
 
+## Background and neighbouring holes (`--background model`, default)
+
+The previous per-cell background (`--background border`: 10th percentile of
+the Voronoi-cell border) is biased in two directions. Detector noise pulls it
+low (about -1.3 noise standard deviations). Tails of the hole itself and of
+its neighbours push it high (about +5 % of the hole amplitude at
+pitch/FWHM = 2). Both errors inflate or deflate every CD, and in dense arrays
+there is no tail-free border at all.
+
+The default instead models the image as a smooth background map plus one 2-D
+Gaussian per hole and alternates:
+
+1. Fit each hole's Gaussian by least squares on linear intensities (unbiased
+   under noise, unlike a log fit) on its cell, after subtracting the
+   background map and **all other holes' fitted models**. All cells are fitted
+   at once with damped updates; iteration stops on convergence (cap
+   `--deblend-iterations`, default 30). A hole's width is capped at its cell's
+   equivalent radius, so one bad fit cannot spread through its neighbours.
+2. Re-estimate the background map from `image - all models`, using only pixels
+   at least 1.25 FWHM from every hole where the model is below 5 % of the
+   typical amplitude. Tiles of about four pitches without such pixels (inside
+   dense arrays) are **interpolated** from tiles that have them (array edges,
+   open areas). Inside a dense array background and overlapping tails cannot
+   be separated: their sum is nearly flat, and fitting both there converges to
+   "background too high, holes too narrow". `meta["background_source"]` is
+   `measured`, `interpolated`, `inferred` (no hole-free pixels anywhere — the
+   background then rests on the Gaussian model alone; pass
+   `--background-level` if it is known) or `fixed`.
+3. After convergence, drop seeds whose amplitude is below 30 % of the median
+   (noise maxima) and add maxima left in the residual above 50 % (holes that
+   thresholding merged), rebuild the cells and repeat (at most twice).
+
+Every method then measures the **cleaned** cell: background map and all
+neighbouring models removed. `gaussian` reports the half-maximum ellipse of
+the deblended fit itself. Edge holes (touching the image border) are modelled
+so their tails are subtracted from interior neighbours, but not reported.
+
+`--seeds peaks` replaces threshold segmentation with local maxima (smoothed,
+suppressed within half the pitch estimated from the image autocorrelation).
+Use it when pitch/FWHM is below about 1.6, where thresholding merges holes.
+
+The Gaussian model matters for dense arrays, where neighbour tails are
+subtracted. For sparse flat-topped holes the Gaussian tail at a neighbour is
+negligible and the background comes from directly visible pixels, so the
+radial methods still measure the real profile.
+
 ## Methods and definitions
 
 | Method | Contour definition | Useful outputs |
 |---|---|---|
+| `gaussian` | Half-height ellipse of the deblended least-squares 2D Gaussian (`--background model` only) | Principal-axis sigma and FWHM, orientation, `fit_rmse`, ellipse area |
 | `logquad` | Half-height ellipse of a fitted 2D Gaussian above local background | Principal-axis sigma and FWHM, orientation, fit residual, ellipse area |
 | `gradient` | Connected subpixel maxima of the outward radial intensity decrease | Measured edge polygon, area, horizontal/vertical extent, ray coverage |
 | `halfmax` | First outward crossing of half the interpolated central signal above background along each ray | Measured half-height polygon, area, horizontal/vertical extent, ray coverage |

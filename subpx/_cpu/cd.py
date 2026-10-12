@@ -77,29 +77,84 @@ def _logquad(
         return seed, missing, extra, "non_gaussian_fit"
     offset = np.linalg.solve(precision, [d, e])
     center = seed + offset
+    contour, sigma, covariance, fit = _half_max_ellipse(center, eigenvalues, axes, angles)
+    extra.update(fit, log_fit_rmse=float(np.sqrt(np.average((design @ coef - z) ** 2, weights=weight**2))))
+    if not _inside(np.vstack((center, contour)), mask).all():
+        return center, contour, extra, "contour_outside_cell"
+    extra.update(_ellipse_geometry(contour, sigma, covariance))
+    return center, contour, extra, "ok"
+
+
+def _half_max_ellipse(center, eigenvalues, axes, angles):
+    """Closed half-maximum contour and widths of a Gaussian with this precision."""
     sigma = 1 / np.sqrt(eigenvalues)  # major, minor
     k = np.sqrt(2 * np.log(2))
     unit_circle = np.column_stack((np.cos(angles), np.sin(angles)))
     contour = center + (unit_circle * (k * sigma)) @ axes.T
     contour = np.vstack((contour, contour[0]))
     covariance = (axes * (sigma * sigma)) @ axes.T
-    extra.update(
+    fit = dict(
         sigma_major_px=float(sigma[0]), sigma_minor_px=float(sigma[1]),
         fwhm_major_px=float(2 * k * sigma[0]), fwhm_minor_px=float(2 * k * sigma[1]),
         angle_deg=float(np.degrees(np.arctan2(axes[1, 0], axes[0, 0])) % 180),
-        log_fit_rmse=float(np.sqrt(np.average((design @ coef - z) ** 2, weights=weight**2))),
     )
-    if not _inside(np.vstack((center, contour)), mask).all():
-        return center, contour, extra, "contour_outside_cell"
-    extra.update(_geometry(contour))
+    return contour, sigma, covariance, fit
+
+
+def _ellipse_geometry(contour, sigma, covariance) -> dict[str, float]:
+    k = np.sqrt(2 * np.log(2))
+    geometry = _geometry(contour)
     # Analytic ellipse area and projected widths avoid polygon sampling error.
     area = float(np.pi * k**2 * np.prod(sigma))
-    extra.update(
+    geometry.update(
         area_px2=area, cd_equivalent_px=float(2 * np.sqrt(area / np.pi)),
         cd_x_px=float(2 * k * np.sqrt(covariance[0, 0])),
         cd_y_px=float(2 * k * np.sqrt(covariance[1, 1])),
     )
-    return center, contour, extra, "ok"
+    return geometry
+
+
+def gaussian_method(
+    params: np.ndarray, status: np.ndarray, cleaned: np.ndarray, masks: np.ndarray,
+    origins_xy: np.ndarray, n_angles: int,
+) -> CDMethodResult:
+    """Half-maximum ellipses of the deblended Gaussian fits (ROI-local params)."""
+    from .deblend import model_on_rois, precision_matrices
+
+    n = len(params)
+    angles = np.arange(n_angles) * (2 * np.pi / n_angles)
+    names = GEOMETRY_METRICS + ("background", "peak_signal") + FIT_METRICS[:-1] + ("fit_rmse",)
+    result = CDMethodResult(
+        method="gaussian", centers_xy=np.full((n, 2), np.nan),
+        contours_xy=np.full((n, n_angles + 1, 2), np.nan),
+        valid=np.zeros(n, dtype=bool), status=np.asarray(status, dtype="U32").copy(),
+        metrics={name: np.full(n, np.nan) for name in names},
+    )
+    if n == 0:
+        return result
+    residual = np.where(masks, cleaned - model_on_rois(params, cleaned.shape[1:]), 0.0)
+    rmse = np.sqrt((residual**2).sum(axis=(1, 2)) / np.maximum(masks.sum(axis=(1, 2)), 1))
+    precision = precision_matrices(params)
+    for i in range(n):
+        result.metrics["peak_signal"][i] = params[i, 0]
+        result.metrics["fit_rmse"][i] = rmse[i]
+        if not np.isfinite(params[i]).all():
+            continue
+        center = params[i, 1:3] + origins_xy[i]
+        result.centers_xy[i] = center
+        eigenvalues, axes = np.linalg.eigh(precision[i])
+        if eigenvalues[0] <= 1e-10:
+            result.status[i] = "non_gaussian_fit"
+            continue
+        contour, sigma, covariance, fit = _half_max_ellipse(center, eigenvalues, axes, angles)
+        result.contours_xy[i] = contour
+        for name, value in fit.items():
+            result.metrics[name][i] = value
+        if result.status[i] == "ok":
+            for name, value in _ellipse_geometry(contour, sigma, covariance).items():
+                result.metrics[name][i] = value
+    result.valid[:] = result.status == "ok"
+    return result
 
 
 def _radial_profiles(
@@ -176,9 +231,13 @@ def _radial_contour(
 def measure_cells(
     rois: np.ndarray, masks: np.ndarray, origins_xy: np.ndarray, seeds_xy: np.ndarray,
     *, methods: tuple[str, ...], n_angles: int, radial_step: float,
-    smooth_sigma: float, fit_fraction: float,
+    smooth_sigma: float, fit_fraction: float, backgrounds: np.ndarray | None = None,
 ) -> dict[str, CDMethodResult]:
-    """Measure all methods on the same ordered cell stack."""
+    """Measure all methods on the same ordered cell stack.
+
+    ``backgrounds`` overrides the per-cell border estimate, e.g. zeros for
+    cells whose background was already removed by deblending.
+    """
     n = len(rois)
     angles = np.arange(n_angles) * (2 * np.pi / n_angles)
     results = {}
@@ -196,7 +255,7 @@ def measure_cells(
             for result in results.values():
                 result.status[i] = "insufficient_cell_pixels"
             continue
-        background = _background(roi, mask)
+        background = _background(roi, mask) if backgrounds is None else float(backgrounds[i])
         if roi[mask].max() <= background:
             continue
         radial = None

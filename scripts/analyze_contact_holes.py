@@ -4,6 +4,8 @@ Run from the repository root:
     python scripts/analyze_contact_holes.py
     python scripts/analyze_contact_holes.py image.tif --invert --pixel-size 2 --unit nm
     python scripts/analyze_contact_holes.py stack.tiff --page 10 --output artifacts/page_10
+    python scripts/analyze_contact_holes.py dense.png --seeds peaks          # pitch/FWHM below ~1.6
+    python scripts/analyze_contact_holes.py image.png --background border    # previous per-cell background
 """
 
 from __future__ import annotations
@@ -87,6 +89,17 @@ def save_figures(result, output: Path, metric: str, *, shared_scale: bool = Fals
     plt.close(ax.figure)
     files.append(name)
 
+    if result.background_map is not None:
+        fig, ax = plt.subplots(figsize=(12, 4), constrained_layout=True)
+        artist = ax.imshow(result.background_map, cmap="magma", interpolation="nearest")
+        fig.colorbar(artist, ax=ax, label="Fitted background (original intensity units)", pad=0.02)
+        ax.set(title=f"Background map | source: {result.meta.get('background_source')}",
+               xlabel="x (px)", ylabel="y (px)")
+        name = "background_map.png"
+        fig.savefig(output / name, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        files.append(name)
+
     fig, axes = plt.subplots(1, len(methods), figsize=(4.6 * len(methods), 3.5), squeeze=False,
                              constrained_layout=True)
     for ax, (method, measurement) in zip(axes[0], result.measurements.items()):
@@ -115,7 +128,7 @@ def save_figures(result, output: Path, metric: str, *, shared_scale: bool = Fals
         selections = list(dict.fromkeys(ordered[[0, len(ordered) // 2, len(ordered) - 1]].tolist()))
         fig, axes = plt.subplots(1, len(selections), figsize=(4.5 * len(selections), 4.3), squeeze=False,
                                  constrained_layout=True)
-        colors = {"logquad": "#ffb000", "gradient": "#00cfec", "halfmax": "#ff5aa5"}
+        colors = {"gaussian": "#7cfc00", "logquad": "#ffb000", "gradient": "#00cfec", "halfmax": "#ff5aa5"}
         for ax, i in zip(axes[0], selections):
             x0, y0 = result.origins_xy[i]
             h, w = result.rois[i].shape
@@ -182,7 +195,18 @@ def main(argv=None) -> None:
     parser.add_argument("image", type=Path, nargs="?", default=ROOT / "examples/data/synthetic_ch/contact_holes.png")
     parser.add_argument("--page", type=int, default=0, help="Zero-based TIFF page index (default: 0, the first image)")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/contact_holes_cd")
-    parser.add_argument("--methods", nargs="+", choices=list(METHOD_LABELS), default=list(METHOD_LABELS))
+    parser.add_argument("--methods", nargs="+", choices=list(METHOD_LABELS), default=None,
+                        help="Default: all four with --background model, all but gaussian with border")
+    parser.add_argument("--background", choices=("model", "border"), default="model",
+                        help="model: joint background map + neighbour-subtracted Gaussian fits (default); "
+                             "border: previous per-cell 10th percentile")
+    parser.add_argument("--seeds", choices=("threshold", "peaks"), default="threshold",
+                        help="peaks: local maxima, for arrays too dense to threshold (pitch/FWHM below ~1.6)")
+    parser.add_argument("--peak-min-distance", type=float, default=None, help="Default: half the estimated pitch")
+    parser.add_argument("--background-level", type=float, default=None,
+                        help="Known constant background (original intensity units) when no hole-free area exists")
+    parser.add_argument("--background-tile", type=int, default=None, help="Background-map tile size in pixels")
+    parser.add_argument("--deblend-iterations", type=int, default=30)
     parser.add_argument("--threshold", choices=("otsu", "triangle"), default="otsu")
     parser.add_argument("--invert", action="store_true", help="Dark holes on a bright background")
     parser.add_argument("--area-min", type=int, default=3)
@@ -213,7 +237,10 @@ def main(argv=None) -> None:
     page_info = f", page={input_page}" if input_page is not None else ""
     print(f"Input: {args.image} | shape={image.shape}, dtype={image.dtype}{page_info}", flush=True)
     result = measure_cds(
-        image, methods=tuple(args.methods), threshold=args.threshold, invert=args.invert,
+        image, methods=None if args.methods is None else tuple(args.methods), background=args.background,
+        seeds=args.seeds, peak_min_distance=args.peak_min_distance, background_level=args.background_level,
+        background_tile=args.background_tile, deblend_iterations=args.deblend_iterations,
+        threshold=args.threshold, invert=args.invert,
         area_min=args.area_min, area_max=args.area_max, pad=args.pad,
         n_angles=args.n_angles, radial_step=args.radial_step, smooth_sigma=args.smooth_sigma,
         fit_fraction=args.fit_fraction, pixel_size=args.pixel_size, unit=args.unit,
@@ -221,6 +248,14 @@ def main(argv=None) -> None:
     )
     measurement_seconds = time.perf_counter() - start
     print(f"Extracted {len(result.seeds_xy)} cells in {measurement_seconds:.2f} s", flush=True)
+    if result.background_map is not None:
+        m = result.meta
+        print(f"  background: {m['background_source']} ({m['background_measured_tiles']}/{m['background_tiles']} tiles "
+              f"measured), deblend iterations {m['deblend_iterations_used']}, seeds +{m['seeds_added_from_residual']}"
+              f"/-{m['seeds_dropped_as_insignificant']}", flush=True)
+        if m["background_source"] == "inferred":
+            print("  WARNING: no hole-free area found; background inferred from the Gaussian model alone. "
+                  "Pass --background-level if the background is known.", flush=True)
     for method, measured in result.measurements.items():
         values = measured.metrics["cd_equivalent_px"][measured.valid] * result.pixel_size
         median = f"{np.median(values):.4f}" if len(values) else "n/a"

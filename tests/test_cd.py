@@ -124,7 +124,7 @@ def test_calibrated_exports_reload_without_pickle(tmp_path):
     paths = save_cd_results(result, tmp_path)
     with paths["measurements.csv"].open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 3
+    assert len(rows) == len(result.measurements) == 4
     for row in rows:
         assert row["valid"] == "True"
         assert row["unit"] == "nm"
@@ -139,7 +139,7 @@ def test_calibrated_exports_reload_without_pickle(tmp_path):
         np.testing.assert_allclose(raw["halfmax_contours_xy"], result.measurements["halfmax"].contours_xy)
     with paths["contours.csv"].open(newline="", encoding="utf-8") as handle:
         contours = list(csv.DictReader(handle))
-    assert len(contours) == 3 * 129
+    assert len(contours) == len(result.measurements) * 129
     for row in contours[::128]:
         assert float(row["x"]) == pytest.approx(float(row["x_px"]) * 2.5)
     with paths["cells.csv"].open(newline="", encoding="utf-8") as handle:

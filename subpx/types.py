@@ -85,6 +85,7 @@ class CDResult:
     measurements: dict[str, CDMethodResult]
     pixel_size: float = 1.0
     unit: str = "px"
+    background_map: np.ndarray | None = None
     meta: dict[str, Any] = field(default_factory=dict)
     mean_intensity: np.ndarray = field(init=False)
 

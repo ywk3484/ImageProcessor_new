@@ -9,7 +9,7 @@ python scripts/analyze_contact_holes.py "D:\data\image.png" --output "D:\results
 ```
 
 Run from the repository root on the server, using your Python environment.
-Replace the input and output paths. This runs all three CD methods on the CPU.
+Replace the input and output paths. This runs all four CD methods on the CPU.
 
 ## Input parameters
 
@@ -18,7 +18,10 @@ Replace the input and output paths. This runs all three CD methods on the CPU.
 | First argument | Supply your image path | One grayscale image to analyze. |
 | `--page` | `0` | TIFF page index: `0` is the first image; `1499` is the last in a 1,500-page file. |
 | `--output` | `artifacts/contact_holes_cd` | Output directory. Existing named files are overwritten. |
-| `--methods` | `logquad gradient halfmax` | Methods to run: Gaussian FWHM, radial maximum gradient, and half-height contours. |
+| `--methods` | `gaussian logquad gradient halfmax` | Methods to run: deblended Gaussian FWHM, log-fit Gaussian FWHM, radial maximum gradient, and half-height contours. |
+| `--background` | `model` | `model`: fitted background map with neighbouring holes subtracted. `border`: previous per-cell 10th percentile (reproduces old results). |
+| `--seeds` | `threshold` | `peaks` uses local maxima instead of thresholding; use it when pitch/FWHM is below about 1.6. |
+| `--background-level` | none | Known constant background, for images with no hole-free area. |
 | `--invert` | Off | Enable for dark holes on a bright background. |
 | `--threshold` | `otsu` | Segmentation threshold: `otsu` or `triangle`. |
 | `--area-min`, `--area-max` | `3`, `50` | Accepted thresholded component area, in pixels. Adjust for your hole sizes. |

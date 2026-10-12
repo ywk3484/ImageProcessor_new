@@ -12,6 +12,7 @@ from .types import CDResult
 
 
 METHOD_LABELS = {
+    "gaussian": "Deblended Gaussian FWHM",
     "logquad": "Gaussian FWHM",
     "gradient": "Maximum radial gradient",
     "halfmax": "Half-height contour",
@@ -21,7 +22,9 @@ METHOD_LABELS = {
 def measure_cds(
     image: np.ndarray,
     *,
-    methods: tuple[str, ...] = ("logquad", "gradient", "halfmax"),
+    methods: tuple[str, ...] | None = None,
+    background: str = "model",
+    seeds: str = "threshold",
     threshold: str = "otsu",
     invert: bool = False,
     area_min: int = 3,
@@ -31,6 +34,10 @@ def measure_cds(
     radial_step: float = 0.1,
     smooth_sigma: float = 0.0,
     fit_fraction: float = 0.2,
+    peak_min_distance: float | None = None,
+    background_level: float | None = None,
+    background_tile: int | None = None,
+    deblend_iterations: int = 30,
     pixel_size: float = 1.0,
     unit: str = "px",
     cell_backend: str = "cpu",
@@ -43,16 +50,29 @@ def measure_cds(
     image : (H, W) ndarray
         Finite grayscale image. Floating-point images are scaled to uint8 for
         segmentation only; measurements retain the original intensities.
-    methods : sequence of str
-        ``logquad`` fits a Gaussian and returns its half-maximum ellipse;
+    methods : sequence of str, optional
+        ``gaussian`` returns the half-maximum ellipse of the deblended Gaussian
+        fit (``background='model'`` only); ``logquad`` fits log(I - background);
         ``gradient`` connects radial gradient maxima; ``halfmax`` connects
-        half-height crossings. These are different edge definitions.
+        half-height crossings. These are different edge definitions. Default:
+        all four for ``background='model'``, the last three for ``'border'``.
+    background : {'model', 'border'}
+        ``model`` jointly fits one Gaussian per hole and a smooth background
+        map, then measures every cell with the background and all neighbouring
+        holes' models removed. Background is taken from pixels far from every
+        hole and interpolated across dense arrays (see ``meta['background_source']``).
+        ``border`` is the previous per-cell 10th percentile of the Voronoi border,
+        biased by noise and neighbour tails; kept to reproduce old results.
+    seeds : {'threshold', 'peaks'}
+        ``threshold`` uses connected components of the thresholded image;
+        ``peaks`` uses local maxima, for arrays too dense to threshold
+        (pitch/FWHM below about 1.6). ``peaks`` requires ``background='model'``.
     threshold : {'otsu', 'triangle'}
         Same segmentation as the center diagnostic.
     invert : bool
         Set True for dark holes on a bright background.
     area_min, area_max : int
-        Inclusive connected-component area limits, in pixels.
+        Inclusive connected-component area limits, in pixels (threshold seeds).
     pad : int
         Padding around component bounding boxes before Voronoi masking.
     n_angles : int
@@ -61,9 +81,19 @@ def measure_cds(
         Ray sampling interval in original pixels (cubic interpolation).
     smooth_sigma : float
         Optional Gaussian smoothing of radial profiles' source image, in
-        pixels. Broadens measured edges; does not affect the Gaussian fit.
+        pixels. Broadens measured edges; does not affect the Gaussian fits.
     fit_fraction : float
-        Fit pixels above this fraction of the background-subtracted peak.
+        ``logquad`` fits pixels above this fraction of the background-subtracted peak.
+    peak_min_distance : float, optional
+        Minimum seed spacing for ``seeds='peaks'``; default half the pitch
+        estimated from the image autocorrelation.
+    background_level : float, optional
+        Known constant background in original intensity units, for images with
+        no hole-free region. Overrides the background map.
+    background_tile : int, optional
+        Background-map tile size in pixels; default about four pitches.
+    deblend_iterations : int
+        Maximum deblending iterations; stops earlier on convergence.
     pixel_size : float
         Isotropic length per pixel, used by plots and calibrated CSV columns.
     unit : str
@@ -83,26 +113,42 @@ def measure_cds(
     from ._cpu.centers import _segment_binary
     from ._cpu.components import connected_components_stats_cpu
     from ._cpu.cells import _extract_voronoi_rois, compute_voronoi_labels_cpu
-    from ._cpu.cd import measure_cells
+    from ._cpu.cd import gaussian_method, measure_cells
 
     img = np.asarray(image)
     if img.ndim != 2 or img.size == 0 or not np.issubdtype(img.dtype, np.number):
         raise ValueError("image must be a nonempty 2D real grayscale array")
     if np.iscomplexobj(img) or not np.isfinite(img).all():
         raise ValueError("image must contain finite real intensities")
+    if background not in {"model", "border"}:
+        raise ValueError("background must be 'model' or 'border'")
+    if seeds not in {"threshold", "peaks"}:
+        raise ValueError("seeds must be 'threshold' or 'peaks'")
+    if seeds == "peaks" and background == "border":
+        raise ValueError("seeds='peaks' requires background='model'")
+    if methods is None:
+        methods = ("gaussian", "logquad", "gradient", "halfmax") if background == "model" else ("logquad", "gradient", "halfmax")
     if isinstance(methods, str):
         methods = (methods,)
     methods = tuple(methods)
     if not methods or len(set(methods)) != len(methods) or any(m not in METHOD_LABELS for m in methods):
-        raise ValueError("methods must be unique choices from logquad, gradient, halfmax")
+        raise ValueError("methods must be unique choices from " + ", ".join(METHOD_LABELS))
+    if "gaussian" in methods and background != "model":
+        raise ValueError("method 'gaussian' requires background='model'")
     for name, value, lower in (("area_min", area_min, 1), ("area_max", area_max, area_min),
-                               ("pad", pad, 0), ("n_angles", n_angles, 16)):
+                               ("pad", pad, 0), ("n_angles", n_angles, 16),
+                               ("deblend_iterations", deblend_iterations, 1)):
         if not np.isfinite(value) or int(value) != value or value < lower:
             raise ValueError(f"{name} must be an integer >= {lower}")
     if not np.isfinite([radial_step, smooth_sigma, fit_fraction, pixel_size]).all():
         raise ValueError("measurement parameters must be finite")
     if not 0 < radial_step <= 1 or smooth_sigma < 0 or not 0 < fit_fraction < 1 or pixel_size <= 0:
         raise ValueError("require 0 < radial_step <= 1, smooth_sigma >= 0, 0 < fit_fraction < 1, pixel_size > 0")
+    for name, value, lower in (("peak_min_distance", peak_min_distance, 1.0), ("background_tile", background_tile, 4)):
+        if value is not None and (not np.isfinite(value) or value < lower):
+            raise ValueError(f"{name} must be >= {lower}")
+    if background_level is not None and not np.isfinite(background_level):
+        raise ValueError("background_level must be finite")
     if not isinstance(unit, str) or not unit.strip():
         raise ValueError("unit must be a nonempty length-unit label")
     if unit == "px" and pixel_size != 1:
@@ -110,60 +156,187 @@ def measure_cds(
     if cell_backend not in {"cpu", "gpu"}:
         raise ValueError("cell_backend must be 'cpu' or 'gpu'")
 
-    # Preserve the diagnostic's uint8 segmentation exactly; OpenCV's triangle
-    # threshold requires uint8, whereas Otsu also supports uint16.
-    segmentation = img
-    rescaled = img.dtype != np.uint8 and not (img.dtype == np.uint16 and threshold == "otsu")
-    if rescaled:
-        gray = img.astype(np.float64)
-        span = float(gray.max() - gray.min())
-        segmentation = np.rint((gray - gray.min()) * (255 / span)).astype(np.uint8) if span else np.zeros(img.shape, np.uint8)
-    _, binary = _segment_binary(segmentation, threshold=threshold, invert=invert)
-    comp = connected_components_stats_cpu(binary, connectivity=8)
     height, width = img.shape
-    rows, component_ids = [], []
-    for label in range(1, comp.num_labels):
-        x, y, w, h, area = comp.stats[label]
-        if area < area_min or area > area_max:
-            continue
-        if x <= 0 or y <= 0 or x + w >= width or y + h >= height:
-            continue
-        rows.append([x, y, w, h, *comp.centroids[label]])
-        component_ids.append(label)
-    row_array = np.asarray(rows, dtype=float).reshape(-1, 6)
-    seeds = row_array[:, 4:6].copy()
-    if cell_backend == "gpu":
-        from ._gpu.voronoi import compute_voronoi_labels_gpu
-        cell_labels = compute_voronoi_labels_gpu(seeds, img.shape, device=device)
-    else:
-        cell_labels = compute_voronoi_labels_cpu(seeds, img.shape)
     # Negation preserves contrast and permits the same bright-feature methods
     # for dark holes, including a background estimate in the correct polarity.
-    signal_image = img.astype(np.float64) * (-1 if invert else 1)
-    rois, masks, origins = _extract_voronoi_rois(signal_image, cell_labels, rows, pad=int(pad))
-    origins = np.asarray(origins, dtype=np.int32).reshape(-1, 2)
-    measurements = measure_cells(
-        rois, masks, origins, seeds, methods=methods, n_angles=int(n_angles),
-        radial_step=radial_step, smooth_sigma=smooth_sigma, fit_fraction=fit_fraction,
-    )
+    sign = -1.0 if invert else 1.0
+    signal_image = img.astype(np.float64) * sign
+    rescaled = False
+    components_before_filter = 0
+    pitch = float("nan")
+    if seeds == "threshold":
+        # Preserve the diagnostic's uint8 segmentation exactly; OpenCV's triangle
+        # threshold requires uint8, whereas Otsu also supports uint16.
+        segmentation = img
+        rescaled = img.dtype != np.uint8 and not (img.dtype == np.uint16 and threshold == "otsu")
+        if rescaled:
+            gray = img.astype(np.float64)
+            span = float(gray.max() - gray.min())
+            segmentation = np.rint((gray - gray.min()) * (255 / span)).astype(np.uint8) if span else np.zeros(img.shape, np.uint8)
+        _, binary = _segment_binary(segmentation, threshold=threshold, invert=invert)
+        comp = connected_components_stats_cpu(binary, connectivity=8)
+        component_labels = comp.labels
+        components_before_filter = comp.num_labels - 1
+        rows, component_ids, interior = [], [], []
+        for label in range(1, comp.num_labels):
+            x, y, w, h, area = comp.stats[label]
+            if area < area_min or area > area_max:
+                continue
+            inside = not (x <= 0 or y <= 0 or x + w >= width or y + h >= height)
+            # Border mode drops edge holes entirely; model mode still models
+            # them so their tails are subtracted from interior neighbours.
+            if not inside and background == "border":
+                continue
+            rows.append([x, y, w, h, *comp.centroids[label]])
+            component_ids.append(label)
+            interior.append(inside)
+        component_ids = np.asarray(component_ids, dtype=np.int32)
+    else:
+        from ._cpu.deblend import detect_peaks
+
+        peaks, pitch = detect_peaks(signal_image, min_distance=peak_min_distance)
+        binary = np.zeros(img.shape, bool)
+        component_labels = np.zeros(img.shape, np.int32)
+        half = int(np.ceil(0.6 * pitch))
+        rows = [[cx - half, cy - half, 2 * half + 1, 2 * half + 1, cx, cy] for cx, cy in peaks]
+        component_ids = np.full(len(rows), -1, dtype=np.int32)
+        interior = [True] * len(rows)  # decided after fitting, from each hole's width
+    def build_cells(rows):
+        seeds_xy = np.asarray(rows, dtype=float).reshape(-1, 6)[:, 4:6].copy()
+        if cell_backend == "gpu":
+            from ._gpu.voronoi import compute_voronoi_labels_gpu
+            labels = compute_voronoi_labels_gpu(seeds_xy, img.shape, device=device)
+        else:
+            labels = compute_voronoi_labels_cpu(seeds_xy, img.shape)
+        rois, masks, origins = _extract_voronoi_rois(signal_image, labels, rows, pad=int(pad))
+        return seeds_xy, labels, rois, masks, np.asarray(origins, dtype=np.int32).reshape(-1, 2)
+
+    all_seeds, cell_labels, rois, masks, origins = build_cells(rows)
+    meta = {
+        "background": background, "seeds": seeds, "threshold": threshold, "invert": bool(invert),
+        "area_min": int(area_min), "area_max": int(area_max), "pad": int(pad), "n_angles": int(n_angles),
+        "radial_step": float(radial_step), "smooth_sigma": float(smooth_sigma),
+        "fit_fraction": float(fit_fraction), "cell_backend": cell_backend,
+        "measurement_backend": "cpu", "device": int(device),
+        "segmentation_rescaled": rescaled, "components_before_filter": components_before_filter,
+        "coordinates": "global [x, y] pixels; images indexed [y, x]",
+    }
+    background_map = None
+    if background == "border":
+        measurements = measure_cells(
+            rois, masks, origins, all_seeds, methods=methods, n_angles=int(n_angles),
+            radial_step=radial_step, smooth_sigma=smooth_sigma, fit_fraction=fit_fraction,
+        )
+        meta["background_definition"] = "10th percentile of the polarity-normalized cell border"
+        report = np.arange(len(rows))
+    else:
+        from scipy.ndimage import binary_dilation, map_coordinates
+        from ._cpu.deblend import FWHM_K, auto_tile, deblend, revise_seeds, sigma_major
+
+        component_ids = np.asarray(component_ids, dtype=np.int32)
+        interior = np.asarray(interior, dtype=bool)
+        # Peak seeds and seeds added from the residual have no component box;
+        # their edge test uses the fitted width instead.
+        by_reach = np.full(len(rows), seeds == "peaks")
+        if seeds == "threshold":
+            pitch = auto_tile(all_seeds, img.shape)[1]
+        added = dropped = 0
+        for revision in range(3):
+            exclude = None
+            if seeds == "threshold":
+                # Thresholded features without a model (merged blobs, specks outside
+                # the area limits) must not be read as background.
+                exclude = binary_dilation((binary > 0) & ~np.isin(component_labels, component_ids), iterations=2)
+            final = revision == 2 or not np.isfinite(pitch)
+            # Revision passes only need approximate fits to judge seeds.
+            state = deblend(
+                signal_image, all_seeds, masks, origins,
+                iterations=int(deblend_iterations) if final else min(10, int(deblend_iterations)),
+                tile=background_tile, exclude=exclude,
+                background_level=None if background_level is None else sign * float(background_level),
+            )
+            if final:
+                break
+            # One missed or spurious hole corrupts its neighbours' fits; drop
+            # insignificant seeds, add holes left in the residual, and refit.
+            drop, new = revise_seeds(signal_image, state, all_seeds, pitch)
+            if not drop.any() and not len(new):
+                if state.converged or state.iterations >= int(deblend_iterations):
+                    break
+                # Seeds are settled; finish these fits with the remaining budget.
+                state = deblend(
+                    signal_image, all_seeds, masks, origins,
+                    iterations=int(deblend_iterations) - state.iterations, init=state.params,
+                    tile=background_tile, exclude=exclude,
+                    background_level=None if background_level is None else sign * float(background_level),
+                )
+                break
+            keep = ~drop
+            half = int(np.ceil(0.6 * pitch))
+            rows = [r for r, k in zip(rows, keep) if k] + [
+                [x - half, y - half, 2 * half + 1, 2 * half + 1, x, y] for x, y in new]
+            component_ids = np.concatenate((component_ids[keep], np.full(len(new), -1, np.int32)))
+            interior = np.concatenate((interior[keep], np.ones(len(new), bool)))
+            by_reach = np.concatenate((by_reach[keep], np.ones(len(new), bool)))
+            added, dropped = added + len(new), dropped + int(drop.sum())
+            all_seeds, cell_labels, rois, masks, origins = build_cells(rows)
+        if by_reach.any():
+            # A hole is reported when one FWHM around its fitted center is in the image.
+            params = state.params[by_reach]
+            centers = params[:, 1:3] + origins[by_reach]
+            reach = np.where(np.isfinite(params).all(axis=1), 2 * FWHM_K * sigma_major(params), np.inf)
+            interior[by_reach] = ((centers[:, 0] - reach > 0) & (centers[:, 0] + reach < width - 1)
+                                  & (centers[:, 1] - reach > 0) & (centers[:, 1] + reach < height - 1))
+        report = np.flatnonzero(interior)
+        cleaned = state.cleaned[report]
+        measured = [m for m in methods if m != "gaussian"]
+        found = measure_cells(
+            cleaned, masks[report], origins[report], all_seeds[report], methods=tuple(measured),
+            n_angles=int(n_angles), radial_step=radial_step, smooth_sigma=smooth_sigma,
+            fit_fraction=fit_fraction, backgrounds=np.zeros(len(report)),
+        ) if measured else {}
+        if "gaussian" in methods:
+            found["gaussian"] = gaussian_method(
+                state.params[report], state.status[report], cleaned, masks[report], origins[report], int(n_angles),
+            )
+        local_background = sign * map_coordinates(
+            state.background_map, all_seeds[report].T[::-1], order=1, mode="nearest",
+        ) if len(report) else np.zeros(0)
+        measurements = {}
+        for name in methods:
+            found[name].metrics["background"][:] = local_background
+            measurements[name] = found[name]
+        rois = cleaned
+        background_map = sign * state.background_map
+        statuses, counts = np.unique(state.status[report], return_counts=True)
+        meta.update(
+            background_definition=(
+                "Smooth map fitted jointly with one 2-D Gaussian per hole; measured cells have the map "
+                "and all other holes' models removed"),
+            background_source=state.background_info.get("source"),
+            background_tiles=state.background_info.get("tiles"),
+            background_measured_tiles=state.background_info.get("measured_tiles"),
+            background_tile_px=int(state.tile_px), background_level=background_level,
+            deblend_iterations=int(deblend_iterations), deblend_iterations_used=int(state.iterations),
+            deblend_converged=bool(state.converged),
+            deblend_status_counts=dict(zip(statuses.tolist(), counts.tolist())),
+            modelled_holes=int(len(rows)), seeds_added_from_residual=int(added),
+            seeds_dropped_as_insignificant=int(dropped),
+            pitch_px=float(pitch) if np.isfinite(pitch) else None,
+        )
+        remap = np.full(len(rows) + 1, -1, dtype=np.int32)
+        remap[report] = np.arange(len(report), dtype=np.int32)
+        cell_labels = remap[cell_labels]  # -1 stays -1 through the extra slot
+        masks, origins = masks[report], origins[report]
+    row_array = np.asarray(rows, dtype=float).reshape(-1, 6)
     return CDResult(
-        image=img.copy(), binary=binary > 0, component_labels=comp.labels,
-        component_ids=np.asarray(component_ids, dtype=np.int32),
-        boxes_xywh=row_array[:, :4].astype(np.int32), seeds_xy=seeds,
+        image=img.copy(), binary=binary > 0, component_labels=component_labels,
+        component_ids=np.asarray(component_ids, dtype=np.int32)[report],
+        boxes_xywh=row_array[report, :4].astype(np.int32), seeds_xy=all_seeds[report],
         cell_labels=cell_labels,
-        cell_areas_px2=np.bincount(cell_labels[cell_labels >= 0], minlength=len(rows)),
+        cell_areas_px2=np.bincount(cell_labels[cell_labels >= 0], minlength=len(report)),
         origins_xy=origins, rois=rois, masks=masks, measurements=measurements,
-        pixel_size=float(pixel_size), unit=unit,
-        meta={
-            "threshold": threshold, "invert": bool(invert), "area_min": int(area_min),
-            "area_max": int(area_max), "pad": int(pad), "n_angles": int(n_angles),
-            "radial_step": float(radial_step), "smooth_sigma": float(smooth_sigma),
-            "fit_fraction": float(fit_fraction), "cell_backend": cell_backend,
-            "measurement_backend": "cpu", "device": int(device),
-            "segmentation_rescaled": rescaled, "components_before_filter": comp.num_labels - 1,
-            "coordinates": "global [x, y] pixels; images indexed [y, x]",
-            "background": "10th percentile of the polarity-normalized cell border",
-        },
+        pixel_size=float(pixel_size), unit=unit, background_map=background_map, meta=meta,
     )
 
 
@@ -295,6 +468,8 @@ def save_cd_results(result: CDResult, output) -> dict[str, Path]:
     )}
     arrays.update(pixel_size=np.asarray(scale), unit=np.asarray(result.unit),
                   methods=np.asarray(list(result.measurements)))
+    if result.background_map is not None:
+        arrays["background_map"] = result.background_map
     summary = {}
     for method, measured in result.measurements.items():
         for name in ("centers_xy", "contours_xy", "valid", "status"):
@@ -315,6 +490,7 @@ def save_cd_results(result: CDResult, output) -> dict[str, Path]:
         "schema_version": 2, "shape_hw": list(result.image.shape), "cells": len(result.seeds_xy),
         "pixel_size": scale, "unit": result.unit, "parameters": result.meta,
         "definitions": {
+            "gaussian": "Half-maximum ellipse of a least-squares 2-D Gaussian fitted jointly with a smooth background map and all neighbouring holes (deblended); FWHM = 2 sqrt(2 ln 2) sigma.",
             "logquad": "Half-maximum ellipse of a background-subtracted Gaussian log-quadratic fit; FWHM = 2 sqrt(2 ln 2) sigma.",
             "gradient": "Closed polygon through subpixel maxima of the outward radial intensity decrease; Gaussian diameter is approximately 2 sigma without smoothing.",
             "halfmax": "Closed polygon through first outward crossings at half the interpolated central signal above background.",
@@ -322,6 +498,8 @@ def save_cd_results(result: CDResult, output) -> dict[str, Path]:
             "cd_x_cd_y": "Axis-aligned contour extents; analytic ellipse projections for logquad.",
             "failed_cells": "Retained with valid=False, status, and NaN geometric metrics; candidate/partial contours may remain for diagnosis.",
             "calibration": "All NPZ geometry is in pixels. Unsuffixed CSV lengths use unit, areas use unit squared. Cell areas are Voronoi areas, not hole areas.",
+            "background": result.meta.get("background_definition", ""),
+            "background_map": "Fitted background in original intensity units (background='model' only); rois in raw_data.npz are the measured, background- and neighbour-subtracted cells in polarity-normalized units.",
             "mean_intensity": "Arithmetic mean of original image pixels over the full Voronoi cell, including background. No padding fill, background subtraction, polarity inversion, or physical-unit scaling; independent of CD fit validity.",
         },
         "methods": summary, "files": [p.name for p in paths.values()],
