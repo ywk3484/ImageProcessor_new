@@ -69,24 +69,39 @@ def main(argv=None) -> None:
           f"FWHM {args.fwhm:g} px (pitch/FWHM {args.pitch / args.fwhm:.2f}), SNR {args.snr:g}, seeds={args.seeds}", flush=True)
     results = {}
     for backend in args.backends:
-        pool = None
+        hook = None
         if backend == "gpu":
             import cupy as cp
-            pool = cp.get_default_memory_pool()
-            pool.free_all_blocks()
+
+            class PeakHook(cp.cuda.MemoryHook):
+                """Largest GPU memory held by arrays at once."""
+                name = "peak"
+
+                def __init__(self):
+                    self.pool, self.peak = cp.get_default_memory_pool(), 0
+
+                def malloc_postprocess(self, **kwargs):
+                    self.peak = max(self.peak, self.pool.used_bytes())
+
             # Compile the kernels outside the timing (they are cached on disk afterwards).
             measure_cds(image[:200, :400], backend="gpu", seeds=args.seeds, area_max=400, device=args.device,
                         methods=None if args.methods is None else tuple(args.methods))
-            pool.free_all_blocks()
+            hook = PeakHook()
         start = time.perf_counter()
-        result = measure_cds(image, backend=backend, seeds=args.seeds, area_max=400, device=args.device,
-                             methods=None if args.methods is None else tuple(args.methods))
+        if hook is not None:
+            hook.__enter__()
+        try:
+            result = measure_cds(image, backend=backend, seeds=args.seeds, area_max=400, device=args.device,
+                                 methods=None if args.methods is None else tuple(args.methods))
+        finally:
+            if hook is not None:
+                hook.__exit__(None, None, None)
         measured = time.perf_counter() - start
         with tempfile.TemporaryDirectory() as tmp:
             start = time.perf_counter()
             save_cd_results(result, tmp, compact=True)
             written = time.perf_counter() - start
-        memory = f", peak GPU memory {pool.total_bytes() / 2**30:.2f} GiB" if pool is not None else ""
+        memory = f", peak GPU memory {hook.peak / 2**30:.2f} GiB" if hook is not None else ""
         print(f"{backend}: measure {measured:.1f} s, write compact {written:.1f} s ({len(result.seeds_xy)} cells, "
               f"deblend iterations {result.meta.get('deblend_iterations_used')}){memory}", flush=True)
         for method, m in result.measurements.items():

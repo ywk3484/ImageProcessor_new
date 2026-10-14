@@ -253,11 +253,11 @@ def _store(result: CDMethodResult, cells: np.ndarray, metrics: dict[str, np.ndar
         result.metrics[name][cells] = values
 
 
-def _radial(rois, masks, backgrounds, angles, radial_step, smooth_sigma):
-    """Weighted centroids, peaks and per-ray halfmax/gradient edges (host arrays) of measured cells."""
+def _radial(rois, masks, backgrounds, cells, angles, radial_step, smooth_sigma):
+    """Weighted centroids, peaks and per-ray halfmax/gradient edges (host arrays) of ``cells``."""
     from cupyx.scipy.ndimage import binary_erosion, gaussian_filter, spline_filter1d
 
-    n, h, w = rois.shape
+    n, (h, w) = len(cells), rois.shape[1:]
     radii = np.arange(0, np.hypot(h, w) + radial_step, radial_step)
     directions = np.column_stack((np.cos(angles), np.sin(angles)))
     threshold = max(0.35, 2 * (radii[1] - radii[0]))
@@ -267,8 +267,9 @@ def _radial(rois, masks, backgrounds, angles, radial_step, smooth_sigma):
     centers, peaks = np.empty((n, 2)), np.empty(n)
     halfmax, gradient = np.empty((n, len(angles))), np.empty((n, len(angles)))
     for sl in _chunks(n, 8 * (h + 2 * _PAD) * (w + 2 * _PAD) * 3):
-        roi, mask = cp.asarray(rois[sl], dtype=cp.float64), cp.asarray(masks[sl])
-        bg = cp.asarray(backgrounds[sl], dtype=cp.float64)[:, None, None]
+        idx = cells[sl]  # gathered per chunk: no full-stack copies on the host
+        roi, mask = cp.asarray(rois[idx], dtype=cp.float64), cp.asarray(masks[idx])
+        bg = cp.asarray(backgrounds[idx], dtype=cp.float64)[:, None, None]
         count = len(roi)
         signal = cp.where(mask, roi - bg, 0)
         top = signal.reshape(count, -1).max(axis=1)[:, None, None]
@@ -307,24 +308,23 @@ def _points_inside(points: np.ndarray, masks: np.ndarray) -> np.ndarray:
     return cp.asnumpy(out)
 
 
-def _logquad(rois, masks, seeds_local, backgrounds, angles, fit_fraction):
-    """Per-cell logquad results of measured cells: status, centers, contours, metrics, ellipse geometry."""
-    n, h, w = rois.shape
+def _logquad(rois, masks, seeds_local, backgrounds, cells, angles, fit_fraction):
+    """Per-cell logquad results of ``cells``: status, centers, contours, metrics, ellipse geometry."""
+    n, (h, w) = len(cells), rois.shape[1:]
     scale = max(h, w) / 2
     sums, rmse_parts, peaks = np.empty((n, 28)), np.empty((n, 2)), np.empty(n)
-    signal = rois - backgrounds[:, None, None]
-    peaks[:] = np.where(masks, signal, -np.inf).reshape(n, -1).max(axis=1)
     sums_kernel = kernel(_LOGQUAD_SRC, "logquad_sums")
-    slices = _chunks(n, 9 * h * w)
-    for sl in slices:
-        count = len(rois[sl])
+    for sl in _chunks(n, 9 * h * w):
+        idx = cells[sl]
+        count = len(idx)
+        roi, mask = cp.asarray(rois[idx], dtype=cp.float64), cp.asarray(masks[idx])
+        bg = cp.asarray(backgrounds[idx], dtype=cp.float64)
+        peak = cp.where(mask, roi - bg[:, None, None], -cp.inf).reshape(count, -1).max(axis=1)
         out = cp.empty((count, 28))
         sums_kernel((count,), (128,), (
-            cp.asarray(rois[sl], dtype=cp.float64), cp.asarray(masks[sl], dtype=cp.uint8),
-            cp.asarray(backgrounds[sl], dtype=cp.float64), cp.asarray(seeds_local[sl], dtype=cp.float64),
-            cp.asarray(peaks[sl]), np.float64(fit_fraction), np.float64(1 / scale), out,
-            np.int32(count), np.int32(h), np.int32(w)))
-        sums[sl] = cp.asnumpy(out)
+            roi, mask.astype(cp.uint8), bg, cp.asarray(seeds_local[sl], dtype=cp.float64), peak,
+            np.float64(fit_fraction), np.float64(1 / scale), out, np.int32(count), np.int32(h), np.int32(w)))
+        peaks[sl], sums[sl] = cp.asnumpy(peak), cp.asnumpy(out)
     status = np.full(n, "ok", dtype="U32")
     pixels = sums[:, 0]
     normal = np.empty((n, 6, 6))
@@ -354,7 +354,7 @@ def _logquad(rois, masks, seeds_local, backgrounds, angles, fit_fraction):
     eigenvalues[~trying], axes[~trying] = np.nan, np.nan
     centers = seeds_local.astype(np.float64).copy()
     contours = np.full((n, len(angles) + 1, 2), np.nan)
-    metrics: dict[str, np.ndarray] = {"background": backgrounds.astype(np.float64), "peak_signal": peaks}
+    metrics: dict[str, np.ndarray] = {"background": backgrounds[cells].astype(np.float64), "peak_signal": peaks}
     fitted = np.flatnonzero(trying)
     if len(fitted):
         rhs2 = np.stack((d[fitted], e[fitted]), axis=-1)[..., None]
@@ -364,10 +364,11 @@ def _logquad(rois, masks, seeds_local, backgrounds, angles, fit_fraction):
         residual_kernel = kernel(_LOGQUAD_SRC, "logquad_residual")
         for sl in _chunks(len(fitted), 9 * h * w):
             rows = fitted[sl]
+            idx = cells[rows]
             out = cp.empty((len(rows), 2))
             residual_kernel((len(rows),), (128,), (
-                cp.asarray(rois[rows], dtype=cp.float64), cp.asarray(masks[rows], dtype=cp.uint8),
-                cp.asarray(backgrounds[rows], dtype=cp.float64), cp.asarray(seeds_local[rows], dtype=cp.float64),
+                cp.asarray(rois[idx], dtype=cp.float64), cp.asarray(masks[idx], dtype=cp.uint8),
+                cp.asarray(backgrounds[idx], dtype=cp.float64), cp.asarray(seeds_local[rows], dtype=cp.float64),
                 cp.asarray(peaks[rows]), cp.asarray(coef_scaled[rows]), np.float64(fit_fraction),
                 np.float64(1 / scale), out, np.int32(len(rows)), np.int32(h), np.int32(w)))
             rmse_parts[rows] = cp.asnumpy(out)
@@ -375,7 +376,8 @@ def _logquad(rois, masks, seeds_local, backgrounds, angles, fit_fraction):
             metrics.setdefault(name, np.full(n, np.nan))[fitted] = values
         metrics.setdefault("log_fit_rmse", np.full(n, np.nan))[fitted] = np.sqrt(
             rmse_parts[fitted, 0] / rmse_parts[fitted, 1])
-        inside = _points_inside(np.concatenate((centers[fitted, None, :], contour), axis=1), masks[fitted]).all(axis=1)
+        inside = _points_inside(np.concatenate((centers[fitted, None, :], contour), axis=1),
+                                masks[cells[fitted]]).all(axis=1)
         status[fitted[~inside]] = "contour_outside_cell"
         good = fitted[inside]
         geometry = _ellipse_geometry(contour[inside], sigma[inside], covariance[inside])
@@ -419,15 +421,14 @@ def measure_cells(
     small = masks.reshape(n, -1).sum(axis=1) < 6
     for result in results.values():
         result.status[small] = "insufficient_cell_pixels"
-    peak = np.where(masks, rois, -np.inf).reshape(n, -1).max(axis=1)
+    peak = np.max(rois, axis=(1, 2), where=masks, initial=-np.inf)
     cells = np.flatnonzero(~small & (peak > backgrounds))
     if not len(cells):
         return results
     origin = origins[cells]
     radial = [m for m in methods if m != "logquad"]
     if radial:
-        centers, peaks, edges = _radial(rois[cells], masks[cells], backgrounds[cells], angles, radial_step,
-                                        smooth_sigma)
+        centers, peaks, edges = _radial(rois, masks, backgrounds, cells, angles, radial_step, smooth_sigma)
         directions = np.column_stack((np.cos(angles), np.sin(angles)))
         for method in radial:
             result, edge = results[method], edges[method]
@@ -446,7 +447,7 @@ def measure_cells(
         result = results["logquad"]
         seeds_local = np.asarray(seeds_xy, dtype=np.float64)[cells] - origin
         status, centers, contours, metrics, eigenvalues, axes = _logquad(
-            rois[cells], masks[cells], seeds_local, backgrounds[cells], angles, fit_fraction)
+            rois, masks, seeds_local, backgrounds, cells, angles, fit_fraction)
         result.geometry["center_local"][cells] = centers
         result.geometry["eigenvalues"][cells] = eigenvalues
         result.geometry["axes"][cells] = axes

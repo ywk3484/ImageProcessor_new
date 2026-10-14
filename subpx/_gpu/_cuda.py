@@ -29,6 +29,17 @@ def kernel(source: str, name: str, *, exact: bool = False, defines: tuple[str, .
     return _kernel_cache[key]
 
 
+def release_memory() -> None:
+    """Return CuPy's cached, unused GPU blocks to the driver.
+
+    Called between pipeline stages: a large image's peak memory is not held
+    while the host works, or across images of a batch (on Windows, cached
+    device memory also counts against the system commit limit).
+    """
+    cp.get_default_memory_pool().free_all_blocks()
+    cp.get_default_pinned_memory_pool().free_all_blocks()
+
+
 def optin_shared_bytes() -> int:
     """Largest dynamic shared memory one block may request on the current device."""
     props = cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)
