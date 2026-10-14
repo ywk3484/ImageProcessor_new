@@ -155,7 +155,7 @@ const ids=unpack(data.ids,Int32Array), offset=data.offset, index=new Map();
 ids.forEach((id,i)=>index.set(id,i));
 delete data.labels; delete data.means; delete data.seeds; delete data.origins; delete data.areas; delete data.image; delete data.ids;
 const names=Object.keys(data.methods), methods=data.methods;
-const methodColors={gaussian:"#7cfc00",logquad:"#ffb000",gradient:"#00cfec",halfmax:"#ff5aa5"};
+const methodColors={gaussian:"#7cfc00",logquad:"#ffb000",gradient:"#00cfec",halfmax:"#ff5aa5",disk:"#ff4040",flux_ratio:"#b38cff",projection:"#ffffff"};
 const metricLabels={cd_equivalent_px:"Area-equivalent CD",cd_x_px:"Horizontal CD",cd_y_px:"Vertical CD",area_px2:"Contour area"};
 for(const name of names){
   const m=methods[name]; m.points=unpack(m.points,Float32Array); m.valid=unpack(m.valid,Uint8Array);

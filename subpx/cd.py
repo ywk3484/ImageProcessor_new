@@ -16,7 +16,12 @@ METHOD_LABELS = {
     "logquad": "Gaussian FWHM",
     "gradient": "Maximum radial gradient",
     "halfmax": "Half-height contour",
+    "disk": "Blurred-hole fit diameter",
+    "flux_ratio": "Hole light / own background",
+    "projection": "x/y projection max-slope width",
 }
+# Opt-in methods insensitive to a per-hole source-pulse scale (subpx/_cpu/invariant_cd.py).
+INVARIANT_METHODS = ("disk", "flux_ratio", "projection")
 
 
 def measure_cds(
@@ -43,6 +48,9 @@ def measure_cds(
     backend: str = "cpu",
     cell_backend: str | None = None,
     device: int = 0,
+    nominal_cd: float | None = None,
+    psf_fwhm: float | None = None,
+    dark_level: float = 0.0,
 ) -> CDResult:
     """Extract Voronoi cells and measure their contours and critical dimensions.
 
@@ -57,6 +65,15 @@ def measure_cds(
         ``gradient`` connects radial gradient maxima; ``halfmax`` connects
         half-height crossings. These are different edge definitions. Default:
         all four for ``background='model'``, the last three for ``'border'``.
+        Opt-in, ``background='model'`` only, insensitive to a per-hole
+        illumination scale (source-pulse fluctuation): ``disk`` fits a round
+        hole of diameter d imaged through a circular-pupil blur and averaged
+        over each pixel, with free brightness and local background per hole
+        (CD = d, the hole itself, not the spot); ``flux_ratio`` divides the
+        hole's light by its own fitted local background minus ``dark_level``
+        (CD = 2 sqrt(ratio / pi), proportional to the hole diameter);
+        ``projection`` takes the cell's mean x and y profiles and the width
+        between each one's steepest rise and fall (CD = mean of both).
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
         map, then measures every cell with the background and all neighbouring
@@ -110,6 +127,18 @@ def measure_cds(
         Backend for the Voronoi partition alone; default follows ``backend``.
     device : int
         CUDA device for the GPU backends.
+    nominal_cd : float, optional
+        Typical hole diameter in ``unit``. ``disk`` then uses the blur that
+        makes its median diameter equal this; ``flux_ratio`` is scaled to the
+        same median. Absolute CDs follow this assumption; hole-to-hole
+        differences are what these methods measure.
+    psf_fwhm : float, optional
+        Known FWHM of the imaging blur (incoherent Airy pattern) in ``unit``;
+        overrides the ``nominal_cd`` blur calibration. ``disk`` and
+        ``flux_ratio`` need one of the two.
+    dark_level : float
+        Detector offset in original intensity units, removed from the local
+        background before ``flux_ratio`` divides by it.
 
     Returns
     -------
@@ -142,6 +171,15 @@ def measure_cds(
         raise ValueError("methods must be unique choices from " + ", ".join(METHOD_LABELS))
     if "gaussian" in methods and background != "model":
         raise ValueError("method 'gaussian' requires background='model'")
+    if background != "model" and set(methods) & set(INVARIANT_METHODS):
+        raise ValueError("methods " + ", ".join(INVARIANT_METHODS) + " require background='model'")
+    for name, value in (("nominal_cd", nominal_cd), ("psf_fwhm", psf_fwhm)):
+        if value is not None and not (np.isfinite(value) and value > 0):
+            raise ValueError(f"{name} must be a positive length")
+    if not np.isfinite(dark_level):
+        raise ValueError("dark_level must be finite")
+    if {"disk", "flux_ratio"} & set(methods) and nominal_cd is None and psf_fwhm is None:
+        raise ValueError("methods 'disk' and 'flux_ratio' need nominal_cd or psf_fwhm (the imaging blur)")
     for name, value, lower in (("area_min", area_min, 1), ("area_max", area_max, area_min),
                                ("pad", pad, 0), ("n_angles", n_angles, 16),
                                ("deblend_iterations", deblend_iterations, 1)):
@@ -168,7 +206,8 @@ def measure_cds(
             smooth_sigma=smooth_sigma, fit_fraction=fit_fraction, peak_min_distance=peak_min_distance,
             background_level=background_level, background_tile=background_tile,
             deblend_iterations=deblend_iterations, pixel_size=pixel_size, unit=unit, backend=backend,
-            cell_backend=cell_backend, device=device,
+            cell_backend=cell_backend, device=device, nominal_cd=nominal_cd, psf_fwhm=psf_fwhm,
+            dark_level=float(dark_level),
         )
 
 
@@ -196,18 +235,27 @@ def _resolve_backends(backend: str, cell_backend: str | None, background: str) -
 def _measure_cds(
     img, *, methods, background, seeds, threshold, invert, area_min, area_max, pad, n_angles, radial_step,
     smooth_sigma, fit_fraction, peak_min_distance, background_level, background_tile, deblend_iterations,
-    pixel_size, unit, backend, cell_backend, device,
+    pixel_size, unit, backend, cell_backend, device, nominal_cd=None, psf_fwhm=None, dark_level=0.0,
 ) -> CDResult:
     from ._cpu.centers import _segment_binary
     from ._cpu.components import connected_components_stats_cpu
     from ._cpu.cells import _extract_voronoi_rois, compute_voronoi_labels_cpu
 
     if backend == "gpu":
+        from ._gpu._cuda import release_memory
         from ._gpu.cd import gaussian_method, measure_cells
-        from ._gpu.deblend import deblend
+        from ._gpu.deblend import deblend as deblend_gpu
+
+        def deblend(*args, **kwargs):
+            state = deblend_gpu(*args, **kwargs)
+            release_memory()
+            return state
     else:
         from ._cpu.cd import gaussian_method, measure_cells
         from ._cpu.deblend import deblend
+
+        def release_memory():
+            pass
 
     height, width = img.shape
     # Negation preserves contrast and permits the same bright-feature methods
@@ -278,6 +326,7 @@ def _measure_cds(
         "measurement_backend": backend, "device": int(device),
         "segmentation_rescaled": rescaled, "components_before_filter": components_before_filter,
         "coordinates": "global [x, y] pixels; images indexed [y, x]",
+        "nominal_cd": nominal_cd, "psf_fwhm": psf_fwhm, "dark_level": float(dark_level),
     }
     background_map = deblend_model = None
     if background == "border":
@@ -347,7 +396,7 @@ def _measure_cds(
                                   & (centers[:, 1] - reach > 0) & (centers[:, 1] + reach < height - 1))
         report = np.flatnonzero(interior)
         cleaned = state.cleaned[report]
-        measured = [m for m in methods if m != "gaussian"]
+        measured = [m for m in methods if m != "gaussian" and m not in INVARIANT_METHODS]
         found = measure_cells(
             cleaned, masks[report], origins[report], all_seeds[report], methods=tuple(measured),
             n_angles=int(n_angles), radial_step=radial_step, smooth_sigma=smooth_sigma,
@@ -357,6 +406,18 @@ def _measure_cds(
             found["gaussian"] = gaussian_method(
                 state.params[report], state.status[report], cleaned, masks[report], origins[report], int(n_angles),
             )
+        invariant = tuple(m for m in methods if m in INVARIANT_METHODS)
+        if invariant:
+            from ._cpu.invariant_cd import measure_invariant
+            extra, info = measure_invariant(
+                signal_image, state, masks, origins, report, methods=invariant, n_angles=int(n_angles),
+                psf_fwhm_px=None if psf_fwhm is None else psf_fwhm / pixel_size,
+                nominal_cd_px=None if nominal_cd is None else nominal_cd / pixel_size,
+                dark_level=sign * float(dark_level),
+            )
+            found.update(extra)
+            meta.update(info)
+        release_memory()
         local_background = sign * map_coordinates(
             state.background_map, all_seeds[report].T[::-1], order=1, mode="nearest",
         ) if len(report) else np.zeros(0)
@@ -522,7 +583,8 @@ def save_cd_tables(result: CDResult, output, *, compact: bool = False) -> dict[s
     metric_names = sorted({name for m in result.measurements.values() for name in m.metrics})
     calibrated = {"area_px2": "area", "cd_equivalent_px": "cd_equivalent", "cd_x_px": "cd_x",
                   "cd_y_px": "cd_y", "perimeter_px": "perimeter",
-                  "fwhm_major_px": "fwhm_major", "fwhm_minor_px": "fwhm_minor"}
+                  "fwhm_major_px": "fwhm_major", "fwhm_minor_px": "fwhm_minor",
+                  "cd_uncertainty_px": "cd_uncertainty"}
     header = ["cell_id", "component_id", "method", "valid", "status", "seed_x_px", "seed_y_px",
               "center_x_px", "center_y_px", "center_x", "center_y", "unit", "pixel_size", "mean_intensity"]
     # Whole columns go through tolist(): the csv module formats the same Python
@@ -620,6 +682,9 @@ def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[s
             "logquad": "Half-maximum ellipse of a background-subtracted Gaussian log-quadratic fit; FWHM = 2 sqrt(2 ln 2) sigma.",
             "gradient": "Closed polygon through subpixel maxima of the outward radial intensity decrease; Gaussian diameter is approximately 2 sigma without smoothing.",
             "halfmax": "Closed polygon through first outward crossings at half the interpolated central signal above background.",
+            "disk": "Diameter d of a round hole that, imaged through a circular-pupil (Airy) blur of FWHM psf_fwhm_px and averaged over each pixel, best fits the cell (least squares, free amplitude, center and local background per hole, neighbours' fitted models removed); the contour is the hole edge, not the spot. cd_uncertainty_px is d's standard error from the fit.",
+            "flux_ratio": "Hole light (sum over the cell above the disk fit's local background, neighbours removed) divided by that local background minus dark_level; CD = 2 sqrt(ratio / pi) times flux_ratio_scale (median matched to nominal_cd when given).",
+            "projection": "Mean column and row profiles of the neighbour-removed cell; cd_x/cd_y = distance between each profile's steepest rise and steepest fall (cubic spline); cd_equivalent = their mean; contour = axis-aligned ellipse with those axes.",
             "cd_equivalent": "2 sqrt(contour_area / pi); analytic ellipse area for logquad, polygon area otherwise.",
             "cd_x_cd_y": "Axis-aligned contour extents; analytic ellipse projections for logquad.",
             "failed_cells": "Retained with valid=False, status, and NaN geometric metrics; candidate/partial contours may remain for diagnosis.",

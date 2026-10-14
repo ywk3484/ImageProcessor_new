@@ -1,3 +1,58 @@
+# One-command CD report for a folder of images
+
+Plan: `scripts/cd_report.py FOLDER --output REPORT` measures every PNG with all 7 methods and writes an offline
+report: summary tab (per image x method: valid holes, mean CD, sigma, 3 sigma %), one tab per image with stats,
+histograms and a pan/zoom canvas of the image with every hole drawn at its CD (per-image data lazy-loaded as JS).
+
+- [x] `scripts/cd_report.py` (statistics, display PNG, per-image data JS, index.html with tabs + viewer)
+- [x] `tests/test_cd_report.py` (summary matches direct statistics; failed image row; skipped hole-fit methods)
+- [x] Browser check (Playwright): tabs, zoom, hole click, alignment
+- [x] Full-size timing and report size; full test suite
+
+## Review
+
+Deviations from the approved plan:
+- Per-hole results are opt-in (`--save-results`): the compact export with all 7 methods is ~1.2 GB per
+  110k-hole image (five methods store 128 contour radii per hole).
+- Summary split into a "Mean CD" and a "3σ (%)" table (images x methods); one wide table needed scrolling.
+- Display images are contrast-stretched (0.5-99.5 %) for every bit depth, display only: ACTIS images span
+  ~15-77 counts and looked black.
+
+Results: 110k-hole image (GPU deblend) 71 s; report adds a 14 MB data file + 0.8 MB PNG; tab loads in 0.2 s,
+full-view redraw 56 ms, zoomed 1.5 ms. Full suite: 181 passed, 9 failed = the pre-existing failures.
+
+# Pulse-invariant CD methods: divide by background, x/y projections, blurred-hole fit
+
+Plan: on ACTIS images every hole's brightness carries a random light-pulse fluctuation the reference cannot
+remove. Three opt-in `measure_cds` methods (model background only): `flux_ratio` (hole light / own cell
+background), `projection` (x/y projected profiles, width between steepest points), `disk` (fit a round hole
+of diameter d imaged through an Airy blur and pixel-integrated, free brightness and background per hole;
+blur from `psf_fwhm` or calibrated so the median d equals `nominal_cd`).
+
+- [x] `subpx/_cpu/invariant_cd.py`: pixel-integrated disk table, batched LM disk fit (2 neighbour rounds),
+      disk rendering + far-tail field, blur calibration, flux ratio, projections
+- [x] `measure_cds(nominal_cd=, psf_fwhm=, dark_level=)`, method labels/validation, manifest definitions
+- [x] CLI flags, viewer colours
+- [x] `tests/test_invariant_cd.py` (exact Fourier-rendered synthetic images with per-hole pulse)
+- [x] `scripts/validate_invariant_cd.py` (old vs new methods at blur 50/75/100 nm)
+- [x] Full test suite, timing at full image size
+
+## Review
+
+Deviations from the approved plan:
+- Far-tail field added (`far_field`, FFT): ~4 % of each hole's light lies beyond the 16 px rendering radius
+  (slow Airy tail); summed over the lattice it read as background that the hole's own pulse does not light,
+  biasing the fitted local background +8.5 % and leaking the pulse into `flux_ratio` (0.10 -> 0.07 per unit
+  pulse after the fix; background bias 1.8 %, rest from holes outside the small test image).
+- `projection` cd_equivalent = mean of cd_x and cd_y (the user's definition), not the area equivalent.
+- More neighbour rounds than 2 changed nothing (tested 2/3/4).
+
+Results (`scripts/validate_invariant_cd.py`, 100 nm hole, 21 nm px, 5 % pulse, calibrated by nominal CD):
+disk follows true CD with slope 0.98-1.06 and 1.2/2.1/4.1 nm per-hole scatter at 50/75/100 nm blur; a 10 %
+stronger pulse moves it 0.3-1.2 nm (gaussian 3.4-7.8 nm). flux_ratio similar with dark level known.
+projection: 6/14/159 nm scatter. Full image (110k holes): +47 s on the CPU for disk + flux_ratio + projection.
+Full suite: 179 passed, 9 failed = the pre-existing failures.
+
 # GPU backend for CD measurement at full-image scale
 
 Plan: ~109k holes per 2048×5408 image make the CPU pipeline take ~14–28 min/image (deblend fits, per-cell

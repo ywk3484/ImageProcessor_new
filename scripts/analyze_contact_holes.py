@@ -134,7 +134,8 @@ def save_figures(result, output: Path, metric: str, *, shared_scale: bool = Fals
         selections = list(dict.fromkeys(ordered[[0, len(ordered) // 2, len(ordered) - 1]].tolist()))
         fig, axes = plt.subplots(1, len(selections), figsize=(4.5 * len(selections), 4.3), squeeze=False,
                                  constrained_layout=True)
-        colors = {"gaussian": "#7cfc00", "logquad": "#ffb000", "gradient": "#00cfec", "halfmax": "#ff5aa5"}
+        colors = {"gaussian": "#7cfc00", "logquad": "#ffb000", "gradient": "#00cfec", "halfmax": "#ff5aa5",
+                  "disk": "#ff4040", "flux_ratio": "#b38cff", "projection": "#ffffff"}
         for ax, i in zip(axes[0], selections):
             x0, y0 = result.origins_xy[i]
             h, w = result.masks[i].shape
@@ -227,8 +228,14 @@ def _measure(path: Path, args):
         n_angles=args.n_angles, radial_step=args.radial_step, smooth_sigma=args.smooth_sigma,
         fit_fraction=args.fit_fraction, pixel_size=args.pixel_size, unit=args.unit,
         backend=args.backend, cell_backend=args.cell_backend, device=args.device,
+        nominal_cd=args.nominal_cd, psf_fwhm=args.psf_fwhm, dark_level=args.dark_level,
     )
     seconds = time.perf_counter() - start
+    if "psf_fwhm_px" in result.meta:
+        m = result.meta
+        median = m["disk_median_cd_px"]
+        print(f"  blurred-hole fit: blur FWHM {m['psf_fwhm_px']:.3f} px ({m['psf_source']}), median hole diameter "
+              + (f"{median:.3f} px" if median is not None else "n/a (no converged fit)"), flush=True)
     print(f"Extracted {len(result.seeds_xy)} cells in {seconds:.2f} s ({result.meta['measurement_backend']})", flush=True)
     if result.background_map is not None:
         m = result.meta
@@ -361,7 +368,16 @@ def main(argv=None) -> None:
     parser.add_argument("--page", type=int, default=0, help="Zero-based TIFF page index (default: 0, the first image)")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/contact_holes_cd")
     parser.add_argument("--methods", nargs="+", choices=list(METHOD_LABELS), default=None,
-                        help="Default: all four with --background model, all but gaussian with border")
+                        help="Default: gaussian, logquad, gradient, halfmax with --background model, all but gaussian "
+                             "with border. Opt-in, insensitive to per-hole source-pulse fluctuation: disk "
+                             "(blurred-hole fit), flux_ratio (hole light / own background), projection (x/y profiles)")
+    parser.add_argument("--nominal-cd", type=float, default=None,
+                        help="Typical hole diameter in --unit; disk/flux_ratio choose the blur (and scale) so their "
+                             "median CD equals it")
+    parser.add_argument("--psf-fwhm", type=float, default=None,
+                        help="Known imaging-blur FWHM in --unit (overrides the --nominal-cd calibration)")
+    parser.add_argument("--dark-level", type=float, default=0.0,
+                        help="Detector offset (intensity units) removed from the background before flux_ratio divides")
     parser.add_argument("--background", choices=("model", "border"), default="model",
                         help="model: joint background map + neighbour-subtracted Gaussian fits (default); "
                              "border: previous per-cell 10th percentile")
