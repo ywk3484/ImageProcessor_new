@@ -51,6 +51,7 @@ def measure_cds(
     nominal_cd: float | None = None,
     psf_fwhm: float | None = None,
     dark_level: float = 0.0,
+    flux_ratio_scale: float | None = None,
 ) -> CDResult:
     """Extract Voronoi cells and measure their contours and critical dimensions.
 
@@ -72,7 +73,7 @@ def measure_cds(
         (CD = d, the hole itself, not the spot); ``flux_ratio`` divides the
         hole's light by its own fitted local background minus ``dark_level``
         (CD = 2 sqrt(ratio / pi), proportional to the hole diameter);
-        ``projection`` takes the cell's mean x and y profiles and the width
+        ``projection`` takes the cell's summed x and y profiles and the width
         between each one's steepest rise and fall (CD = mean of both).
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
@@ -139,6 +140,12 @@ def measure_cds(
     dark_level : float
         Detector offset in original intensity units, removed from the local
         background before ``flux_ratio`` divides by it.
+    flux_ratio_scale : float, optional
+        Fixed factor from ``flux_ratio``'s apparent diameter to CD, instead of
+        matching its median to ``nominal_cd`` in every image. Pass
+        ``result.meta["flux_ratio_scale"]`` (and ``psf_fwhm`` from
+        ``result.meta["psf_fwhm_px"] * pixel_size``) of one calibrated image
+        so that several images are compared on one scale.
 
     Returns
     -------
@@ -173,9 +180,9 @@ def measure_cds(
         raise ValueError("method 'gaussian' requires background='model'")
     if background != "model" and set(methods) & set(INVARIANT_METHODS):
         raise ValueError("methods " + ", ".join(INVARIANT_METHODS) + " require background='model'")
-    for name, value in (("nominal_cd", nominal_cd), ("psf_fwhm", psf_fwhm)):
+    for name, value in (("nominal_cd", nominal_cd), ("psf_fwhm", psf_fwhm), ("flux_ratio_scale", flux_ratio_scale)):
         if value is not None and not (np.isfinite(value) and value > 0):
-            raise ValueError(f"{name} must be a positive length")
+            raise ValueError(f"{name} must be positive")
     if not np.isfinite(dark_level):
         raise ValueError("dark_level must be finite")
     if {"disk", "flux_ratio"} & set(methods) and nominal_cd is None and psf_fwhm is None:
@@ -207,7 +214,7 @@ def measure_cds(
             background_level=background_level, background_tile=background_tile,
             deblend_iterations=deblend_iterations, pixel_size=pixel_size, unit=unit, backend=backend,
             cell_backend=cell_backend, device=device, nominal_cd=nominal_cd, psf_fwhm=psf_fwhm,
-            dark_level=float(dark_level),
+            dark_level=float(dark_level), flux_ratio_scale=flux_ratio_scale,
         )
 
 
@@ -236,6 +243,7 @@ def _measure_cds(
     img, *, methods, background, seeds, threshold, invert, area_min, area_max, pad, n_angles, radial_step,
     smooth_sigma, fit_fraction, peak_min_distance, background_level, background_tile, deblend_iterations,
     pixel_size, unit, backend, cell_backend, device, nominal_cd=None, psf_fwhm=None, dark_level=0.0,
+    flux_ratio_scale=None,
 ) -> CDResult:
     from ._cpu.centers import _segment_binary
     from ._cpu.components import connected_components_stats_cpu
@@ -413,7 +421,7 @@ def _measure_cds(
                 signal_image, state, masks, origins, report, methods=invariant, n_angles=int(n_angles),
                 psf_fwhm_px=None if psf_fwhm is None else psf_fwhm / pixel_size,
                 nominal_cd_px=None if nominal_cd is None else nominal_cd / pixel_size,
-                dark_level=sign * float(dark_level),
+                dark_level=sign * float(dark_level), flux_ratio_scale=flux_ratio_scale,
             )
             found.update(extra)
             meta.update(info)
@@ -683,8 +691,8 @@ def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[s
             "gradient": "Closed polygon through subpixel maxima of the outward radial intensity decrease; Gaussian diameter is approximately 2 sigma without smoothing.",
             "halfmax": "Closed polygon through first outward crossings at half the interpolated central signal above background.",
             "disk": "Diameter d of a round hole that, imaged through a circular-pupil (Airy) blur of FWHM psf_fwhm_px and averaged over each pixel, best fits the cell (least squares, free amplitude, center and local background per hole, neighbours' fitted models removed); the contour is the hole edge, not the spot. cd_uncertainty_px is d's standard error from the fit.",
-            "flux_ratio": "Hole light (sum over the cell above the disk fit's local background, neighbours removed) divided by that local background minus dark_level; CD = 2 sqrt(ratio / pi) times flux_ratio_scale (median matched to nominal_cd when given).",
-            "projection": "Mean column and row profiles of the neighbour-removed cell; cd_x/cd_y = distance between each profile's steepest rise and steepest fall (cubic spline); cd_equivalent = their mean; contour = axis-aligned ellipse with those axes.",
+            "flux_ratio": "Hole light (sum over the cell above the disk fit's local background, neighbours removed) divided by that local background minus dark_level; CD = 2 sqrt(ratio / pi) times flux_ratio_scale (given, else median matched to nominal_cd when given, else 1).",
+            "projection": "Column and row sums of the neighbour-removed cell; cd_x/cd_y = distance between each profile's steepest rise and steepest fall (cubic spline); cd_equivalent = their mean; contour = axis-aligned ellipse with those axes.",
             "cd_equivalent": "2 sqrt(contour_area / pi); analytic ellipse area for logquad, polygon area otherwise.",
             "cd_x_cd_y": "Axis-aligned contour extents; analytic ellipse projections for logquad.",
             "failed_cells": "Retained with valid=False, status, and NaN geometric metrics; candidate/partial contours may remain for diagnosis.",

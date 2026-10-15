@@ -126,3 +126,20 @@ Deviations from the approved plan, found during implementation:
 
 Results: see final report in conversation; numbers reproducible with `scripts/validate_cd_accuracy.py`.
 Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voronoi/pitch tests.
+
+# Projection cell-outline fix and between-image 3σ (2026-10-15)
+
+- [x] Diagnose projection scatter / row alternation on real data (no code change)
+- [x] Projection: sum, not mean, over the cell's columns/rows
+- [x] Report: between-image 3σ % = 3 s / M × 100 (s = std of image means, N − 1), equation shown
+- [x] Report: calibrate disk / flux_ratio once (first image) and reuse; new `measure_cds(flux_ratio_scale=)`
+- [x] Tests, validation, browser check
+
+## Review
+- Cause: the per-column mean divided by the cell's pixel count, which changes by one pixel along the ragged
+  Voronoi outline (10 vs 11): a ~10 % step in the profile moved the steepest point. Identical noise-free holes:
+  std 3.1 → 1.55 nm (ideal hole in its cell, summed: 0.55 nm; the rest is imperfect neighbour removal).
+  Validation at 75 nm blur: pulse +10 % moved projection −1.7 → −0.2 nm; scatter 14 → 13.5 nm (noise-dominated).
+- Found while testing: per-image nominal_cd calibration forced every image's disk/flux_ratio median to the
+  nominal, so their between-image 3σ was fake (0.08 % vs 0.84 % true on synthetic images; truth 0.87 nm).
+- Suite: 182 passed, same 9 pre-existing failures.

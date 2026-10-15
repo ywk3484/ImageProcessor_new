@@ -14,7 +14,7 @@ cannot change, or cancel it:
     dark level). Cancels the pulse when the background is absorber light lit
     by the same pulse.
 ``projection``
-    Mean x and y profiles of the cell; width between the steepest rise and
+    Summed x and y profiles of the cell; width between the steepest rise and
     fall of each; CD = mean of the two widths.
 
 All work on cells with the neighbouring holes' models removed (from
@@ -280,7 +280,7 @@ def _set_ellipses(result: CDMethodResult, rows, centers_local, cd_x, cd_y, origi
 
 def _projection(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_angles: int,
                 step: float = 0.02) -> CDMethodResult:
-    """Mean x/y profiles of each neighbour-removed cell; width between the steepest rise and fall."""
+    """Summed x/y profiles of each neighbour-removed cell; width between the steepest rise and fall."""
     from scipy.interpolate import CubicSpline
 
     n, h, w = masks.shape
@@ -288,7 +288,9 @@ def _projection(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_a
     widths, centers, statuses = np.full((n, 2), np.nan), np.full((n, 2), np.nan), np.full((n, 2), "", dtype="U32")
     for axis, (size, sum_axis) in enumerate(((w, 1), (h, 2))):
         counts = masks.sum(axis=sum_axis)
-        profiles = np.where(masks, cleaned, 0.0).sum(axis=sum_axis) / np.maximum(counts, 1)
+        # Sum, not mean: the cell outline is ragged by a pixel, and dividing one column by 10 pixels and the next
+        # by 11 steps the profile and moves its steepest point (the cleaned cell holds only this hole's light).
+        profiles = np.where(masks, cleaned, 0.0).sum(axis=sum_axis)
         inside = counts > 0
         first = np.argmax(inside, axis=1)
         last = size - 1 - np.argmax(inside[:, ::-1], axis=1)
@@ -325,14 +327,16 @@ def _projection(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_a
 def measure_invariant(
     signal: np.ndarray, state, masks: np.ndarray, origins: np.ndarray, report: np.ndarray, *,
     methods: tuple[str, ...], n_angles: int, psf_fwhm_px: float | None = None,
-    nominal_cd_px: float | None = None, dark_level: float = 0.0, rounds: int = 2,
+    nominal_cd_px: float | None = None, dark_level: float = 0.0, flux_ratio_scale: float | None = None,
+    rounds: int = 2,
 ) -> tuple[dict[str, CDMethodResult], dict]:
     """Pulse-invariant methods for the reported cells of a converged ``deblend`` state.
 
     ``masks``/``origins`` cover every modelled hole (as ``state``); results are
     rows of ``report``. ``disk`` and ``flux_ratio`` need ``psf_fwhm_px`` or
     ``nominal_cd_px`` (the blur is then chosen so the median fitted diameter
-    equals it).
+    equals it). ``flux_ratio`` is scaled by ``flux_ratio_scale`` when given,
+    else so that its median equals ``nominal_cd_px``.
     """
     found, info = {}, {}
     if "projection" in methods:
@@ -461,8 +465,8 @@ def measure_invariant(
                                                            "nonpositive_flux_or_background", status[report]))
         ratio = np.where(usable, flux / np.where(lit > 0, lit, np.nan), np.nan)
         apparent = 2 * np.sqrt(ratio / np.pi)
-        scale = 1.0
-        if nominal_cd_px is not None and usable.any():
+        scale = 1.0 if flux_ratio_scale is None else float(flux_ratio_scale)
+        if flux_ratio_scale is None and nominal_cd_px is not None and usable.any():
             scale = float(nominal_cd_px / np.median(apparent[usable]))
         info["flux_ratio_scale"] = scale
         cd = apparent * scale

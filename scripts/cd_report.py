@@ -2,14 +2,25 @@
 
     python scripts/cd_report.py FOLDER --output REPORT --nominal-cd 100 --pixel-size 21 --unit nm --backend gpu
 
-Open REPORT/index.html in a browser (works from the folder, no server). It has a summary tab (per image and
-method: valid holes, mean CD, sigma and 3 sigma % = 3 sigma / mean x 100, over the holes that method measured
-validly) and one tab per image with its statistics, CD histograms and the image with every detected hole drawn
+Open REPORT/index.html in a browser (works from the folder, no server). It has a summary tab and one tab per image.
+
+The summary tab first answers whether the images show the same CD on average. Per method, with m_i the mean CD
+of image i (over the holes that method measured validly) and N the number of images:
+    M = (m_1 + ... + m_N) / N
+    s = sqrt( sum_i (m_i - M)^2 / (N - 1) )
+    between-image 3 sigma % = 3 s / M x 100        (also given as 3 s in --unit)
+Below that, per image and method: valid holes, mean CD and the within-image 3 sigma % = 3 sigma / mean x 100,
+sigma being the standard deviation of that image's hole CDs (N - 1 in the denominator).
+
+Each image tab has with its statistics, CD histograms and the image with every detected hole drawn
 at its CD (drag to pan, wheel to zoom, click a hole for its CDs under every method). The same statistics go to
-REPORT/summary.csv. --save-results also keeps the full per-hole results in REPORT/results/<image>/
+REPORT/summary.csv (per image) and REPORT/between_images.csv. --save-results also keeps the full per-hole results in REPORT/results/<image>/
 (``subpx.load_cd_results``; about 1 GB per 1e5-hole image with all methods).
 
-disk and flux_ratio need --nominal-cd or --psf-fwhm; without either they are skipped.
+disk and flux_ratio need --nominal-cd or --psf-fwhm; without either they are skipped. With --nominal-cd they are
+calibrated once, on the first image measured: the blur that makes its median disk diameter equal --nominal-cd and
+the flux_ratio scale that does the same are reused for every later image, so image means stay comparable
+(calibrating every image would force every image's median to --nominal-cd).
 """
 
 from __future__ import annotations
@@ -43,7 +54,7 @@ DESCRIPTIONS = {
             "unaffected by the per-hole pulse strength. Absolute value follows --nominal-cd (or --psf-fwhm).",
     "flux_ratio": "Hole light divided by its own background, converted to a diameter and scaled so the median equals "
                   "--nominal-cd. Cancels the pulse when the background is pulse-lit absorber light (set --dark-level).",
-    "projection": "Mean of the x and y widths between the steepest rise and fall of the cell's projected profiles.",
+    "projection": "Mean of the x and y widths between the steepest rise and fall of the cell's summed column and row profiles.",
 }
 
 
@@ -57,6 +68,19 @@ def cd_statistics(result) -> dict[str, dict]:
         std = float(values.std(ddof=1)) if values.size > 1 else float("nan")
         stats[name] = {"cells": int(len(measured.valid)), "valid": int(values.size), "mean": mean, "std": std,
                        "three_sigma_pct": 300 * std / mean if values.size > 1 and mean else float("nan")}
+    return stats
+
+
+def between_image_statistics(entries: list[dict], methods: tuple[str, ...]) -> dict[str, dict]:
+    """Per method: spread of the per-image mean CDs over the images that method measured (see module docstring)."""
+    stats = {}
+    for name in methods:
+        means = np.array([e["stats"][name]["mean"] for e in entries if not e.get("error") and name in e["stats"]])
+        means = means[np.isfinite(means)]
+        mean = float(means.mean()) if means.size else float("nan")
+        std = float(means.std(ddof=1)) if means.size > 1 else float("nan")
+        stats[name] = {"images": int(means.size), "mean_of_means": mean, "std_of_means": std, "three_sigma": 3 * std,
+                       "three_sigma_pct": 300 * std / mean if means.size > 1 and mean else float("nan")}
     return stats
 
 
@@ -122,7 +146,22 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
         return (f"<h3>{title}</h3><table class='stats wide'><thead><tr><th>Image</th><th>Holes</th>{head}</tr></thead>"
                 f"<tbody>{''.join(body)}</tbody></table>")
 
-    summary = table(f"Mean CD ({html.escape(unit)})", "mean") + table("3σ (%)", "three_sigma_pct")
+    between = between_image_statistics(entries, methods)
+    unit_html = html.escape(unit)
+    rows = "".join(
+        f"<tr><td><span class='swatch' style='background:{COLORS[m]}'></span>{html.escape(METHOD_LABELS[m])} "
+        f"<code>{m}</code></td><td>{b['images']}</td><td>{_fmt(b['mean_of_means'])}</td><td>{_fmt(b['std_of_means'], 3)}</td>"
+        f"<td>{_fmt(b['three_sigma'], 3)}</td><td><b>{_fmt(b['three_sigma_pct'], 3)}</b></td></tr>"
+        for m, b in between.items())
+    summary = (
+        "<h3>Between images: do the images show the same mean CD?</h3>"
+        "<p class='meta'>Per method, m<sub>i</sub> = mean CD of image i over its validly measured holes, N = number of "
+        "images. M = (m<sub>1</sub> + … + m<sub>N</sub>) / N; s = √( Σ (m<sub>i</sub> − M)² / (N − 1) ); "
+        "<b>between-image 3σ % = 3 s / M × 100</b>.</p>"
+        f"<table class='stats'><thead><tr><th>Method</th><th>Images (N)</th><th>M ({unit_html})</th>"
+        f"<th>s ({unit_html})</th><th>3s ({unit_html})</th><th>3s / M (%)</th></tr></thead><tbody>{rows}</tbody></table>"
+        + table(f"Mean CD per image, m<sub>i</sub> ({unit_html})", "mean")
+        + table("Within-image 3σ (%) = 3 × σ of that image's hole CDs / its mean × 100", "three_sigma_pct"))
     legend = "".join(f"<li><span class='swatch' style='background:{COLORS[m]}'></span><b>{m}</b> — "
                      f"{html.escape(DESCRIPTIONS[m])}</li>" for m in methods)
     tabs = "".join(f"<button class='tab' data-tab='{e['id']}'{' disabled' if e.get('error') else ''}>"
@@ -178,6 +217,7 @@ def main(argv=None) -> None:
     for sub in ("images", "data"):
         (output / sub).mkdir(parents=True, exist_ok=True)
     entries, rows, used = [], [], set()
+    fixed = {}  # blur and flux_ratio scale from the first calibrated image, reused for all later images
     started = time.perf_counter()
     for number, path in enumerate(images, 1):
         ident = re.sub(r"[^A-Za-z0-9_-]", "_", path.stem) or "image"
@@ -191,7 +231,8 @@ def main(argv=None) -> None:
             result = measure_cds(
                 image, methods=methods, seeds=args.seeds, invert=args.invert, area_min=args.area_min,
                 area_max=args.area_max, pixel_size=args.pixel_size, unit=args.unit, backend=args.backend,
-                nominal_cd=args.nominal_cd, psf_fwhm=args.psf_fwhm, dark_level=args.dark_level,
+                nominal_cd=args.nominal_cd, psf_fwhm=fixed.get("psf_fwhm", args.psf_fwhm), dark_level=args.dark_level,
+                flux_ratio_scale=fixed.get("flux_ratio_scale"),
             )
         except Exception as error:  # one bad image must not stop the batch
             message = str(error).replace(str(path), path.name) or type(error).__name__
@@ -200,6 +241,14 @@ def main(argv=None) -> None:
             rows.append({"image": path.name, "status": "failed", "error": message})
             continue
         seconds = time.perf_counter() - start
+        calibrated_here = args.nominal_cd is not None and not fixed and "psf_fwhm_px" in result.meta
+        if calibrated_here:
+            fixed = {"psf_fwhm": result.meta["psf_fwhm_px"] * args.pixel_size,
+                     "flux_ratio_scale": result.meta.get("flux_ratio_scale"), "image": path.name}
+            notes.append(f"disk and flux_ratio were calibrated once, on {path.name} (blur FWHM {fixed['psf_fwhm']:.4g} "
+                         f"{args.unit}, flux_ratio scale {_fmt(fixed['flux_ratio_scale'] or float('nan'), 4)}), and that "
+                         "blur and scale were reused for every image, so their image means are on one scale.")
+            print("  " + notes[-1], flush=True)
         stats = cd_statistics(result)
         Image.fromarray(display_image(image)).save(output / "images" / f"{ident}.png")
         (output / "data" / f"{ident}.js").write_text(
@@ -209,7 +258,8 @@ def main(argv=None) -> None:
             save_cd_results(result, output / "results" / ident, compact=True)
         extra = ""
         if "psf_fwhm_px" in result.meta:
-            extra = f" · blur FWHM {result.meta['psf_fwhm_px'] * args.pixel_size:.3g} {args.unit} ({result.meta['psf_source']})"
+            source = result.meta["psf_source"] if not fixed or calibrated_here else f"calibrated on {fixed['image']}"
+            extra = f" · blur FWHM {result.meta['psf_fwhm_px'] * args.pixel_size:.4g} {args.unit} ({source})"
         entries.append({"id": ident, "name": path.name, "holes": len(result.seeds_xy), "stats": stats,
                         "width": image.shape[1], "height": image.shape[0], "seconds": seconds, "extra": extra,
                         "image": f"images/{ident}.png", "data": f"data/{ident}.js"})
@@ -217,13 +267,23 @@ def main(argv=None) -> None:
             rows.append({"image": path.name, "status": "ok", "method": method, "holes": len(result.seeds_xy), **s,
                          "unit": args.unit})
             print(f"  {method:11s} {s['valid']:7d} valid  mean {_fmt(s['mean'], 3)} {args.unit}  "
-                  f"3sigma {_fmt(s['three_sigma_pct'])} %", flush=True)
+                  f"3sigma within image {_fmt(s['three_sigma_pct'])} %", flush=True)
         print(f"  {seconds:.1f} s", flush=True)
     fields = ["image", "status", "method", "holes", "cells", "valid", "mean", "std", "three_sigma_pct", "unit", "error"]
     with (output / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+    between = between_image_statistics(entries, methods)
+    with (output / "between_images.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["method", "images", "mean_of_means", "std_of_means", "three_sigma",
+                                                    "three_sigma_pct", "unit"])
+        writer.writeheader()
+        writer.writerows({"method": m, **b, "unit": args.unit} for m, b in between.items())
+    print("Between images (3 s / M x 100, s = std of the per-image means, N - 1):", flush=True)
+    for method, b in between.items():
+        print(f"  {method:11s} N={b['images']}  M {_fmt(b['mean_of_means'], 3)} {args.unit}  "
+              f"3s {_fmt(b['three_sigma'], 3)} {args.unit}  {_fmt(b['three_sigma_pct'], 3)} %", flush=True)
     path = write_report(output, entries, methods, notes, args.unit)
     print(f"Report: {path} ({time.perf_counter() - started:.1f} s)", flush=True)
 
@@ -259,8 +319,8 @@ ul.legend{padding-left:18px;color:var(--muted)}ul.legend b{color:var(--fg)}
 <header><h1>CD report</h1></header>
 <nav><button class="tab active" data-tab="summary">Summary</button>__TABS__</nav>
 <main>
-<section class="panel" id="panel-summary"><h2>Mean CD and 3σ per image</h2>
-<p class="meta">3σ % = 3 × standard deviation / mean × 100, over the holes each method measured validly (hover a value for the count). Click an image name to open it.</p>
+<section class="panel" id="panel-summary"><h2>Summary</h2>
+<p class="meta">All statistics use only the holes each method measured validly (hover a per-image value for the count). Standard deviations divide by N − 1. Click an image name to open it.</p>
 __NOTES__ __SUMMARY__<h2>Methods</h2><ul class="legend">__LEGEND__</ul></section>
 __PANELS__
 <section class="panel" id="viewer"><div class="controls">

@@ -70,6 +70,18 @@ def test_lit_background_ratio_and_projection_ignore_the_pulse_while_the_gaussian
                        (projection.metrics["cd_x_px"][ok] + projection.metrics["cd_y_px"][ok]) / 2)
 
 
+def test_projection_is_not_disturbed_by_the_ragged_cell_outline():
+    # Identical noise-free holes; rows 10.5 px apart, so every other row's cell outline falls differently on the
+    # pixels. Averaging each column over the cell's pixels (10 in one column, 11 in the next) spread these by 0.15 px.
+    image, *_ = pulsed_lattice(psf_fwhm=PSF, cd=D0, pitch=10.5, shape=(110, 150), pulse=0.0, cd_spread=0.0,
+                               dark=DARK, noise=False)
+    result = measure_cds(image, methods=("projection",), area_max=300)
+    projection = result.measurements["projection"]
+    cd = projection.metrics["cd_equivalent_px"][projection.valid]
+    assert projection.valid.mean() > 0.9
+    assert cd.std() < 0.1
+
+
 def test_nominal_cd_calibrates_the_blur():
     image, centers, d, a = _lattice_image(seed=1)
     result = measure_cds(image, methods=("disk", "flux_ratio"), area_max=200, nominal_cd=D0 * 21, pixel_size=21,

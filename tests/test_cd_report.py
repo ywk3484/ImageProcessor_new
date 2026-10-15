@@ -26,9 +26,13 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
     with (out / "summary.csv").open(encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert [r["image"] for r in rows if r["status"] == "failed"] == ["broken.png"]
+    fixed = {}
     for name, image in images.items():
         result = measure_cds(image, methods=("gaussian", "logquad", "gradient", "halfmax", "disk", "flux_ratio",
-                                             "projection"), **options)
+                                             "projection"), **options, **fixed)
+        # The first image calibrates the blur and the flux_ratio scale; later images reuse them.
+        fixed = fixed or {"psf_fwhm": result.meta["psf_fwhm_px"] * 21.0,
+                          "flux_ratio_scale": result.meta["flux_ratio_scale"]}
         mine = {r["method"]: r for r in rows if r["image"] == name}
         assert set(mine) == set(result.measurements)
         for method, measured in result.measurements.items():
@@ -36,7 +40,15 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
             assert int(mine[method]["valid"]) == cd.size
             assert float(mine[method]["mean"]) == np.float64(cd.mean())
             assert np.isclose(float(mine[method]["three_sigma_pct"]), 300 * cd.std(ddof=1) / cd.mean())
+    with (out / "between_images.csv").open(encoding="utf-8") as handle:
+        between = {r["method"]: r for r in csv.DictReader(handle)}
+    for method in result.measurements:
+        means = np.array([float(r["mean"]) for r in rows if r.get("method") == method])
+        assert int(between[method]["images"]) == 2
+        assert np.isclose(float(between[method]["mean_of_means"]), means.mean())
+        assert np.isclose(float(between[method]["three_sigma_pct"]), 300 * means.std(ddof=1) / means.mean())
     page = (out / "index.html").read_text(encoding="utf-8")
+    assert "Between images" in page and "calibrated once, on a scan.png" in page
     assert "a_scan" in page and "broken.png" in page and "failed:" in page
     assert (out / "data" / "a_scan.js").read_text(encoding="utf-8").startswith('window.CD_DATA["a_scan"]=')
     assert (out / "images" / "b.png").exists()
