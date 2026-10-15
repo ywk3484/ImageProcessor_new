@@ -58,7 +58,11 @@ class CDMethodResult:
     ``geometry`` holds the arrays each contour was built from (radial methods:
     ``center_local`` and per-ray ``edge_px``; ellipse methods: ``eigenvalues``
     and ``axes`` of the precision matrix, plus ``center_local`` for logquad),
-    so compact exports can rebuild ``contours_xy`` exactly.
+    so compact exports can rebuild ``contours_xy`` exactly. ``inputs`` holds
+    per-cell data the measurement was made on when it differs from the
+    result's ``rois`` (``disk``/``flux_ratio``: ``cells``, the fit input with
+    the neighbours' disk models removed, NaN outside the cell); in memory
+    only, never saved.
     """
 
     method: str
@@ -68,6 +72,7 @@ class CDMethodResult:
     status: np.ndarray
     metrics: dict[str, np.ndarray]
     geometry: dict[str, np.ndarray] = field(default_factory=dict)
+    inputs: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass

@@ -53,6 +53,24 @@ def test_disk_fit_recovers_hole_diameter_and_ignores_the_pulse(pulsed):
     assert np.allclose(radii, disk.metrics["cd_equivalent_px"][i] / 2)
 
 
+def test_disk_keeps_the_cells_it_was_fitted_to(pulsed):
+    result, _ = pulsed
+    disk = result.measurements["disk"]
+    cells = disk.inputs["cells"]
+    assert cells.shape == result.masks.shape
+    np.testing.assert_array_equal(np.isfinite(cells), result.masks)
+    assert result.measurements["flux_ratio"].inputs["cells"] is cells
+    table = DiskTable(PSF, 3 * D0, 24)
+    yy, xx = np.indices(cells.shape[1:])
+    for i in np.flatnonzero(disk.valid)[:20]:
+        cx, cy = disk.geometry["center_local"][i]
+        rho = np.hypot(xx - cx, yy - cy)
+        m = disk.metrics
+        model = m["amplitude"][i] * table.lookup(np.full(rho.shape, m["cd_equivalent_px"][i]), rho, False)
+        residual = (cells[i] - model - m["local_background"][i])[result.masks[i]]
+        assert np.isclose(np.sqrt(np.mean(residual ** 2)), m["fit_rmse"][i], rtol=1e-4)
+
+
 def test_lit_background_ratio_and_projection_ignore_the_pulse_while_the_gaussian_does_not(pulsed):
     result, (use, truth, pulse) = pulsed
     sensitivity = {}

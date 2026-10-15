@@ -143,3 +143,24 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
 - Found while testing: per-image nominal_cd calibration forced every image's disk/flux_ratio median to the
   nominal, so their between-image 3σ was fake (0.08 % vs 0.84 % true on synthetic images; truth 0.87 nm).
 - Suite: 182 passed, same 9 pre-existing failures.
+
+# Report: hole details, map first, band diagnosis (2026-10-15)
+
+- [x] Map at the top; method, zoom and pan kept across tabs; colour scale shared by all images (or per image)
+- [x] Click panel: projection x/y profiles + curve + slope + edges; disk cell, leftover, radial fit; flux_ratio numbers
+- [x] `CDMethodResult.inputs` (in memory only): disk/flux_ratio fit input cells
+- [x] Band profile: every map's band means, band-to-band spread, R² with background / peak / sub-pixel position
+- [x] Disk "σ from noise alone"; per-hole agreement between methods
+- [x] Tests, browser check, planted-cause synthetic check, full-size timing
+
+## Review
+- 8-bit cells moved projection's steepest points (up to 1.46 px in a few holes): the detail file now carries
+  projection's column/row sums in float32; the browser's spline then finds the method's edges to 1e-5 px (864/864).
+- Planted causes (420x420 px, 70 nm blur, band = one hole row), band-to-band spread in nm:
+  gaussian / disk / projection_x / projection_y — none 0.4/0.4/1.6/1.5; slow light over rows 2.0/0.4/1.4/1.4;
+  3 % random light per pixel line 1.0/1.9/1.5/10.3; real CD bands ±4 % 1.7/3.0/2.6/2.2.
+  Brightness/peak R² cannot tell real CD from a light leak (bigger holes are brighter: R² 71-92 % for real CD
+  bands); the method/direction comparison can. The guide in the report says so.
+- Found: console print of "–" crashed on cp949 consoles (single image → NaN between-image values); fixed (`_plain`).
+- Full size (99.7k holes, GPU): 79-89 s; data 14.7 MB + detail 65 MB; tab 0.25 s, first click 0.5 s, next 3 ms.
+- Suite: 183 passed, same 9 pre-existing failures.

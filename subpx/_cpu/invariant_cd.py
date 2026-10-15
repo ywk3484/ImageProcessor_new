@@ -441,6 +441,10 @@ def measure_invariant(
     info["disk_median_cd_px"] = float(np.median(p[report][status[report] == "ok", 3])) if (status[report] == "ok").any() else None
 
     rows, local = np.arange(len(report)), p[report]
+    # The fit input of each reported cell as an ROI window (NaN outside the cell), for inspection.
+    cells = np.full((len(report), h * w), np.nan, dtype=np.float32)
+    np.put_along_axis(cells, order[report], np.where(valid[report], data[report], np.nan).astype(np.float32), axis=1)
+    inputs = {"cells": cells.reshape(len(report), h, w)}
     if "disk" in methods:
         result = _empty("disk", len(report), n_angles, ("amplitude", "local_background", "fit_rmse", "cd_uncertainty_px"))
         result.status[:] = status[report]
@@ -451,6 +455,7 @@ def measure_invariant(
         m["amplitude"][:], m["local_background"][:] = local[:, 0], local[:, 4]
         m["peak_signal"][:] = local[:, 0] * table.lookup(local[:, 3], np.zeros(len(report)), False)
         m["fit_rmse"][:], m["cd_uncertainty_px"][:] = rmse[report], sigma_d[report]
+        result.inputs.update(inputs)
         result.valid[:] = result.status == "ok"
         for name in ("area_px2", "cd_equivalent_px", "cd_x_px", "cd_y_px", "perimeter_px"):
             m[name][~result.valid] = np.nan
@@ -475,5 +480,6 @@ def measure_invariant(
         m["flux"][:], m["local_background"][:], m["flux_ratio"][:] = flux, background, ratio
         m["peak_signal"][:] = np.where(valid[report], data[report], -np.inf).max(axis=1) - background
         result.valid[:] = usable
+        result.inputs.update(inputs)
         found["flux_ratio"] = result
     return found, info

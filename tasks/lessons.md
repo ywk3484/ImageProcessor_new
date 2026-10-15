@@ -28,3 +28,9 @@
 - **A smaller spread is not better precision unless the method follows the true CD at slope 1.**
   A method that moves 0.5 nm per 1 nm of real change also halves the real image-to-image
   differences. Say so whenever methods are ranked by their spread.
+- **Test a diagnostic on planted causes before shipping its reading guide.** My first band-profile guide
+  ("CD follows brightness → light leak") was wrong: real CD changes also change brightness. Plant each
+  candidate cause in a synthetic image and check the guide names the right one.
+- **Keep display data at the precision the method used where the method is sensitive.** 8-bit cells were
+  fine to look at but moved steepest-slope edges by up to 1.5 px; store what the method computed on exactly.
+- **Console output must survive non-UTF-8 consoles** (the user's Windows uses cp949): print ASCII only.

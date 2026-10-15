@@ -1,4 +1,6 @@
+import base64
 import csv
+import json
 
 import numpy as np
 
@@ -26,10 +28,11 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
     with (out / "summary.csv").open(encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert [r["image"] for r in rows if r["status"] == "failed"] == ["broken.png"]
-    fixed = {}
+    fixed, results = {}, {}
     for name, image in images.items():
         result = measure_cds(image, methods=("gaussian", "logquad", "gradient", "halfmax", "disk", "flux_ratio",
                                              "projection"), **options, **fixed)
+        results[name] = result
         # The first image calibrates the blur and the flux_ratio scale; later images reuse them.
         fixed = fixed or {"psf_fwhm": result.meta["psf_fwhm_px"] * 21.0,
                           "flux_ratio_scale": result.meta["flux_ratio_scale"]}
@@ -53,6 +56,38 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
     assert (out / "data" / "a_scan.js").read_text(encoding="utf-8").startswith('window.CD_DATA["a_scan"]=')
     assert (out / "images" / "b.png").exists()
     assert set(load_cd_results(out / "results" / "b").measurements) == set(result.measurements)
+    # disk's spread expected from noise alone is the median of its per-hole fit uncertainty.
+    disk = result.measurements["disk"]
+    assert np.isclose(float(mine["disk"]["noise_sigma"]),
+                      np.nanmedian(disk.metrics["cd_uncertainty_px"][disk.valid]) * 21.0)
+    # Hole details of image b: the cleaned cell within one 8-bit step, projection's sums and disk's input exact.
+    detail = _load_js(out / "data" / "b.detail.js", "CD_DETAIL")
+    h, w = detail["h"], detail["w"]
+    codes = _array(detail["clean"]["codes"], np.uint8).reshape(-1, h, w)
+    lo, step = _array(detail["clean"]["lo"], np.float32), _array(detail["clean"]["step"], np.float32)
+    np.testing.assert_array_equal(codes != 255, result.masks)
+    cells = lo[:, None, None] + codes * step[:, None, None]
+    assert np.all(np.abs(cells - result.rois)[result.masks] <= 0.51 * np.repeat(step, h * w).reshape(-1, h, w)[result.masks] + 1e-4)
+    np.testing.assert_allclose(_array(detail["prof_x"], np.float32).reshape(-1, w),
+                               np.where(result.masks, result.rois, 0).sum(axis=1), rtol=1e-5, atol=1e-4)
+    np.testing.assert_array_equal(_array(detail["disk"]["codes"], np.uint8).reshape(-1, h, w) != 255,
+                                  np.isfinite(disk.inputs["cells"]))
+    # One colour range per map layer, shared by the images: 2nd-98th percentile of both images' CDs together.
+    page_ranges = json.loads(page.split("RANGES=")[1].split(", $=")[0])
+    pooled = np.concatenate([r.measurements["projection"].metrics["cd_y_px"][r.measurements["projection"].valid]
+                             for r in results.values()])
+    np.testing.assert_allclose(page_ranges["projection_y"], np.quantile(pooled, [0.02, 0.98]))
+    data = _load_js(out / "data" / "b.js", "CD_DATA")
+    assert set(data["methods"]) == set(result.measurements) | {"projection_x", "projection_y"}
+
+
+def _array(text, dtype):
+    return np.frombuffer(base64.b64decode(text), dtype)
+
+
+def _load_js(path, name):
+    text = path.read_text(encoding="utf-8")
+    return json.loads(text[text.index("]=") + 2:].rstrip().rstrip(";"))
 
 
 def test_without_a_blur_the_hole_fit_methods_are_skipped(tmp_path):
@@ -62,9 +97,10 @@ def test_without_a_blur_the_hole_fit_methods_are_skipped(tmp_path):
     (tmp_path / "in").mkdir()
     image = pulsed_lattice(psf_fwhm=3.3, shape=(60, 80))[0].astype(np.uint8)
     Image.fromarray(image).save(tmp_path / "in" / "x.png")
-    main([str(tmp_path / "in"), "--output", str(tmp_path / "out"), "--backend", "cpu"])
+    main([str(tmp_path / "in"), "--output", str(tmp_path / "out"), "--backend", "cpu", "--no-hole-details"])
     with (tmp_path / "out" / "summary.csv").open(encoding="utf-8") as handle:
         methods = {r["method"] for r in csv.DictReader(handle)}
     assert methods == {"gaussian", "logquad", "gradient", "halfmax", "projection"}
     assert "skipped" in (tmp_path / "out" / "index.html").read_text(encoding="utf-8")
     assert not (tmp_path / "out" / "results").exists()
+    assert not (tmp_path / "out" / "data" / "x.detail.js").exists()
