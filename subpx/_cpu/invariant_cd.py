@@ -16,12 +16,18 @@ cannot change, or cancel it:
 ``projection``
     Summed x and y profiles of the cell; width between the steepest rise and
     fall of each; CD = mean of the two widths.
+``half_area``
+    Area of the region around the peak brighter than the cell's local level
+    plus half the peak height above it, on a 4x cubic-spline enlargement of
+    the cell; CD = equal-area circle diameter. Assumes no shape.
 
-All work on cells with the neighbouring holes' models removed (from
+``projection`` and ``half_area`` run on NumPy or CuPy (``xp``). All work on cells with the neighbouring holes' models removed (from
 ``deblend``). Lengths are in pixels.
 """
 
 from __future__ import annotations
+
+from functools import lru_cache
 
 import numpy as np
 
@@ -30,7 +36,7 @@ from .cd import radial_contours
 from .deblend import _render_on_grids, _render_radius, render_models, roi_grids, sigma_major, windows, FWHM_K
 
 
-INVARIANT_METHODS = ("disk", "flux_ratio", "projection")
+INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area")
 AIRY_K = 1.0290  # FWHM of the incoherent Airy pattern = AIRY_K / cutoff frequency
 _CHUNK = 4096    # holes per batched fit step: (chunk, K) arrays stay ~10 MB each
 _CALIBRATION_HOLES = 2000
@@ -278,11 +284,26 @@ def _set_ellipses(result: CDMethodResult, rows, centers_local, cd_x, cd_y, origi
     m["perimeter_px"][rows] = np.pi * (a + b) * (1 + 3 * h / (10 + np.sqrt(4 - 3 * h)))  # Ramanujan
 
 
-def _projection(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_angles: int,
-                step: float = 0.02) -> CDMethodResult:
-    """Summed x/y profiles of each neighbour-removed cell; width between the steepest rise and fall."""
+@lru_cache(maxsize=16)
+def _spline_operators(size: int, step: float):
+    """Grid and the (grid, size) matrices giving scipy's not-a-knot ``CubicSpline`` and its slope on that grid.
+
+    The spline through ``size`` samples is linear in them, so the curve of every profile is one matrix product.
+    """
     from scipy.interpolate import CubicSpline
 
+    grid = np.arange(0.0, size - 1 + step / 2, step)
+    spline = CubicSpline(np.arange(size), np.eye(size), axis=0)
+    return grid, spline(grid), spline(grid, 1)
+
+
+def _to_numpy(a):
+    return a.get() if hasattr(a, "get") else np.asarray(a)
+
+
+def _projection(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_angles: int,
+                step: float = 0.02, xp=np) -> CDMethodResult:
+    """Summed x/y profiles of each neighbour-removed cell; width between the steepest rise and fall."""
     n, h, w = masks.shape
     result = _empty("projection", n, n_angles, ())
     widths, centers, statuses = np.full((n, 2), np.nan), np.full((n, 2), np.nan), np.full((n, 2), "", dtype="U32")
@@ -294,22 +315,25 @@ def _projection(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_a
         inside = counts > 0
         first = np.argmax(inside, axis=1)
         last = size - 1 - np.argmax(inside[:, ::-1], axis=1)
-        grid = np.arange(0.0, size - 1 + step / 2, step)
+        grid, value_op, slope_op = _spline_operators(size, step)
+        value_op, slope_op, grid_d = xp.asarray(value_op.T), xp.asarray(slope_op.T), xp.asarray(grid)
+        index = xp.arange(len(grid))[None]
         for start in range(0, n, _CHUNK):
             rows = np.arange(start, min(start + _CHUNK, n))
-            spline = CubicSpline(np.arange(size), profiles[rows], axis=1)
-            values, slope = spline(grid), spline(grid, 1)
-            lo, hi = first[rows, None], last[rows, None]
-            span = (grid[None] >= lo) & (grid[None] <= hi)
-            peak = np.argmax(np.where(span, values, -np.inf), axis=1)
-            index = np.arange(len(grid))[None]
-            left = np.argmax(np.where(span & (index <= peak[:, None]), slope, -np.inf), axis=1)
-            right = np.argmin(np.where(span & (index >= peak[:, None]), slope, np.inf), axis=1)
+            profile = xp.asarray(profiles[rows])
+            values, slope = profile @ value_op, profile @ slope_op
+            lo, hi = xp.asarray(first[rows])[:, None], xp.asarray(last[rows])[:, None]
+            span = (grid_d[None] >= lo) & (grid_d[None] <= hi)
+            peak = xp.argmax(xp.where(span, values, -xp.inf), axis=1)
+            left = xp.argmax(xp.where(span & (index <= peak[:, None]), slope, -xp.inf), axis=1)
+            right = xp.argmin(xp.where(span & (index >= peak[:, None]), slope, xp.inf), axis=1)
+            picked = xp.arange(len(rows))
+            rising, falling = slope[picked, left] > 0, slope[picked, right] < 0
+            left, right, rising, falling = (_to_numpy(a) for a in (left, right, rising, falling))
             x_left, x_right = grid[left], grid[right]
             widths[rows, axis] = x_right - x_left
             centers[rows, axis] = (x_left + x_right) / 2
-            bad = ((x_left <= first[rows]) | (x_right >= last[rows]) | (slope[np.arange(len(rows)), left] <= 0)
-                   | (slope[np.arange(len(rows)), right] >= 0))
+            bad = (x_left <= first[rows]) | (x_right >= last[rows]) | ~rising | ~falling
             statuses[rows, axis] = np.where(bad, "edge_at_cell_border", "ok")
     result.metrics["peak_signal"][:] = np.where(masks, cleaned, -np.inf).reshape(n, -1).max(axis=1) if n else 0
     signal = result.metrics["peak_signal"] > 0
@@ -324,11 +348,136 @@ def _projection(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_a
     return result
 
 
+@lru_cache(maxsize=16)
+def _zoom_operators(size: int, factor: int):
+    """(size * factor, size) matrices of ``scipy.ndimage.zoom`` along one axis: order 3, and order 0 for masks.
+
+    Zoom is separable and linear, so a cell enlarges as ``Zy @ cell @ Zx.T``.
+    """
+    from scipy.ndimage import zoom
+
+    eye = np.eye(size)
+    return (np.stack([zoom(e, factor, order=3) for e in eye], axis=1),
+            np.stack([zoom(e, factor, order=0) for e in eye], axis=1))
+
+
+def _grow(region):
+    """A batch of 2D boolean images dilated by one pixel in all 8 directions."""
+    out = region.copy()
+    out[:, 1:] |= region[:, :-1]
+    out[:, :-1] |= region[:, 1:]
+    grown = out.copy()
+    grown[:, :, 1:] |= out[:, :, :-1]
+    grown[:, :, :-1] |= out[:, :, 1:]
+    return grown
+
+
+def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_angles: int,
+               level: float = 0.5, factor: int = 4, xp=np) -> CDMethodResult:
+    """Area above the cell's local level + ``level`` x the peak height, on a ``factor``x cubic enlargement.
+
+    Local level b: median of the cell's outermost pixels (a pulse that lights the hole lights its surroundings
+    too, so b, the peak and the threshold scale together and the area does not). The region is the connected
+    part around the peak above the threshold; CD = 2 sqrt(area / pi), cd_x / cd_y = its x / y extents.
+    """
+    n, h, w = masks.shape
+    result = _empty("half_area", n, n_angles, ("local_level", "threshold"))
+    if not n:
+        return result
+    zy, ny = _zoom_operators(h, factor)
+    zx, nx = _zoom_operators(w, factor)
+    H, W = zy.shape[0], zx.shape[0]
+    # Original px per enlarged px: zoom maps the first and last pixel centres onto each other.
+    sy, sx = (h - 1) / (H - 1), (w - 1) / (W - 1)
+    zy, zx, ny, nx = (xp.asarray(a) for a in (zy, zx, ny, nx))
+    angles = np.arange(n_angles) * (2 * np.pi / n_angles)
+    radii = np.arange(0.0, float(np.hypot(h, w)), 0.125)  # original px
+    cos_a, sin_a, radii_d = xp.asarray(np.cos(angles)), xp.asarray(np.sin(angles)), xp.asarray(radii)
+    gy, gx = xp.arange(H, dtype=float), xp.arange(W, dtype=float)
+    m = result.metrics
+    status = np.full(n, "no_signal", dtype="U32")
+    centers, edges = np.full((n, 2), np.nan), np.full((n, n_angles), np.nan)
+    for start in range(0, n, _CHUNK):
+        rows = np.arange(start, min(start + _CHUNK, n))
+        k = len(rows)
+        mask = xp.asarray(masks[rows])
+        cell = xp.where(mask, xp.asarray(cleaned[rows], dtype=float), 0.0)
+        inner = mask.copy()
+        inner[:, 1:] &= mask[:, :-1]
+        inner[:, :-1] &= mask[:, 1:]
+        inner[:, :, 1:] &= mask[:, :, :-1]
+        inner[:, :, :-1] &= mask[:, :, 1:]
+        inner[:, [0, -1]] = False
+        inner[:, :, [0, -1]] = False
+        b = xp.nanmedian(xp.where(mask & ~inner, cell, xp.nan).reshape(k, -1), axis=1)
+        big = zy[None] @ xp.where(mask, cell - b[:, None, None], 0.0) @ zx.T[None]
+        big_mask = (ny[None] @ mask.astype(float) @ nx.T[None]) > 0.5
+        flat = xp.where(big_mask, big, -xp.inf).reshape(k, -1)
+        top = xp.argmax(flat, axis=1)
+        peak = flat[xp.arange(k), top]
+        above = big_mask & (big > (level * peak)[:, None, None])
+        region = xp.zeros((k, H * W), dtype=bool)
+        region[xp.arange(k), top] = True
+        region = region.reshape(k, H, W) & above
+        for step in range(H + W):  # grow from the peak inside the above-threshold pixels until nothing changes
+            grown = _grow(region) & above
+            if step % 8 == 7 and bool((grown == region).all()):
+                break
+            region = grown
+        count = region.sum(axis=(1, 2))
+        cols, lines = region.any(axis=1), region.any(axis=2)
+        extent_x = (W - xp.argmax(cols[:, ::-1], axis=1) - xp.argmax(cols, axis=1)) * sx
+        extent_y = (H - xp.argmax(lines[:, ::-1], axis=1) - xp.argmax(lines, axis=1)) * sy
+        touches = ((_grow(region) & ~big_mask).any(axis=(1, 2)) | region[:, [0, -1]].any(axis=(1, 2))
+                   | region[:, :, [0, -1]].any(axis=(1, 2)))
+        weight = xp.maximum(count, 1)
+        cy = (region.sum(axis=2) * gy).sum(axis=1) / weight
+        cx = (region.sum(axis=1) * gx).sum(axis=1) / weight
+        # Contour for display: the region's last pixel along each ray from its centroid. Rays stop just beyond
+        # the farthest region pixel of the chunk (a few px), not at the cell diagonal.
+        far = ((gx[None, None] - cx[:, None, None]) * sx) ** 2 + ((gy[None, :, None] - cy[:, None, None]) * sy) ** 2
+        reach_max = float(xp.sqrt(xp.where(region, far, 0.0).max())) if k else 0.0
+        steps = radii_d[:min(len(radii), int(reach_max / 0.125) + 3)]
+        px = xp.rint(cx[:, None, None] + cos_a[None, :, None] * steps[None, None] / sx).astype(xp.int64)
+        py = xp.rint(cy[:, None, None] + sin_a[None, :, None] * steps[None, None] / sy).astype(xp.int64)
+        inside = (px >= 0) & (px < W) & (py >= 0) & (py < H)
+        index = (xp.clip(py, 0, H - 1) * W + xp.clip(px, 0, W - 1)).reshape(k, -1)
+        hit = xp.take_along_axis(region.reshape(k, -1), index, axis=1).reshape(px.shape) & inside
+        first_out = xp.where(hit.all(axis=2), len(steps), xp.argmin(hit, axis=2))
+        reach = steps[xp.maximum(first_out - 1, 0)] + 0.0625
+        out = {name: _to_numpy(v) for name, v in (
+            ("b", b), ("peak", peak), ("area", count * (sx * sy)), ("ex", extent_x), ("ey", extent_y),
+            ("touches", touches), ("cx", cx * sx), ("cy", cy * sy), ("edge", reach))}
+        signal = out["peak"] > 0
+        m["local_level"][rows] = out["b"]
+        m["peak_signal"][rows] = np.where(signal, out["peak"], np.nan)
+        m["threshold"][rows] = np.where(signal, out["b"] + level * out["peak"], np.nan)
+        m["area_px2"][rows] = np.where(signal, out["area"], np.nan)
+        m["cd_x_px"][rows] = np.where(signal, out["ex"], np.nan)
+        m["cd_y_px"][rows] = np.where(signal, out["ey"], np.nan)
+        status[rows] = np.where(~signal, "no_signal", np.where(out["touches"], "region_at_cell_border", "ok"))
+        centers[rows] = np.column_stack((out["cx"], out["cy"]))
+        edges[rows] = out["edge"]
+    m["cd_equivalent_px"][:] = 2 * np.sqrt(m["area_px2"] / np.pi)
+    rows = np.flatnonzero(status != "no_signal")
+    result.geometry["center_local"][rows] = centers[rows]
+    result.geometry["edge_px"][rows] = edges[rows]
+    result.centers_xy[rows] = centers[rows] + origins[rows]
+    result.contours_xy[rows] = radial_contours(centers[rows], edges[rows], origins[rows], n_angles)
+    m["perimeter_px"][rows] = np.linalg.norm(np.diff(result.contours_xy[rows], axis=1), axis=2).sum(axis=1)
+    result.status[:] = status
+    ok = status == "ok"
+    for name in ("area_px2", "cd_equivalent_px", "cd_x_px", "cd_y_px", "perimeter_px"):
+        m[name][~ok] = np.nan
+    result.valid[:] = ok
+    return result
+
+
 def measure_invariant(
     signal: np.ndarray, state, masks: np.ndarray, origins: np.ndarray, report: np.ndarray, *,
     methods: tuple[str, ...], n_angles: int, psf_fwhm_px: float | None = None,
     nominal_cd_px: float | None = None, dark_level: float = 0.0, flux_ratio_scale: float | None = None,
-    rounds: int = 2,
+    rounds: int = 2, half_area_level: float = 0.5, xp=np,
 ) -> tuple[dict[str, CDMethodResult], dict]:
     """Pulse-invariant methods for the reported cells of a converged ``deblend`` state.
 
@@ -336,11 +485,15 @@ def measure_invariant(
     rows of ``report``. ``disk`` and ``flux_ratio`` need ``psf_fwhm_px`` or
     ``nominal_cd_px`` (the blur is then chosen so the median fitted diameter
     equals it). ``flux_ratio`` is scaled by ``flux_ratio_scale`` when given,
-    else so that its median equals ``nominal_cd_px``.
+    else so that its median equals ``nominal_cd_px``. ``projection`` and
+    ``half_area`` need neither and run on ``xp`` (NumPy or CuPy).
     """
     found, info = {}, {}
     if "projection" in methods:
-        found["projection"] = _projection(state.cleaned[report], masks[report], origins[report], n_angles)
+        found["projection"] = _projection(state.cleaned[report], masks[report], origins[report], n_angles, xp=xp)
+    if "half_area" in methods:
+        found["half_area"] = _half_area(state.cleaned[report], masks[report], origins[report], n_angles,
+                                        level=half_area_level, xp=xp)
     if "disk" not in methods and "flux_ratio" not in methods:
         return found, info
     if psf_fwhm_px is None and nominal_cd_px is None:

@@ -34,3 +34,15 @@
 - **Keep display data at the precision the method used where the method is sensitive.** 8-bit cells were
   fine to look at but moved steepest-slope edges by up to 1.5 px; store what the method computed on exactly.
 - **Console output must survive non-UTF-8 consoles** (the user's Windows uses cp949): print ASCII only.
+- **Never assume the pattern shape.** The user's patterns can be any shape, unknown in advance. I proposed a
+  round-hole profile model, then tested on holes and squares only; both were assumptions the user never made.
+  Ask what shapes occur before using a shape model; otherwise use shape-free measures and test them on
+  mixed, irregular, rotated shapes the method knows nothing about.
+- **Do not build new methods on a method the user found failing on real data.** The disk fit (and anything
+  that needs `--psf-fwhm` / `--nominal-cd`) did not give good range or repeatability on the user's images;
+  re-proposing it in a new form was rejected twice.
+- **Check that the suspected cause is the real error source before replacing it.** "No interpolation" was
+  the user's guess; the spline was there. A better interpolation did not help; the width definition (2
+  points per edge) and noise did. Test the replacement before proposing it.
+- **Report speed matters on the user's machine.** Time every stage on a full-size image and drop or move to
+  the GPU what dominates before adding more.

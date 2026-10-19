@@ -1,6 +1,12 @@
-"""Measure every PNG in a folder with all CD methods and write an offline HTML report.
+"""Measure every PNG in a folder with the CD methods and write an offline HTML report.
 
-    python scripts/cd_report.py FOLDER --output REPORT --nominal-cd 100 --pixel-size 21 --unit nm --backend gpu
+    python scripts/cd_report.py FOLDER --output REPORT --pixel-size 21 --unit nm
+
+Methods: gaussian (deblended Gaussian FWHM), projection (x/y profile max-slope widths) and half_area (area above
+half the feature's own height over its local level; assumes no shape). None needs a blur or nominal CD. The other
+subpx methods (logquad, gradient, halfmax, disk, flux_ratio) are left out: they assume a round or star-shaped
+outline, or need the blur, and disk/flux_ratio dominated the run time. --backend auto (default) uses the GPU when
+CuPy finds one.
 
 Open REPORT/index.html in a browser (works from the folder, no server). It has a summary tab and one tab per image.
 
@@ -15,17 +21,12 @@ sigma being the standard deviation of that image's hole CDs (N - 1 in the denomi
 Each image tab starts with the CD map: the image with every detected hole drawn at its CD (drag to pan, wheel
 to zoom; method, zoom and pan stay when switching tabs; colours on one scale for all images by default). Clicking
 a hole shows how the selected method measured it (the cell it worked on, projection's x/y profiles and edges,
-disk's radial fit and leftover, flux_ratio's numbers). Below the map, a band profile averages CD, brightness,
+half_area's region, local level and threshold). Below the map, a band profile averages CD, brightness,
 spot peak and sub-pixel position over bands of rows or columns, to tell where banding comes from. Then the
 statistics, the per-hole agreement between methods and CD histograms. The statistics also go to
 REPORT/summary.csv (per image) and REPORT/between_images.csv. --save-results also keeps the full per-hole
-results in REPORT/results/<image>/ (``subpx.load_cd_results``; about 1 GB per 1e5-hole image with all methods).
-Hole details take about 65 MB per 1e5-hole image in REPORT/data/<image>.detail.js (--no-hole-details skips them).
-
-disk and flux_ratio need --nominal-cd or --psf-fwhm; without either they are skipped. With --nominal-cd they are
-calibrated once, on the first image measured: the blur that makes its median disk diameter equal --nominal-cd and
-the flux_ratio scale that does the same are reused for every later image, so image means stay comparable
-(calibrating every image would force every image's median to --nominal-cd).
+results in REPORT/results/<image>/ (``subpx.load_cd_results``).
+Hole details take about 40 MB per 1e5-hole image in REPORT/data/<image>.detail.js (--no-hole-details skips them).
 """
 
 from __future__ import annotations
@@ -49,17 +50,14 @@ if str(ROOT) not in sys.path:
 from subpx import measure_cds, save_cd_results
 from subpx.cd import METHOD_LABELS
 
-ALL_METHODS = ("gaussian", "logquad", "gradient", "halfmax", "disk", "flux_ratio", "projection")
+ALL_METHODS = ("gaussian", "projection", "half_area")
 DESCRIPTIONS = {
-    "gaussian": "FWHM of a 2-D Gaussian fitted to the spot (deblended). Describes the blurred spot, not the hole.",
-    "logquad": "FWHM of a Gaussian fitted to log intensity. Describes the blurred spot.",
-    "gradient": "Contour through the steepest intensity drop along each ray. Spot edge.",
-    "halfmax": "Contour at half the spot's peak height. Spot edge.",
-    "disk": "Diameter of a round hole that, blurred by the optics and pixel-averaged, matches the spot. The hole itself; "
-            "unaffected by the per-hole pulse strength. Absolute value follows --nominal-cd (or --psf-fwhm).",
-    "flux_ratio": "Hole light divided by its own background, converted to a diameter and scaled so the median equals "
-                  "--nominal-cd. Cancels the pulse when the background is pulse-lit absorber light (set --dark-level).",
+    "gaussian": "FWHM of a 2-D Gaussian fitted to the spot (deblended). Describes the blurred spot, not the hole; "
+                "a brighter pulse can change it.",
     "projection": "Mean of the x and y widths between the steepest rise and fall of the cell's summed column and row profiles.",
+    "half_area": "Area of the region around the peak brighter than the cell's local level plus half the peak height "
+                 "(cell enlarged 4x by smooth interpolation), as the diameter of a circle of that area. Assumes no "
+                 "shape; a pulse that brightens the feature and its surroundings together does not change it.",
 }
 # Extra map layers: (layer, metric, label) per method.
 LAYERS = {"projection": (("projection_x", "cd_x_px", "projection, x width only"),
@@ -74,13 +72,8 @@ def cd_statistics(result) -> dict[str, dict]:
         values = values[np.isfinite(values)]
         mean = float(values.mean()) if values.size else float("nan")
         std = float(values.std(ddof=1)) if values.size > 1 else float("nan")
-        # The spread noise alone would give: the disk fit's own per-hole uncertainty (median).
-        noise = measured.metrics.get("cd_uncertainty_px")
-        noise = (float(np.nanmedian(noise[measured.valid]) * result.pixel_size) if noise is not None and values.size
-                 else float("nan"))
         stats[name] = {"cells": int(len(measured.valid)), "valid": int(values.size), "mean": mean, "std": std,
-                       "three_sigma_pct": 300 * std / mean if values.size > 1 and mean else float("nan"),
-                       "noise_sigma": noise}
+                       "three_sigma_pct": 300 * std / mean if values.size > 1 and mean else float("nan")}
     return stats
 
 
@@ -174,38 +167,30 @@ def _quantize(cells: np.ndarray, inside: np.ndarray) -> dict:
     return {"codes": _b64(codes, "u1"), "lo": _b64(lo, "<f4"), "step": _b64(step, "<f4")}
 
 
-def detail_data(result, dark_level: float) -> dict:
+def detail_data(result) -> dict:
     """What each method measured each hole on, for the click panel.
 
-    ``clean``: the cell with background and neighbours' models removed (input of gaussian, logquad, gradient,
-    halfmax, projection; zero outside the cell), 8-bit for display. ``prof_x``/``prof_y``: projection's column and
-    row sums of that cell in full precision (8-bit sums move the steepest points visibly). ``disk``: the disk fit's own input cell, its fitted amplitude
-    and background, and the blurred-hole profile table T(d, rho) of the fit (model = A T(d, rho) + B).
+    ``clean``: the cell with background and neighbours' models removed (input of every method; zero outside the
+    cell), 8-bit for display. ``prof_x``/``prof_y``: projection's column and row sums of that cell in full
+    precision (8-bit sums move the steepest points visibly). ``half``: half_area's local level, peak height above
+    it, threshold, region centroid in the cell and its outline as distances along 32 rays (1/16 px, 8-bit).
     """
-    from subpx._cpu.invariant_cd import DiskTable
-
     n, h, w = result.masks.shape
     out = {"h": h, "w": w, "ox": _b64(result.origins_xy[:, 0], "<i4"), "oy": _b64(result.origins_xy[:, 1], "<i4"),
            "clean": _quantize(result.rois, result.masks)}
     if "projection" in result.measurements:
         cells = np.where(result.masks, result.rois, 0.0)
         out["prof_x"], out["prof_y"] = _b64(cells.sum(axis=1), "<f4"), _b64(cells.sum(axis=2), "<f4")
-    fitted = result.measurements.get("disk") or result.measurements.get("flux_ratio")
-    if fitted is not None and "cells" in fitted.inputs:
-        out["disk"] = _quantize(fitted.inputs["cells"], np.isfinite(fitted.inputs["cells"]))
-    if "disk" in result.measurements:
-        m = result.measurements["disk"].metrics
-        d = m["cd_equivalent_px"]
-        d_max = float(np.nanmax(d)) * 1.2 + 1 if np.isfinite(d).any() else 3 * float(result.meta["psf_fwhm_px"])
-        table = DiskTable(result.meta["psf_fwhm_px"], d_max, float(np.hypot(h, w)) + 1, dd=0.05, drho=0.05)
-        out["disk_fit"] = {"amplitude": _b64(m["amplitude"], "<f4"), "background": _b64(m["local_background"], "<f4"),
-                           "table": _b64(table.T, "<f4"), "nd": int(table.T.shape[0]), "nr": int(table.T.shape[1]),
-                           "dd": table.dd, "drho": table.drho}
-    if "flux_ratio" in result.measurements:
-        m = result.measurements["flux_ratio"].metrics
-        out["flux"] = {"flux": _b64(m["flux"], "<f4"), "background": _b64(m["local_background"], "<f4"),
-                       "ratio": _b64(m["flux_ratio"], "<f4"), "scale": float(result.meta.get("flux_ratio_scale", 1.0)),
-                       "dark": float(dark_level)}
+    if "half_area" in result.measurements:
+        measured = result.measurements["half_area"]
+        m, geometry = measured.metrics, measured.geometry
+        edge = geometry["edge_px"]
+        rays = edge[:, ::max(1, edge.shape[1] // 32)][:, :32]
+        out["half"] = {"level": _b64(m["local_level"], "<f4"), "peak": _b64(m["peak_signal"], "<f4"),
+                       "threshold": _b64(m["threshold"], "<f4"),
+                       "cx": _b64(geometry["center_local"][:, 0], "<f4"), "cy": _b64(geometry["center_local"][:, 1], "<f4"),
+                       "rays": _b64(np.clip(np.rint(np.nan_to_num(rays) * 16), 0, 255), "u1"), "n_rays": int(rays.shape[1]),
+                       "level_fraction": float(result.meta.get("half_area_level", 0.5))}
     return out
 
 
@@ -222,13 +207,10 @@ def _stats_table(stats: dict, unit: str) -> str:
     rows = "".join(
         f"<tr><td><span class='swatch' style='background:{COLORS[m]}'></span>{html.escape(METHOD_LABELS[m])} "
         f"<code>{m}</code></td><td>{s['valid']:,} / {s['cells']:,}</td><td>{_fmt(s['mean'])}</td>"
-        f"<td>{_fmt(s['std'])}</td><td><b>{_fmt(s['three_sigma_pct'])}</b></td><td>{_fmt(s['noise_sigma'])}</td></tr>"
+        f"<td>{_fmt(s['std'])}</td><td><b>{_fmt(s['three_sigma_pct'])}</b></td></tr>"
         for m, s in stats.items())
     return (f"<table class='stats'><thead><tr><th>Method</th><th>Valid holes</th><th>Mean CD ({html.escape(unit)})</th>"
-            f"<th>σ ({html.escape(unit)})</th><th>3σ (%)</th><th>σ from noise alone ({html.escape(unit)})</th></tr>"
-            f"</thead><tbody>{rows}</tbody></table><p class='meta'>σ from noise alone (disk only): the median of the "
-            "fit's own per-hole uncertainty. A measured σ much larger than this is real hole-to-hole variation or a "
-            "systematic effect, not noise.</p>")
+            f"<th>σ ({html.escape(unit)})</th><th>3σ (%)</th></tr></thead><tbody>{rows}</tbody></table>")
 
 
 def _agreement_table(names: list[str], r: np.ndarray) -> str:
@@ -242,9 +224,8 @@ def _agreement_table(names: list[str], r: np.ndarray) -> str:
             f"<table class='stats wide'><thead><tr><th></th>{head}</tr></thead><tbody>{body}</tbody></table>")
 
 
-COLORS = {"gaussian": "#5bbf2a", "logquad": "#e09a00", "gradient": "#00a9c4", "halfmax": "#e0468f",
-          "disk": "#e03b3b", "flux_ratio": "#8f6ad8", "projection": "#7a7a7a", "projection_x": "#2b8cbe",
-          "projection_y": "#e6550d"}
+COLORS = {"gaussian": "#5bbf2a", "projection": "#7a7a7a", "projection_x": "#2b8cbe", "projection_y": "#e6550d",
+          "half_area": "#d6338a"}
 
 
 def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], notes: list[str], unit: str,
@@ -291,8 +272,7 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
                    f"{html.escape(e['name'])}</button>" for e in entries)
     panels = "".join(
         f"<section class='panel' id='panel-{e['id']}' hidden><h2>{html.escape(e['name'])}: statistics</h2>"
-        f"<p class='meta'>{e['holes']:,} holes · {e['width']} × {e['height']} px · {e['seconds']:.1f} s"
-        f"{html.escape(e['extra'])}</p>{_stats_table(e['stats'], unit)}{_agreement_table(*e['agreement'])}"
+        f"<p class='meta'>{e['holes']:,} holes · {e['width']} × {e['height']} px · {e['seconds']:.1f} s</p>{_stats_table(e['stats'], unit)}{_agreement_table(*e['agreement'])}"
         "<h3>CD histograms</h3><div class='hists'></div></section>"
         for e in entries if not e.get("error"))
     page = (_HTML.replace("__SUMMARY__", summary).replace("__LEGEND__", legend).replace("__TABS__", tabs)
@@ -316,9 +296,8 @@ def main(argv=None) -> None:
     parser.add_argument("folder", type=Path, help="Folder holding the .png images")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/cd_report")
     parser.add_argument("--methods", nargs="+", choices=ALL_METHODS, default=list(ALL_METHODS))
-    parser.add_argument("--nominal-cd", type=float, default=None, help="Typical hole diameter in --unit (disk, flux_ratio)")
-    parser.add_argument("--psf-fwhm", type=float, default=None, help="Known blur FWHM in --unit (overrides --nominal-cd)")
-    parser.add_argument("--dark-level", type=float, default=0.0, help="Detector offset removed before flux_ratio divides")
+    parser.add_argument("--half-level", type=float, default=0.5,
+                        help="half_area: fraction of the peak height above the local level that bounds the region")
     parser.add_argument("--pixel-size", type=float, default=1.0)
     parser.add_argument("--unit", default="px")
     parser.add_argument("--backend", choices=("cpu", "gpu", "auto"), default="auto")
@@ -328,24 +307,19 @@ def main(argv=None) -> None:
     parser.add_argument("--area-max", type=int, default=200)
     parser.add_argument("--invert", action="store_true", help="Dark holes on a bright background")
     parser.add_argument("--no-hole-details", action="store_true",
-                        help="Skip the per-hole detail data (cells behind the click panel, about 65 MB per 1e5 holes)")
+                        help="Skip the per-hole detail data (cells behind the click panel, about 40 MB per 1e5 holes)")
     parser.add_argument("--save-results", action="store_true",
-                        help="Also save full per-hole results (compact NPZ + CSVs, ~1 GB per 1e5-hole image)")
+                        help="Also save full per-hole results (compact NPZ + CSVs)")
     args = parser.parse_args(argv)
 
     images = sorted(p for p in args.folder.iterdir() if p.suffix.lower() == ".png") if args.folder.is_dir() else []
     if not images:
         raise SystemExit(f"No .png images in {args.folder}")
-    methods, notes = tuple(args.methods), []
-    if args.nominal_cd is None and args.psf_fwhm is None and {"disk", "flux_ratio"} & set(methods):
-        notes.append("disk and flux_ratio were skipped: they need --nominal-cd or --psf-fwhm.")
-        print(notes[-1], flush=True)
-        methods = tuple(m for m in methods if m not in ("disk", "flux_ratio"))
+    methods, notes = tuple(m for m in ALL_METHODS if m in args.methods), []
     output = args.output
     for sub in ("images", "data"):
         (output / sub).mkdir(parents=True, exist_ok=True)
     entries, rows, used = [], [], set()
-    fixed = {}  # blur and flux_ratio scale from the first calibrated image, reused for all later images
     samples = {}  # per map layer: a sample of every image's CDs, for the shared colour range
     rng = np.random.default_rng(0)
     started = time.perf_counter()
@@ -361,8 +335,7 @@ def main(argv=None) -> None:
             result = measure_cds(
                 image, methods=methods, seeds=args.seeds, invert=args.invert, area_min=args.area_min,
                 area_max=args.area_max, pixel_size=args.pixel_size, unit=args.unit, backend=args.backend,
-                nominal_cd=args.nominal_cd, psf_fwhm=fixed.get("psf_fwhm", args.psf_fwhm), dark_level=args.dark_level,
-                flux_ratio_scale=fixed.get("flux_ratio_scale"),
+                half_area_level=args.half_level,
             )
         except Exception as error:  # one bad image must not stop the batch
             message = str(error).replace(str(path), path.name) or type(error).__name__
@@ -371,14 +344,6 @@ def main(argv=None) -> None:
             rows.append({"image": path.name, "status": "failed", "error": message})
             continue
         seconds = time.perf_counter() - start
-        calibrated_here = args.nominal_cd is not None and not fixed and "psf_fwhm_px" in result.meta
-        if calibrated_here:
-            fixed = {"psf_fwhm": result.meta["psf_fwhm_px"] * args.pixel_size,
-                     "flux_ratio_scale": result.meta.get("flux_ratio_scale"), "image": path.name}
-            notes.append(f"disk and flux_ratio were calibrated once, on {path.name} (blur FWHM {fixed['psf_fwhm']:.4g} "
-                         f"{args.unit}, flux_ratio scale {_plain(fixed['flux_ratio_scale'] or float('nan'), 4)}), and that "
-                         "blur and scale were reused for every image, so their image means are on one scale.")
-            print("  " + notes[-1], flush=True)
         stats = cd_statistics(result)
         layers = layer_values(result)
         for layer, values in layers.items():
@@ -392,16 +357,12 @@ def main(argv=None) -> None:
         if not args.no_hole_details:
             detail = f"data/{ident}.detail.js"
             (output / detail).write_text(f"window.CD_DETAIL[{json.dumps(ident)}]="
-                                         + json.dumps(detail_data(result, args.dark_level), allow_nan=False) + ";\n",
+                                         + json.dumps(detail_data(result), allow_nan=False) + ";\n",
                                          encoding="utf-8")
         if args.save_results:
             save_cd_results(result, output / "results" / ident, compact=True)
-        extra = ""
-        if "psf_fwhm_px" in result.meta:
-            source = result.meta["psf_source"] if not fixed or calibrated_here else f"calibrated on {fixed['image']}"
-            extra = f" · blur FWHM {result.meta['psf_fwhm_px'] * args.pixel_size:.4g} {args.unit} ({source})"
         entries.append({"id": ident, "name": path.name, "holes": len(result.seeds_xy), "stats": stats,
-                        "width": image.shape[1], "height": image.shape[0], "seconds": seconds, "extra": extra,
+                        "width": image.shape[1], "height": image.shape[0], "seconds": seconds,
                         "image": f"images/{ident}.png", "data": f"data/{ident}.js", "detail": detail,
                         "agreement": agreement(result)})
         for method, s in stats.items():
@@ -410,8 +371,7 @@ def main(argv=None) -> None:
             print(f"  {method:11s} {s['valid']:7d} valid  mean {_plain(s['mean'], 3)} {args.unit}  "
                   f"3sigma within image {_plain(s['three_sigma_pct'])} %", flush=True)
         print(f"  {seconds:.1f} s", flush=True)
-    fields = ["image", "status", "method", "holes", "cells", "valid", "mean", "std", "three_sigma_pct", "noise_sigma",
-              "unit", "error"]
+    fields = ["image", "status", "method", "holes", "cells", "valid", "mean", "std", "three_sigma_pct", "unit", "error"]
     with (output / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -488,8 +448,8 @@ __NOTES__ __SUMMARY__<h2>Methods</h2><ul class="legend">__LEGEND__</ul></section
 <label>Band width (px) <input id="bandw" type="number" min="1" step="1" style="width:6em"></label></div>
 <p class="explain">Each band averages the holes whose centre falls in it (default width: one hole pitch, i.e. one row of holes per band). The top plot shows every map's band means, each minus its own image mean, so the maps can be compared directly; the table gives each map's band-to-band spread. How to read it:</p>
 <ul class="explain"><li>Bands mainly in <b>projection_y</b> (or mainly in projection_x): the light changes from one pixel line to the next (scan or sensor lines), which distorts each hole's width across the lines.</li>
-<li>Bands in the Deblended Gaussian but not in disk or projection: the light level leaks into the Gaussian CD (disk and projection ignore a change of light level).</li>
-<li>The same bands in disk and in both projection directions: most likely real CD differences on the mask.</li>
+<li>Bands in the Deblended Gaussian but not in half_area or projection: the light level leaks into the Gaussian CD (half_area and projection ignore a change of light level).</li>
+<li>The same bands in half_area and in both projection directions: most likely real CD differences on the mask.</li>
 <li>Bands that follow the sub-pixel position: the method is tied to the pixel grid.</li></ul>
 <p class="explain">Background brightness and spot peak are shown for reference only: bigger holes are also brighter, and the blur spreads part of their light between the holes, so a CD that follows them does not by itself prove a light leak.</p>
 <div id="bandinfo"></div>
@@ -643,10 +603,9 @@ function loadDetail(id){if(detailLoading===id)return;detailLoading=id;const s=do
   s.onload=()=>{detailLoading=null;if(curId===id&&sel>=0)renderDetail();};
   s.onerror=()=>{detailLoading=null;$("detail").insertAdjacentHTML("beforeend",`<p class='error'>Could not load ${ENTRIES[id].detail}</p>`);};document.body.appendChild(s);}
 function prepareDetail(D){if(D.ready)return;D.ox=unpack(D.ox,Int32Array);D.oy=unpack(D.oy,Int32Array);
-  for(const part of [D.clean,D.disk])if(part){part.codes=unpack(part.codes,Uint8Array);part.lo=unpack(part.lo,Float32Array);part.step=unpack(part.step,Float32Array);}
-  if(D.disk_fit){const F=D.disk_fit;F.amplitude=unpack(F.amplitude,Float32Array);F.background=unpack(F.background,Float32Array);F.table=unpack(F.table,Float32Array);}
+  const C=D.clean;C.codes=unpack(C.codes,Uint8Array);C.lo=unpack(C.lo,Float32Array);C.step=unpack(C.step,Float32Array);
   if(D.prof_x){D.prof_x=unpack(D.prof_x,Float32Array);D.prof_y=unpack(D.prof_y,Float32Array);}
-  if(D.flux){const F=D.flux;F.flux=unpack(F.flux,Float32Array);F.background=unpack(F.background,Float32Array);F.ratio=unpack(F.ratio,Float32Array);}D.ready=true;}
+  if(D.half){const F=D.half;for(const k of ["level","peak","threshold","cx","cy"])F[k]=unpack(F[k],Float32Array);F.rays=unpack(F.rays,Uint8Array);}D.ready=true;}
 function cellValues(D,part,i){const n=D.h*D.w,out=new Float32Array(n);for(let p=0;p<n;p++){const c=part.codes[i*n+p];out[p]=c===255?NaN:part.lo[i]+c*part.step[i];}return out;}
 function drawCell(id,D,vals,overlay,diverging){const cv=$(id),s=Math.max(6,Math.floor(170/Math.max(D.h,D.w)));cv.width=D.w*s;cv.height=D.h*s;
   const g=cv.getContext("2d");let [lo,hi]=extent(vals);const a=Math.max(Math.abs(lo),Math.abs(hi))||1;
@@ -664,9 +623,6 @@ function profilePlots(prefix,prof,edges,label){const sp=spline(prof),xs=[],vs=[]
     title:`${label}: width = ${fin(w)?w.toFixed(3)+" px = "+(w*cur.scale).toFixed(2)+" "+cur.unit:"–"}`});
   plot($(prefix+"-s"),{x:[0,n-1],y:extent(ss,[0]),series:[{xs,ys:ss,color:"#3a8fd8"}],v:v.map(e=>({x:e.x,color:e.color})),h:[{y:0,color:"#888"}],
     title:"slope of the curve (edges = its highest and lowest point)",xl:"pixel in the cell window"});}
-function diskModel(F,d,rho){const fd=d/F.dd,i=Math.min(F.nd-2,Math.max(0,Math.floor(fd))),u=Math.min(1,Math.max(0,fd-i));
-  const fr=rho/F.drho,j=Math.min(F.nr-2,Math.max(0,Math.floor(fr))),v=Math.min(1,Math.max(0,fr-j)),t=F.table,nr=F.nr,k=i*nr+j;
-  return(1-u)*((1-v)*t[k]+v*t[k+1])+u*((1-v)*t[k+nr]+v*t[k+nr+1]);}
 function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").value,m=cur.methods[k],base=m.base||k;
   let rows="";for(const [kk,mm] of Object.entries(cur.methods)){const v=mm.cd[i];
     rows+=`<tr><td><span class="swatch" style="background:${COLORS[kk]||"#888"}"></span>${kk}</td><td>${fin(v)?(v*cur.scale).toFixed(3)+" "+cur.unit:"–"}</td><td>${mm.status_names[mm.status[i]]}</td></tr>`;}
@@ -678,33 +634,24 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
   if(base==="projection"){const P=cur.methods.projection,px=cur.methods.projection_x.cd[i],py=cur.methods.projection_y.cd[i];
     const pcx=P.x[i]-ox,pcy=P.y[i]-oy,vals=cellValues(D,D.clean,i);
     const X=Array.from(D.prof_x.subarray(i*D.w,(i+1)*D.w)),Y=Array.from(D.prof_y.subarray(i*D.h,(i+1)*D.h));
-    out+=`<h3>projection</h3><p class="explain">The cell with background and neighbours removed. Each column is summed into the x profile, each row into the y profile; a smooth curve goes through the sums, and the width is the distance between its steepest rise and steepest fall (red). Cell outline: dark pixels are outside the cell.</p>
+    out+=`<h3>projection</h3><p class="explain">The cell with background and neighbours removed. Each column is summed into the x profile, each row into the y profile; a smooth curve (cubic spline) goes exactly through the sums, and the width is the distance between its steepest rise and steepest fall (red). Cell outline: dark pixels are outside the cell. The dots are rarely symmetric even for a symmetric feature: its centre falls between pixels, so the two sides are sampled at different points; the ragged cell outline changes how many pixels each sum holds; and noise moves the few dots near each edge. The curve follows the dots exactly, so all three move the edges.</p>
       <div class="cells"><figure><canvas id="dc-a"></canvas>cell and the x/y widths</figure></div>
       <canvas class="plot" id="pp-x-v" style="height:150px"></canvas><canvas class="plot" id="pp-x-s" style="height:90px"></canvas>
       <canvas class="plot" id="pp-y-v" style="height:150px"></canvas><canvas class="plot" id="pp-y-s" style="height:90px"></canvas>`;
     $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(pcx,pcy,px/2,py/2,"#e03b3b"));
     profilePlots("pp-x",X,[pcx-px/2,pcx+px/2],"x profile (column sums)");profilePlots("pp-y",Y,[pcy-py/2,pcy+py/2],"y profile (row sums)");return;}
-  if((base==="disk"||base==="flux_ratio")&&D.disk){const vals=cellValues(D,D.disk,i);
-    if(base==="flux_ratio"&&D.flux){const F=D.flux,f=F.flux[i],b=F.background[i],r=F.ratio[i];
-      out+=`<h3>flux_ratio</h3><p class="explain">The cell the disk fit used (neighbours removed, own background kept). Hole light = sum of every cell pixel above the fitted local background.</p>
-        <div class="cells"><figure><canvas id="dc-a"></canvas>cell</figure></div>
-        <table><tr><td>hole light (sum above background)</td><td>${f.toPrecision(5)}</td></tr><tr><td>local background B</td><td>${b.toPrecision(5)}</td></tr>
-        <tr><td>dark level</td><td>${F.dark}</td></tr><tr><td>ratio = light / (B − dark)</td><td>${fin(r)?r.toPrecision(5):"–"}</td></tr>
-        <tr><td>scale</td><td>${F.scale.toPrecision(5)}</td></tr>
-        <tr><td>CD = scale × 2 √(ratio / π)</td><td>${fin(cdv)?(cdv).toFixed(3)+" px = "+(cdv*cur.scale).toFixed(2)+" "+cur.unit:"–"}</td></tr></table>`;
-      $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(cx,cy,cdv/2,cdv/2,"#8f6ad8"));return;}
-    if(base==="disk"&&D.disk_fit){const F=D.disk_fit,A=F.amplitude[i],B=F.background[i],dc=cur.methods.disk,d=dc.cd[i],dcx=dc.x[i]-ox,dcy=dc.y[i]-oy;
-      out+=`<h3>disk (blurred-hole fit)</h3><p class="explain">The cell the fit used: neighbours' fitted holes removed, its own background kept. The model is a round hole of diameter d, blurred by the optics and averaged over each pixel, times a brightness A, plus a background B; d, A, B and the centre are fitted. The leftover is cell minus model (red = brighter than the model, blue = darker).</p>`;
-      if(!fin(d)){$("detail").innerHTML=out+"<p class='meta'>No valid fit for this hole.</p>";return;}
-      const rho=[],val=[],res=new Float32Array(vals.length).fill(NaN);
-      for(let r=0;r<D.h;r++)for(let c=0;c<D.w;c++){const v=vals[r*D.w+c];if(!fin(v))continue;const q=Math.hypot(c-dcx,r-dcy);rho.push(q);val.push(v);res[r*D.w+c]=v-(A*diskModel(F,d,q)+B);}
-      const xs=[],ms=[],top=Math.max(...rho,d);for(let q=0;q<=top+1e-9;q+=0.05){xs.push(q);ms.push(A*diskModel(F,d,q)+B);}
-      out+=`<div class="cells"><figure><canvas id="dc-a"></canvas>cell, fitted hole edge</figure><figure><canvas id="dc-b"></canvas>leftover (cell − model)</figure></div>
-        <canvas class="plot" id="dp" style="height:200px"></canvas><p class="meta">d = ${d.toFixed(3)} px = ${(d*cur.scale).toFixed(2)} ${cur.unit} · A = ${A.toPrecision(4)} · B = ${B.toPrecision(4)} · fit leftover RMS = ${Math.sqrt(res.filter(fin).reduce((s,v)=>s+v*v,0)/Math.max(1,rho.length)).toPrecision(3)}</p>`;
-      $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(dcx,dcy,d/2,d/2,"#e03b3b"));drawCell("dc-b",D,res,null,true);
-      plot($("dp"),{x:[0,top],y:extent(val,ms),series:[{xs,ys:ms,color:"#e03b3b"},{xs:rho,ys:val,dots:true,r:2,color:getComputedStyle(document.body).color}],
-        v:[{x:d/2,color:"#e03b3b",label:"hole edge d/2"}],h:[{y:B,color:"#888",label:"background B"}],
-        title:"each cell pixel vs its distance from the fitted centre; red: fitted model",xl:"distance from centre (px)"});return;}}
+  if(base==="half_area"&&D.half){const F=D.half,vals=cellValues(D,D.clean,i),b=F.level[i],pk=F.peak[i],t=F.threshold[i],hx=F.cx[i],hy=F.cy[i];
+    const above=vals.map(v=>fin(v)?(v>t?1:-1):NaN),nr=F.n_rays,pts=[];
+    for(let r=0;r<nr;r++){const a=2*Math.PI*r/nr,q=F.rays[i*nr+r]/16;pts.push([hx+q*Math.cos(a),hy+q*Math.sin(a)]);}
+    const poly=(g,s)=>{if(!fin(hx))return;g.strokeStyle="#d6338a";g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
+    out+=`<h3>half_area</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the median of the cell's outermost pixels. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold b + ${F.level_fraction} × (peak − b). CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
+      <div class="cells"><figure><canvas id="dc-a"></canvas>cell and region outline</figure><figure><canvas id="dc-b"></canvas>original pixels above the threshold (red)</figure></div>
+      <table><tr><td>local level b</td><td>${fin(b)?b.toPrecision(4):"–"}</td></tr><tr><td>peak height above b</td><td>${fin(pk)?pk.toPrecision(4):"–"}</td></tr>
+      <tr><td>threshold = b + ${F.level_fraction} × height</td><td>${fin(t)?t.toPrecision(4):"–"}</td></tr>
+      <tr><td>region area</td><td>${fin(cdv)?(Math.PI*cdv*cdv/4).toFixed(2)+" px²":"–"}</td></tr>
+      <tr><td>CD = 2 √(area / π)</td><td>${fin(cdv)?cdv.toFixed(3)+" px = "+(cdv*cur.scale).toFixed(2)+" "+cur.unit:"–"}</td></tr></table>
+      <p class="meta">The outline is drawn from 32 directions around the region's centre, so it is approximate for very irregular shapes; the area itself is counted pixel by pixel on the enlarged cell.</p>`;
+    $("detail").innerHTML=out;drawCell("dc-a",D,vals,poly);drawCell("dc-b",D,above,poly,true);return;}
   const vals=cellValues(D,D.clean,i);
   out+=`<h3>${k}</h3><p class="explain">The cell this method measured (background and neighbours removed; dark pixels are outside the cell), with its outline at the CD.</p><div class="cells"><figure><canvas id="dc-a"></canvas>cell and outline</figure></div>`;
   $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(cx,cy,cdv/2,cdv/2,COLORS[k]||"#e03b3b"));}

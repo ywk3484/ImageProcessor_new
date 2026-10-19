@@ -21,21 +21,17 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
         images[name] = image
     (folder / "broken.png").write_text("not an image")
     (folder / "notes.txt").write_text("ignored")
-    options = dict(nominal_cd=100.0, pixel_size=21.0, unit="nm", dark_level=6.0, area_max=200)
-    main([str(folder), "--output", str(tmp_path / "out"), "--nominal-cd", "100", "--pixel-size", "21", "--unit", "nm",
-          "--dark-level", "6", "--backend", "cpu", "--save-results"])
+    options = dict(pixel_size=21.0, unit="nm", area_max=200)
+    main([str(folder), "--output", str(tmp_path / "out"), "--pixel-size", "21", "--unit", "nm", "--backend", "cpu",
+          "--save-results"])
     out = tmp_path / "out"
     with (out / "summary.csv").open(encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert [r["image"] for r in rows if r["status"] == "failed"] == ["broken.png"]
-    fixed, results = {}, {}
+    results = {}
     for name, image in images.items():
-        result = measure_cds(image, methods=("gaussian", "logquad", "gradient", "halfmax", "disk", "flux_ratio",
-                                             "projection"), **options, **fixed)
+        result = measure_cds(image, methods=("gaussian", "projection", "half_area"), **options)
         results[name] = result
-        # The first image calibrates the blur and the flux_ratio scale; later images reuse them.
-        fixed = fixed or {"psf_fwhm": result.meta["psf_fwhm_px"] * 21.0,
-                          "flux_ratio_scale": result.meta["flux_ratio_scale"]}
         mine = {r["method"]: r for r in rows if r["image"] == name}
         assert set(mine) == set(result.measurements)
         for method, measured in result.measurements.items():
@@ -51,16 +47,12 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
         assert np.isclose(float(between[method]["mean_of_means"]), means.mean())
         assert np.isclose(float(between[method]["three_sigma_pct"]), 300 * means.std(ddof=1) / means.mean())
     page = (out / "index.html").read_text(encoding="utf-8")
-    assert "Between images" in page and "calibrated once, on a scan.png" in page
+    assert "Between images" in page and "half_area" in page
     assert "a_scan" in page and "broken.png" in page and "failed:" in page
     assert (out / "data" / "a_scan.js").read_text(encoding="utf-8").startswith('window.CD_DATA["a_scan"]=')
     assert (out / "images" / "b.png").exists()
     assert set(load_cd_results(out / "results" / "b").measurements) == set(result.measurements)
-    # disk's spread expected from noise alone is the median of its per-hole fit uncertainty.
-    disk = result.measurements["disk"]
-    assert np.isclose(float(mine["disk"]["noise_sigma"]),
-                      np.nanmedian(disk.metrics["cd_uncertainty_px"][disk.valid]) * 21.0)
-    # Hole details of image b: the cleaned cell within one 8-bit step, projection's sums and disk's input exact.
+    # Hole details of image b: the cleaned cell within one 8-bit step, projection's sums exact, half_area's numbers.
     detail = _load_js(out / "data" / "b.detail.js", "CD_DETAIL")
     h, w = detail["h"], detail["w"]
     codes = _array(detail["clean"]["codes"], np.uint8).reshape(-1, h, w)
@@ -70,8 +62,12 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
     assert np.all(np.abs(cells - result.rois)[result.masks] <= 0.51 * np.repeat(step, h * w).reshape(-1, h, w)[result.masks] + 1e-4)
     np.testing.assert_allclose(_array(detail["prof_x"], np.float32).reshape(-1, w),
                                np.where(result.masks, result.rois, 0).sum(axis=1), rtol=1e-5, atol=1e-4)
-    np.testing.assert_array_equal(_array(detail["disk"]["codes"], np.uint8).reshape(-1, h, w) != 255,
-                                  np.isfinite(disk.inputs["cells"]))
+    half = result.measurements["half_area"]
+    for key, metric in (("level", "local_level"), ("peak", "peak_signal"), ("threshold", "threshold")):
+        np.testing.assert_allclose(_array(detail["half"][key], np.float32), half.metrics[metric], rtol=1e-6)
+    rays = _array(detail["half"]["rays"], np.uint8).reshape(len(half.valid), -1) / 16
+    ok = half.valid
+    np.testing.assert_allclose(rays[ok], half.geometry["edge_px"][ok][:, ::4], atol=1 / 32 + 1e-6)
     # One colour range per map layer, shared by the images: 2nd-98th percentile of both images' CDs together.
     page_ranges = json.loads(page.split("RANGES=")[1].split(", $=")[0])
     pooled = np.concatenate([r.measurements["projection"].metrics["cd_y_px"][r.measurements["projection"].valid]
@@ -90,7 +86,7 @@ def _load_js(path, name):
     return json.loads(text[text.index("]=") + 2:].rstrip().rstrip(";"))
 
 
-def test_without_a_blur_the_hole_fit_methods_are_skipped(tmp_path):
+def test_default_report_runs_the_three_shape_free_methods_without_inputs(tmp_path):
     from PIL import Image
     from scripts.cd_report import main
 
@@ -100,7 +96,6 @@ def test_without_a_blur_the_hole_fit_methods_are_skipped(tmp_path):
     main([str(tmp_path / "in"), "--output", str(tmp_path / "out"), "--backend", "cpu", "--no-hole-details"])
     with (tmp_path / "out" / "summary.csv").open(encoding="utf-8") as handle:
         methods = {r["method"] for r in csv.DictReader(handle)}
-    assert methods == {"gaussian", "logquad", "gradient", "halfmax", "projection"}
-    assert "skipped" in (tmp_path / "out" / "index.html").read_text(encoding="utf-8")
+    assert methods == {"gaussian", "projection", "half_area"}
     assert not (tmp_path / "out" / "results").exists()
     assert not (tmp_path / "out" / "data" / "x.detail.js").exists()

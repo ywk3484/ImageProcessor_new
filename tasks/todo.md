@@ -164,3 +164,24 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
 - Found: console print of "–" crashed on cp949 consoles (single image → NaN between-image values); fixed (`_plain`).
 - Full size (99.7k holes, GPU): 79-89 s; data 14.7 MB + detail 65 MB; tab 0.25 s, first click 0.5 s, next 3 ms.
 - Suite: 183 passed, same 9 pre-existing failures.
+
+# Shape-free half_area method, faster report (2026-10-19)
+
+- [x] Diagnose the lopsided projection profiles (spline exists; edges come from ~2 dots per side: sampling phase, ragged cell, noise)
+- [x] Compare shape-free, pulse-invariant size measures on mixed rotated shapes (circles, rectangles, triangles, L, blobs)
+- [x] New method `half_area` (local level = median of the cell's outer ring; 4x cubic zoom; region connected to the peak above b + 0.5 x height; CD = 2 sqrt(area/pi))
+- [x] Projection spline and half_area run on NumPy or CuPy (spline / zoom as fixed matrices, flood fill instead of labelling)
+- [x] Report: only gaussian, projection, half_area; disk/flux_ratio/logquad/gradient/halfmax and their inputs/panels removed
+- [x] Tests, planted-cause band check, browser check, full-size timing
+
+## Review
+- Rejected on the way (user): a round-hole profile fit and anything built on the disk fit or needing psf/nominal CD.
+- Benchmark (210x210 px, mixed shapes, 5 % pulse lighting feature and surroundings), per-feature error in % of size:
+  70 nm blur projection 9.9 / half_area 3.4; 90 nm blur 12.5 / 5.8. Pulse leak half_area 0.01 / 0.03.
+  +20 % global light: +0.11 / +0.20 %. +2 % true size reads +1.7 / +1.0 % (half the real change at 90 nm blur).
+- GPU and CPU results identical (projection exact; half_area CDs and contours equal).
+- Planted causes (band = 10 px rows, spread in nm): half_area none 0.44, line light 2.0, real CD bands 1.9;
+  sub-pixel R^2 at chance (not pixel-locked). projection_y still singles out line-wise light (10.3).
+- Full size (99.7k features, 2048x5408): report 10.8-11.5 s per image on GPU (was 79-89 s); half_area alone
+  2.2 s GPU / 17.5 s CPU; data 7.2 MB + detail 45 MB per image.
+- Suite: 187 passed, 1 skipped, same 9 pre-existing failures.
