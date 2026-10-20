@@ -29,9 +29,9 @@ cannot change, or cancel it:
     outstanding pixel cannot set the threshold.
 ``tail_area``
     The same area count with a low threshold, near the background, on a
-    wider window: the image minus the background map and every other hole's
-    model, ``tail_window`` pitches around the hole, so the region may extend
-    past the hole's cell. Local level = median of the hole's own territory
+    wider window, ``tail_window`` pitches around the hole, holding the hole's
+    own share of the light (each pixel shared among the holes in proportion
+    to their fitted models), so the region may extend past the hole's cell. Local level = median of the hole's own territory
     beyond 0.6 pitch (the corners farthest from every hole, where its tail has
     faded); averaged peak; threshold at ``tail_area_level`` of the height.
     The peak's noise enters the threshold only with that weight, and the dim
@@ -521,8 +521,10 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
 def _wide_cells(signal: np.ndarray, state, masks: np.ndarray, origins: np.ndarray, report: np.ndarray,
                 pitch: float, radius_pitches: float, xp=np):
     """Each reported hole on a square window of half-width ``radius_pitches`` x ``pitch`` around its fitted centre,
-    cut from the image minus the background map and every other hole's model (its own model added back, so the
-    window holds its light alone), so its region may extend past its cell. Returns (cells, inside the image,
+    holding its own share of the light, so its region may extend past its cell: the image minus the background
+    map, each pixel shared among the holes in proportion to their fitted models there (own model / sum of all).
+    Near a neighbour's centre the neighbour's share is ~all however well its model fits, so a misfit (big, square
+    or ringing spots) leaves no bright leftover for the region to spill into. Returns (cells, inside the image,
     level pixels, window origins): the level pixels are the hole's own territory (closer to it than to any other
     hole) at least 0.6 pitch from it, the darkest place where its own tail has faded."""
     from scipy.spatial import cKDTree
@@ -541,7 +543,10 @@ def _wide_cells(signal: np.ndarray, state, masks: np.ndarray, origins: np.ndarra
     k = min(9, n_all)
     neighbours = cKDTree(centers_all).query(centers, k=k)[1].reshape(len(centers), k)
     neighbours[:, 0] = rows_rep  # itself first, even when two holes share a centre
-    residual = xp.asarray(signal - state.background_map - state.model_image)
+    data = xp.asarray(signal - state.background_map)
+    model = xp.asarray(state.model_image)
+    good_amp = params[np.isfinite(params).all(axis=1), 0]
+    floor = 1e-3 * float(np.median(good_amp)) if good_amp.size else 1e-12
     height, width = signal.shape
     n = len(rows_rep)
     cells = np.zeros((n, size, size), np.float32)
@@ -554,7 +559,8 @@ def _wide_cells(signal: np.ndarray, state, masks: np.ndarray, origins: np.ndarra
         ys = o[:, 1, None] + offsets[None]
         xs = o[:, 0, None] + offsets[None]
         inside = ((ys >= 0) & (ys < height))[:, :, None] & ((xs >= 0) & (xs < width))[:, None, :]
-        win = residual[xp.clip(ys, 0, height - 1)[:, :, None], xp.clip(xs, 0, width - 1)[:, None, :]]
+        pick = (xp.clip(ys, 0, height - 1)[:, :, None], xp.clip(xs, 0, width - 1)[:, None, :])
+        win, total = data[pick], model[pick]
         gp = xp.asarray(params[rows_rep[sl]])
         good = xp.isfinite(gp).all(axis=1)
         gp = xp.where(good[:, None], gp, 0.0)
@@ -571,7 +577,9 @@ def _wide_cells(signal: np.ndarray, state, masks: np.ndarray, origins: np.ndarra
         dist = xp.sqrt((gx[:, None] - near[:, :, 0, None, None]) ** 2 + (gy[:, None] - near[:, :, 1, None, None]) ** 2)
         mine = dist[:, 0] <= dist[:, 1:].min(axis=1) if k > 1 else xp.ones_like(dist[:, 0], dtype=bool)
         level = inside & mine & (dist[:, 0] >= 0.6 * pitch)
-        cells[sl] = _to_numpy(xp.where(inside, win + own, 0.0)).astype(np.float32)
+        # Each pixel's light is shared among the holes in proportion to their models there: near a neighbour's
+        # centre its share is ~all, however well its model fits, so a misfit leaves no bright leftover to spill into.
+        cells[sl] = _to_numpy(xp.where(inside, win * own / (total + floor), 0.0)).astype(np.float32)
         inside_all[sl] = _to_numpy(inside)
         level_all[sl] = _to_numpy(level)
     return cells, inside_all, level_all, win_origins.astype(float)
@@ -582,7 +590,7 @@ def measure_invariant(
     methods: tuple[str, ...], n_angles: int, psf_fwhm_px: float | None = None,
     nominal_cd_px: float | None = None, dark_level: float = 0.0, flux_ratio_scale: float | None = None,
     rounds: int = 2, half_area_level: float = 0.5, half_area_peak_pixels: float = 4.0, tail_area_level: float = 0.2,
-    tail_window: float = 0.8, pitch_px: float | None = None, xp=np,
+    tail_window: float = 1.2, pitch_px: float | None = None, xp=np,
 ) -> tuple[dict[str, CDMethodResult], dict]:
     """Pulse-invariant methods for the reported cells of a converged ``deblend`` state.
 
@@ -612,6 +620,12 @@ def measure_invariant(
         cells, inside, level_masks, win_origins = _wide_cells(signal, state, masks, origins, report, pitch, tail_window, xp=xp)
         found["tail_area"] = _half_area(cells, inside, win_origins, n_angles, level=tail_area_level, background="median",
                                         peak_pixels=half_area_peak_pixels, name="tail_area", level_masks=level_masks, xp=xp)
+        # For display: the middle of each window (where the region is), cut to 0.75 pitch around the hole.
+        keep = min(cells.shape[1] // 2, int(np.ceil(0.75 * pitch)))
+        middle = cells.shape[1] // 2
+        cut = slice(middle - keep, middle + keep + 1)
+        found["tail_area"].inputs.update(cells=cells[:, cut, cut], inside=inside[:, cut, cut],
+                                         origins=win_origins + (middle - keep))
         # Positions relative to the hole's own cell, as the other methods (saved results rebuild contours from them).
         local = found["tail_area"].centers_xy - origins[report]
         found["tail_area"].geometry["center_local"][:] = np.where(np.isfinite(local), local, np.nan)

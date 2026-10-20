@@ -110,6 +110,11 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
         np.testing.assert_allclose(codes[finite] * rays["unit"], expected[finite], atol=rays["unit"] / 2 + 1e-6)
     tail = result.measurements["tail_area"]
     np.testing.assert_allclose(contour_rays(tail)[tail.valid], tail.geometry["edge_px"][tail.valid][:, ::4])
+    # tail_area's wider windows for its panel: the middle 1.5 pitches of each, larger than the ordinary cell.
+    wide = _load_js(out / "data" / "b.tail.js", "CD_TAIL")
+    assert wide["h"] == wide["w"] == tail.inputs["cells"].shape[1] and wide["h"] > 0
+    np.testing.assert_array_equal(_array(wide["ox"], np.int32), tail.inputs["origins"][:, 0])
+    assert _array(wide["cells"]["codes"], np.uint8).size == len(tail.valid) * wide["h"] * wide["w"]
     np.testing.assert_allclose(page_ranges["half_area_min_x"], np.quantile(np.concatenate(
         [r.measurements["half_area_min"].metrics["cd_x_px"][r.measurements["half_area_min"].valid]
          for r in results.values()]), [0.02, 0.98]))

@@ -342,7 +342,7 @@ def test_tail_area_reads_the_width_near_the_background_and_its_mean_signal_follo
     np.testing.assert_allclose(lit.metrics["mean_signal"], 3.0 * tail.metrics["mean_signal"], rtol=1e-9)
 
 
-def test_wide_cells_hold_each_hole_alone_and_level_pixels_far_from_every_hole():
+def test_wide_cells_hold_each_holes_share_of_the_light_and_level_pixels_far_from_every_hole():
     from types import SimpleNamespace
     from subpx._cpu.deblend import render_models
     from subpx._cpu.invariant_cd import _wide_cells
@@ -364,9 +364,17 @@ def test_wide_cells_hold_each_hole_alone_and_level_pixels_far_from_every_hole():
     cells, inside, level, win_origins = _wide_cells(signal, state, masks, origins, np.array([1]), 10.0, 0.8)
     assert cells.shape == (1, 17, 17) and inside.all()
     np.testing.assert_array_equal(win_origins[0], [25 - 8, 15 - 8])
-    # The middle spot alone: its neighbours and the background removed, its own light intact.
+    # The middle spot alone: the background removed and each pixel's light shared by the models, so with exact
+    # models its own light (up to the small floor that keeps empty pixels at zero).
     own = render_models(global_params[1:2], shape, radius_cap=12)
-    np.testing.assert_allclose(cells[0], own[7:24, 17:34], atol=1e-4)
+    np.testing.assert_allclose(cells[0], own[7:24, 17:34], atol=2e-3 * 60)
+    # A neighbour 30 % brighter than its model: subtracting the model would leave 30 % of its peak at its centre;
+    # sharing leaves this hole only its tiny share there.
+    misfit = background + model + 0.3 * render_models(global_params[2:3], shape, radius_cap=12)
+    shared = _wide_cells(misfit, state, masks, origins, np.array([1]), 10.0, 1.2)[0][0]  # 25 x 25 from (13, 3)
+    neighbour = (15 - 3, 35 - 13)  # its centre in the window
+    assert shared[neighbour] < 0.01 * 80
+    np.testing.assert_allclose(shared[12, 12], cells[0][8, 8], rtol=0.01)  # its own centre: unchanged
     # Level pixels: its own territory (closer to it than to either neighbour) at least 0.6 pitch = 6 px from it.
     gx, gy = xx[7:24, 17:34], yy[7:24, 17:34]
     cx, cy = global_params[1, 1:3]

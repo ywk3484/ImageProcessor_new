@@ -226,3 +226,18 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
   each hole's surroundings lit by its own pulse as a sharp patch; ~0.02 without that patch.
 - Full size GPU: 17 s per image; outline files 4 MB per method per image, loaded on demand.
 - Suite: 194 passed, 1 skipped, same 9 pre-existing failures.
+
+# tail_area: light sharing instead of neighbour subtraction (2026-10-20)
+- [x] Cause of mass failure (reproduced): subtracting Gaussian neighbour models leaves 40-80 % of a neighbour's peak
+      for big / square spots; at a low threshold the region spills over it to the window edge
+- [x] Tried a learned spot shape (empirical PSF): no better; on a regular array the split of light between
+      neighbours is not determined by the image (any shape needs an assumption)
+- [x] Fix: each pixel's light shared among holes in proportion to their models; window 1.2 pitch half-width
+- [x] Panel shows the wider window with the ordinary cell dashed
+
+## Review
+- Stress set, level 0.2, share measured (subtract -> share, window 0.8 -> 1.2): mixed 150 nm 62 % -> 100 %,
+  squares 150 nm 56 % -> 97 %, mixed 100 nm blur 130 nm 94 % -> 100 %, mixed 100 nm 100 %.
+- Pulse leak ~0.02 without per-hole lit patches; 0.23 with the synthetic sharp lit patches.
+- Full size GPU: 21 s per image; tail window file 39 MB per image (loaded on opening its panel).
+- Suite: 194 passed, 1 skipped, same 9 pre-existing failures.

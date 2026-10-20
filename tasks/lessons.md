@@ -50,3 +50,6 @@
   threshold was a guess; the measured cause was the feature's own tail being wider than its cell (Voronoi
   cell clipped to box + pad) and the edge-based local level holding that tail. Diagnose (e.g. render each
   feature alone, noiseless) before explaining a failure rate.
+- **Test on harder synthetic patterns before shipping a method.** The wide tail_area passed on 100 nm round-ish
+  features but failed on the user's patterns; bigger or square features (Gaussian neighbour models misfit) made
+  almost all fail. Run the stress set (bigger, squares, more blur) and check the share measured, not just error.

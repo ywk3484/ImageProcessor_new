@@ -60,7 +60,7 @@ def measure_cds(
     half_area_level: float = 0.5,
     half_area_peak_pixels: float = 4.0,
     tail_area_level: float = 0.2,
-    tail_window: float = 0.8,
+    tail_window: float = 1.2,
 ) -> CDResult:
     """Extract Voronoi cells and measure their contours and critical dimensions.
 
@@ -95,9 +95,10 @@ def measure_cds(
         peak as the mean of the brightest ``half_area_peak_pixels`` pixels'
         worth of the enlarged cell, so one outstanding pixel cannot set it.
         ``tail_area`` uses a low threshold near the background instead, on a
-        wider window (``tail_window`` pitches around the hole) of the image
-        minus the background map and every other hole's model, so its region
-        may extend past the hole's cell: b = median of the hole's own
+        wider window (``tail_window`` pitches around the hole) holding the
+        hole's share of the light (image minus the background map, each pixel
+        shared among the holes in proportion to their fitted models), so its
+        region may extend past the hole's cell: b = median of the hole's own
         territory beyond 0.6 pitch, averaged peak, threshold b +
         ``tail_area_level`` x the height. Its metric ``mean_signal`` is the
         mean light above b over the region.
@@ -299,7 +300,7 @@ def _measure_cds(
     smooth_sigma, fit_fraction, peak_min_distance, background_level, background_tile, deblend_iterations,
     pixel_size, unit, backend, cell_backend, device, nominal_cd=None, psf_fwhm=None, dark_level=0.0,
     flux_ratio_scale=None, half_area_level=0.5, half_area_peak_pixels=4.0, tail_area_level=0.2,
-    tail_window=0.8,
+    tail_window=1.2,
 ) -> CDResult:
     from ._cpu.centers import _segment_binary
     from ._cpu.components import connected_components_stats_cpu
@@ -757,7 +758,7 @@ def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[s
             "half_area": "Cell enlarged 4x (cubic spline, scipy.ndimage.zoom order 3) after subtracting its local level b (median of the cell's outermost pixels); region = pixels connected to the peak and above half_area_level x peak height (above b); cd_equivalent = 2 sqrt(region area / pi); cd_x/cd_y = x/y diameters of the ellipse with the region's area and x/y second moments (cd_x * cd_y = cd_equivalent^2); contour = the region's last pixel along rays from its centroid (display only); no shape assumed.",
             "half_area_min": "As half_area, with the local level b = the minimum (not the median) of the cell's outermost pixels.",
             "half_area_min_avg": "As half_area_min, with the peak = mean of the brightest enlarged pixels covering half_area_peak_pixels original pixels (not the single highest).",
-            "tail_area": "On a window of tail_window pitches around the hole (image minus the background map and every other hole's model; the region may extend past the cell): b = median of the hole's own territory beyond 0.6 pitch, averaged peak as half_area_min_avg, threshold at tail_area_level of the height above b; mean_signal = mean of the enlarged cell above b over the region (the cell intensity).",
+            "tail_area": "On a window of tail_window pitches around the hole holding its share of the light (image minus the background map, each pixel shared among the holes in proportion to their fitted models; the region may extend past the cell): b = median of the hole's own territory beyond 0.6 pitch, averaged peak as half_area_min_avg, threshold at tail_area_level of the height above b; mean_signal = mean of the enlarged cell above b over the region (the cell intensity).",
             "cd_equivalent": "2 sqrt(contour_area / pi); analytic ellipse area for logquad, polygon area otherwise.",
             "cd_x_cd_y": "Axis-aligned contour extents; analytic ellipse projections for logquad.",
             "failed_cells": "Retained with valid=False, status, and NaN geometric metrics; candidate/partial contours may remain for diagnosis.",

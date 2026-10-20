@@ -249,6 +249,16 @@ def _quantize(cells: np.ndarray, inside: np.ndarray) -> dict:
     return {"codes": _b64(codes, "u1"), "lo": _b64(lo, "<f4"), "step": _b64(step, "<f4")}
 
 
+def tail_detail(result) -> dict | None:
+    """tail_area's wider windows (each hole's share of the light, the middle 1.5 pitches), 8-bit, for its panel."""
+    measured = result.measurements.get("tail_area")
+    if measured is None or "cells" not in measured.inputs:
+        return None
+    cells, inside, origins = measured.inputs["cells"], measured.inputs["inside"], measured.inputs["origins"]
+    return {"h": int(cells.shape[1]), "w": int(cells.shape[2]), "ox": _b64(origins[:, 0], "<i4"),
+            "oy": _b64(origins[:, 1], "<i4"), "cells": _quantize(cells, inside)}
+
+
 def detail_data(result) -> dict:
     """What each method measured each hole on, for the click panel.
 
@@ -439,7 +449,7 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
             .replace("__PANELS__", panels)
             .replace("__NOTES__", "".join(f"<p class='note'>{html.escape(n)}</p>" for n in notes))
             .replace("__ENTRIES__", json.dumps({e["id"]: {"name": e["name"], "image": e["image"], "data": e["data"],
-                                                          "detail": e.get("detail")}
+                                                          "detail": e.get("detail"), "tail": e.get("tail")}
                                                 for e in entries if not e.get("error")}))
             .replace("__RANGES__", json.dumps(ranges or {}))
             .replace("__COLORS__", json.dumps(COLORS)))
@@ -487,7 +497,7 @@ def main(argv=None) -> None:
     parser.add_argument("--tail-level", type=float, default=0.2,
                         help="tail_area: fraction of the height above the local level that bounds the region "
                              "(low = near the background)")
-    parser.add_argument("--tail-window", type=float, default=0.8,
+    parser.add_argument("--tail-window", type=float, default=1.2,
                         help="tail_area: half-width of its window around each hole, in pitches (0.5 to 2)")
     parser.add_argument("--pixel-size", type=float, default=1.0)
     parser.add_argument("--unit", default="px")
@@ -552,17 +562,22 @@ def main(argv=None) -> None:
             (output / "data" / f"{ident}.{name}.rays.js").write_text(
                 f"window.CD_RAYS[{json.dumps(ident + '/' + name)}]=" + json.dumps(rays_data(result, name)) + ";\n",
                 encoding="utf-8")
-        detail = None
+        detail = tail = None
         if not args.no_hole_details:
             detail = f"data/{ident}.detail.js"
             (output / detail).write_text(f"window.CD_DETAIL[{json.dumps(ident)}]="
                                          + json.dumps(detail_data(result), allow_nan=False) + ";\n",
                                          encoding="utf-8")
+            wide = tail_detail(result)
+            if wide is not None:
+                tail = f"data/{ident}.tail.js"
+                (output / tail).write_text(f"window.CD_TAIL[{json.dumps(ident)}]=" + json.dumps(wide) + ";\n",
+                                           encoding="utf-8")
         if args.save_results:
             save_cd_results(result, output / "results" / ident, compact=True)
         entries.append({"id": ident, "name": path.name, "holes": len(result.seeds_xy), "stats": stats,
                         "width": image.shape[1], "height": image.shape[0], "seconds": seconds,
-                        "image": f"images/{ident}.png", "data": f"data/{ident}.js", "detail": detail,
+                        "image": f"images/{ident}.png", "data": f"data/{ident}.js", "detail": detail, "tail": tail,
                         "agreement": agreement(result), "intensity": intensity})
         for method, s in stats.items():
             rows.append({"image": path.name, "status": "ok", "method": method, "holes": len(result.seeds_xy), **s,
@@ -671,7 +686,7 @@ __NOTES__ __SUMMARY__<h2>Methods</h2><ul class="legend">__LEGEND__</ul></section
 __PANELS__
 </main>
 <script>
-window.CD_DATA={};window.CD_DETAIL={};window.CD_RAYS={};
+window.CD_DATA={};window.CD_DETAIL={};window.CD_RAYS={};window.CD_TAIL={};
 const ENTRIES=__ENTRIES__, COLORS=__COLORS__, RANGES=__RANGES__, $=id=>document.getElementById(id);
 const HINT="<p class='meta'>Click a hole to see how the selected method measured it.</p>";
 const VIRIDIS=[[68,1,84],[72,40,120],[62,74,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[110,206,88],[181,222,43],[253,231,37]];
@@ -821,6 +836,15 @@ function bandPlot(){if(!cur)return;const k=$("method").value,ax=$("axis").value,
 
 // ---- hole detail ----
 let detailLoading=null;
+function loadTail(id){const s=document.createElement("script");s.src=ENTRIES[id].tail;
+  s.onload=()=>{if(curId===id&&sel>=0)renderDetail();};document.body.appendChild(s);}
+// Dashed line along the edge of the hole's ordinary cell, shifted into another window by (dx, dy).
+function cellLine(D,i,dx,dy){const n=D.h*D.w,c=D.clean.codes,inC=(r,q)=>r>=0&&q>=0&&r<D.h&&q<D.w&&c[i*n+r*D.w+q]!==255;
+  return(g,s)=>{g.save();g.setLineDash([4,3]);g.strokeStyle="#7fd3ff";g.lineWidth=1.5;g.beginPath();
+    for(let r=0;r<D.h;r++)for(let q=0;q<D.w;q++){if(!inC(r,q))continue;const x=(q+dx)*s,y=(r+dy)*s;
+      if(!inC(r-1,q)){g.moveTo(x,y);g.lineTo(x+s,y);}if(!inC(r+1,q)){g.moveTo(x,y+s);g.lineTo(x+s,y+s);}
+      if(!inC(r,q-1)){g.moveTo(x,y);g.lineTo(x,y+s);}if(!inC(r,q+1)){g.moveTo(x+s,y);g.lineTo(x+s,y+s);}}
+    g.stroke();g.restore();};}
 function loadDetail(id){if(detailLoading===id)return;detailLoading=id;const s=document.createElement("script");s.src=ENTRIES[id].detail;
   s.onload=()=>{detailLoading=null;if(curId===id&&sel>=0)renderDetail();};
   s.onerror=()=>{detailLoading=null;$("detail").insertAdjacentHTML("beforeend",`<p class='error'>Could not load ${ENTRIES[id].detail}</p>`);};document.body.appendChild(s);}
@@ -862,19 +886,25 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
       <canvas class="plot" id="pp-y-v" style="height:150px"></canvas><canvas class="plot" id="pp-y-s" style="height:90px"></canvas>`;
     $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(pcx,pcy,px/2,py/2,"#e03b3b"));
     profilePlots("pp-x",X,[pcx-px/2,pcx+px/2],"x profile (column sums)");profilePlots("pp-y",Y,[pcy-py/2,pcy+py/2],"y profile (row sums)");return;}
-  if(D.half&&D.half[base]){const F=D.half[base],vals=cellValues(D,D.clean,i),b=F.level[i],pk=F.peak[i],t=F.threshold[i],hx=F.cx[i],hy=F.cy[i];
+  if(D.half&&D.half[base]){const F=D.half[base],b=F.level[i],pk=F.peak[i],t=F.threshold[i];let G=D,vals=cellValues(D,D.clean,i),hx=F.cx[i],hy=F.cy[i],old=null;
+    if(base==="tail_area"&&ENTRIES[curId].tail){const T=window.CD_TAIL[curId];
+      if(!T){$("detail").innerHTML=out+"<p class='meta'>Loading the wider window…</p>";loadTail(curId);return;}
+      if(!T.ready){T.ox=unpack(T.ox,Int32Array);T.oy=unpack(T.oy,Int32Array);const C=T.cells;C.codes=unpack(C.codes,Uint8Array);
+        C.lo=unpack(C.lo,Float32Array);C.step=unpack(C.step,Float32Array);T.ready=true;}
+      const dx=D.ox[i]-T.ox[i],dy=D.oy[i]-T.oy[i];G=T;vals=cellValues(T,T.cells,i);hx+=dx;hy+=dy;old=cellLine(D,i,dx,dy);}
     const above=vals.map(v=>fin(v)?(v>t?1:-1):NaN),nr=F.n_rays,pts=[];
     for(let r=0;r<nr;r++){const a=2*Math.PI*r/nr,q=F.rays[i*nr+r]/16;pts.push([hx+q*Math.cos(a),hy+q*Math.sin(a)]);}
-    const poly=(g,s)=>{if(!fin(hx))return;g.strokeStyle=COLORS[base];g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
+    const poly=(g,s)=>{if(old)old(g,s);if(!fin(hx))return;g.strokeStyle=COLORS[base];g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
+    const wideNote=old?"<p class='meta'>Shown: the wider window this method measures on, holding this hole's share of the light (each pixel's light shared among the holes in proportion to their fitted models). Dashed: the hole's ordinary cell, which the other methods are limited to; the region may reach past it.</p>":"";
     out+=`<h3>${base}</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the ${F.background}; its peak is the ${F.peak_rule}. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold b + ${F.level_fraction} × (peak − b). CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
-      <div class="cells"><figure><canvas id="dc-a"></canvas>cell and region outline</figure><figure><canvas id="dc-b"></canvas>original pixels above the threshold (red)</figure></div>
+      ${wideNote}<div class="cells"><figure><canvas id="dc-a"></canvas>${old?"wider window":"cell"} and region outline</figure><figure><canvas id="dc-b"></canvas>original pixels above the threshold (red)</figure></div>
       <table><tr><td>local level b</td><td>${fin(b)?b.toPrecision(4):"–"}</td></tr><tr><td>peak height above b (${F.peak_rule})</td><td>${fin(pk)?pk.toPrecision(4):"–"}</td></tr>
       <tr><td>threshold = b + ${F.level_fraction} × height</td><td>${fin(t)?t.toPrecision(4):"–"}</td></tr>
       <tr><td>mean light above b in the region${base==="tail_area"?" (cell intensity)":""}</td><td>${fin(F.mean[i])?F.mean[i].toPrecision(4):"–"}</td></tr>
       <tr><td>region area</td><td>${fin(cdv)?(Math.PI*cdv*cdv/4).toFixed(2)+" px²":"–"}</td></tr>
       <tr><td>CD = 2 √(area / π)</td><td>${fin(cdv)?cdv.toFixed(3)+" px = "+(cdv*cur.scale).toFixed(2)+" "+cur.unit:"–"}</td></tr></table>
       <p class="meta">The outline is drawn from 32 directions around the region's centre, so it is approximate for very irregular shapes; the area itself is counted pixel by pixel on the enlarged cell.</p>`;
-    $("detail").innerHTML=out;drawCell("dc-a",D,vals,poly);drawCell("dc-b",D,above,poly,true);return;}
+    $("detail").innerHTML=out;drawCell("dc-a",G,vals,poly);drawCell("dc-b",G,above,poly,true);return;}
   const vals=cellValues(D,D.clean,i);
   out+=`<h3>${k}</h3><p class="explain">The cell this method measured (background and neighbours removed; dark pixels are outside the cell), with its outline at the CD.</p><div class="cells"><figure><canvas id="dc-a"></canvas>cell and outline</figure></div>`;
   $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(cx,cy,cdv/2,cdv/2,COLORS[k]||"#e03b3b"));}
