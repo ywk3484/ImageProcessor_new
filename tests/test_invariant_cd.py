@@ -235,7 +235,8 @@ def shaped():
     def run(**kw):
         image, centers, d, a = _shape_lattice(**kw)
         result = measure_cds(image, methods=("projection", "half_area", "half_area_min", "half_area_min_avg",
-                                             "tail_area", "tail_area_norm"), area_max=300, tail_area_level=0.1)
+                                             "tail_area", "tail_area_norm", "edge_area"), area_max=300,
+                             tail_area_level=0.1)
         return result, _matched(result, centers, d, a)
     return run(), run(gain=1.2), run(grow=1.05)
 
@@ -261,7 +262,7 @@ def test_half_area_and_projection_agree_between_cpu_and_gpu(shaped):
     if cp is None:
         pytest.skip("CuPy not available")
     result, _ = shaped[0]
-    names = ("projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area", "tail_area_norm")
+    names = ("projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area", "tail_area_norm", "edge_area")
     gpu = measure_cds(result.image, methods=names, area_max=300, backend="gpu", tail_area_level=0.1)
     for name in names:
         np.testing.assert_array_equal(gpu.measurements[name].status, result.measurements[name].status)
@@ -449,3 +450,43 @@ def test_tail_area_norm_measures_the_shaped_lattice(shaped):
     _, scatter_projection, _ = _fit_against_truth(projection.metrics["cd_equivalent_px"], truth, pulse,
                                                   use & projection.valid)
     assert scatter < scatter_projection
+
+
+def test_edge_area_threshold_ignores_the_peak_scale_and_offset():
+    from subpx._cpu.invariant_cd import _half_area
+
+    # A flat-topped spot (a blurred square) and the same spot with a 30 % brighter top: the bright-top fluctuation
+    # moves a peak-based threshold, not the steepness-weighted one.
+    y, x = np.mgrid[:31, :31]
+    edge = lambda u: 0.5 * (1 + np.tanh(u / 1.2))
+    spot = edge(5 - np.abs(x - 15.0)) * edge(5 - np.abs(y - 15.0))
+    top = np.exp(-((x - 15.0) ** 2 + (y - 15.0) ** 2) / (2 * 1.5 ** 2))
+    cells = np.stack([spot, spot * (1 + 0.3 * top)])
+    masks = np.ones(cells.shape, bool)
+    origins = np.zeros((2, 2))
+    edge_kw = dict(background="edge", peak_pixels=4.0, name="edge_area")
+    found = _half_area(cells, masks, origins, 64, **edge_kw)
+    assert found.method == "edge_area" and list(found.status) == ["ok", "ok"]
+    np.testing.assert_array_equal(found.metrics["local_level"], 0.0)
+    # Where the light falls fastest: half of the plateau, the edge of the square.
+    assert abs(found.metrics["threshold"][0] - 0.5) < 0.08  # the corners pull it a little lower
+    assert abs(found.metrics["cd_equivalent_px"][0] - 2 * 10 / np.sqrt(np.pi)) < 0.3
+    norm = _half_area(cells, masks, origins, 64, level=0.5, background="zero", peak_pixels=4.0, name="tail_area_norm")
+    moved = lambda r: abs(r.metrics["cd_equivalent_px"][1] / r.metrics["cd_equivalent_px"][0] - 1)
+    assert moved(found) < 0.4 * moved(norm)
+    # A pulse (scale) and a pedestal (offset) move the threshold with the light: the same area.
+    for changed in (2.5 * cells, cells + 0.2):
+        again = _half_area(changed, masks, origins, 64, **edge_kw)
+        np.testing.assert_allclose(again.metrics["cd_equivalent_px"], found.metrics["cd_equivalent_px"], rtol=1e-9)
+
+
+def test_edge_area_measures_the_shaped_lattice(shaped):
+    (result, (use, truth, pulse)), (bright, (use_b, *_)), _ = shaped
+    edge, projection = result.measurements["edge_area"], result.measurements["projection"]
+    assert edge.valid[use].mean() > 0.99
+    _, scatter, sensitivity = _fit_against_truth(edge.metrics["cd_equivalent_px"], truth, pulse, use & edge.valid)
+    _, scatter_projection, _ = _fit_against_truth(projection.metrics["cd_equivalent_px"], truth, pulse,
+                                                  use & projection.valid)
+    assert scatter < scatter_projection and abs(sensitivity) < 0.2
+    mean = np.nanmean(edge.metrics["cd_equivalent_px"][use])
+    assert abs(np.nanmean(bright.measurements["edge_area"].metrics["cd_equivalent_px"][use_b]) / mean - 1) < 0.01

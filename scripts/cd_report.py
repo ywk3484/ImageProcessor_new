@@ -9,7 +9,8 @@ mean of the brightest pixels, --peak-pixels of them) and tail_area (the same are
 near the background, --tail-level of the height, default 0.2, measured on a wider window of the image with the
 background and every other hole removed, so the region may extend past the hole's cell; local level = median of the
 hole's own area farthest from every hole) and tail_area_norm (the same window divided by the pattern's averaged
-peak, area where it exceeds --tail-level, no background step). None needs a blur or nominal CD. The cell intensity of each hole is tail_area's mean light above the local
+peak, area where it exceeds --tail-level, no background step) and edge_area (the same window, threshold = its mean
+brightness weighted by steepness: neither the peak nor a local level is used). None needs a blur or nominal CD. The cell intensity of each hole is tail_area's mean light above the local
 level over its region; it gets its own statistics, map, and correlation with every CD method. The other
 subpx methods (logquad, gradient, halfmax, disk, flux_ratio) are left out: they assume a round or star-shaped
 outline, or need the blur, and disk/flux_ratio dominated the run time. --backend auto (default) uses the GPU when
@@ -60,7 +61,7 @@ from subpx import measure_cds, save_cd_results
 from subpx.cd import METHOD_LABELS
 
 ALL_METHODS = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area",
-               "tail_area_norm")
+               "tail_area_norm", "edge_area")
 DESCRIPTIONS = {
     "gaussian": "FWHM of a 2-D Gaussian fitted to the spot (deblended). Describes the blurred spot, not the hole; "
                 "a brighter pulse can change it.",
@@ -82,6 +83,10 @@ DESCRIPTIONS = {
     "tail_area_norm": "Each pattern divided by its own averaged peak (as half_area_min_avg), then the area where the "
                       "normalized pattern is above --tail-level (default 0.2), on the same wider window as tail_area. "
                       "No background level is subtracted.",
+    "edge_area": "Area above the brightness where the pattern's light falls fastest, on the same wider window as "
+                 "tail_area: the threshold is the window's mean brightness with each pixel weighted by its "
+                 "steepness, so the flat bright top and the flat surroundings count for nothing. Uses neither the "
+                 "peak nor a background level.",
 }
 # The CD and the x / y widths: statistics key suffix, metric, label.
 AXES = (("", "cd_equivalent_px", "CD"), ("_x", "cd_x_px", "x"), ("_y", "cd_y_px", "y"))
@@ -256,7 +261,8 @@ def _quantize(cells: np.ndarray, inside: np.ndarray) -> dict:
 
 def tail_detail(result) -> dict | None:
     """tail_area's wider windows (each hole's share of the light, the middle 1.5 pitches), 8-bit, for its panel."""
-    measured = result.measurements.get("tail_area") or result.measurements.get("tail_area_norm")
+    measured = next((result.measurements[n] for n in ("tail_area", "tail_area_norm", "edge_area")
+                     if n in result.measurements), None)
     if measured is None or "cells" not in measured.inputs:
         return None
     cells, inside, origins = measured.inputs["cells"], measured.inputs["inside"], measured.inputs["origins"]
@@ -289,7 +295,8 @@ def detail_data(result) -> dict:
             ("half_area", f"median {edge}", "highest point"), ("half_area_min", f"minimum {edge}", "highest point"),
             ("half_area_min_avg", f"minimum {edge}", averaged), ("tail_area", corners, averaged),
             ("tail_area_norm", "zero: no background step; the pattern is divided by its peak and the area is where "
-             "it exceeds the level", averaged)):
+             "it exceeds the level", averaged),
+            ("edge_area", "zero: no background step", "not used (shown for comparison: " + averaged + ")")):
         if name not in result.measurements:
             continue
         measured = result.measurements[name]
@@ -303,6 +310,9 @@ def detail_data(result) -> dict:
                              "level_fraction": float(result.meta.get(
                                  "tail_area_level" if name.startswith("tail") else "half_area_level",
                                  0.2 if name.startswith("tail") else 0.5))}
+        if name == "edge_area":
+            out["half"][name]["threshold_rule"] = ("mean brightness of the window, each pixel weighted by its steepness "
+                                                   "(where the light falls fastest)")
     return out
 
 
@@ -358,7 +368,7 @@ def _agreement_table(names: list[str], r: np.ndarray) -> str:
 
 COLORS = {"gaussian": "#5bbf2a", "projection": "#7a7a7a", "projection_x": "#2b8cbe", "projection_y": "#e6550d",
           "half_area": "#d6338a", "half_area_min": "#8e44ad", "half_area_min_avg": "#d68910", "tail_area": "#138d75",
-          "tail_area_norm": "#2e86c1"}
+          "tail_area_norm": "#2e86c1", "edge_area": "#c0392b"}
 # x / y width layers: the method's colour, lighter for x and darker for y (projection keeps its own two).
 COLORS["cell_intensity"] = "#b8860b"
 for _name, _color in list(COLORS.items()):
@@ -896,7 +906,7 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
     $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(pcx,pcy,px/2,py/2,"#e03b3b"));
     profilePlots("pp-x",X,[pcx-px/2,pcx+px/2],"x profile (column sums)");profilePlots("pp-y",Y,[pcy-py/2,pcy+py/2],"y profile (row sums)");return;}
   if(D.half&&D.half[base]){const F=D.half[base],b=F.level[i],pk=F.peak[i],t=F.threshold[i];let G=D,vals=cellValues(D,D.clean,i),hx=F.cx[i],hy=F.cy[i],old=null;
-    if(base.startsWith("tail_area")&&ENTRIES[curId].tail){const T=window.CD_TAIL[curId];
+    if((base.startsWith("tail_area")||base==="edge_area")&&ENTRIES[curId].tail){const T=window.CD_TAIL[curId];
       if(!T){$("detail").innerHTML=out+"<p class='meta'>Loading the wider window…</p>";loadTail(curId);return;}
       if(!T.ready){T.ox=unpack(T.ox,Int32Array);T.oy=unpack(T.oy,Int32Array);const C=T.cells;C.codes=unpack(C.codes,Uint8Array);
         C.lo=unpack(C.lo,Float32Array);C.step=unpack(C.step,Float32Array);T.ready=true;}
@@ -905,10 +915,10 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
     for(let r=0;r<nr;r++){const a=2*Math.PI*r/nr,q=F.rays[i*nr+r]/16;pts.push([hx+q*Math.cos(a),hy+q*Math.sin(a)]);}
     const poly=(g,s)=>{if(old)old(g,s);if(!fin(hx))return;g.strokeStyle=COLORS[base];g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
     const wideNote=old?"<p class='meta'>Shown: the wider window this method measures on, holding this hole's share of the light (each pixel's light shared among the holes in proportion to their fitted models). Dashed: the hole's ordinary cell, which the other methods are limited to; the region may reach past it.</p>":"";
-    out+=`<h3>${base}</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the ${F.background}; its peak is the ${F.peak_rule}. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold b + ${F.level_fraction} × (peak − b). CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
+    out+=`<h3>${base}</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the ${F.background}; its peak is the ${F.peak_rule}. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold ${F.threshold_rule?"= the "+F.threshold_rule+"; the peak is not used":"b + "+F.level_fraction+" × (peak − b)"}. CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
       ${wideNote}<div class="cells"><figure><canvas id="dc-a"></canvas>${old?"wider window":"cell"} and region outline</figure><figure><canvas id="dc-b"></canvas>original pixels above the threshold (red)</figure></div>
       <table><tr><td>local level b</td><td>${fin(b)?b.toPrecision(4):"–"}</td></tr><tr><td>peak height above b (${F.peak_rule})</td><td>${fin(pk)?pk.toPrecision(4):"–"}</td></tr>
-      <tr><td>threshold = b + ${F.level_fraction} × height</td><td>${fin(t)?t.toPrecision(4):"–"}</td></tr>
+      <tr><td>threshold = ${F.threshold_rule?"steepness-weighted mean brightness":"b + "+F.level_fraction+" × height"}</td><td>${fin(t)?t.toPrecision(4):"–"}</td></tr>
       <tr><td>mean light above b in the region${base==="tail_area"?" (cell intensity)":""}</td><td>${fin(F.mean[i])?F.mean[i].toPrecision(4):"–"}</td></tr>
       <tr><td>region area</td><td>${fin(cdv)?(Math.PI*cdv*cdv/4).toFixed(2)+" px²":"–"}</td></tr>
       <tr><td>CD = 2 √(area / π)</td><td>${fin(cdv)?cdv.toFixed(3)+" px = "+(cdv*cur.scale).toFixed(2)+" "+cur.unit:"–"}</td></tr></table>

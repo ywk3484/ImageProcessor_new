@@ -57,3 +57,6 @@
   from "own territory beyond 0.6 pitch"; on a staggered array the territory ends at ~0.56 pitch, so the level was
   empty and almost every hole got no value. examples/data/synthetic_ch (staggered) reproduces it in seconds.
   Define per-hole regions relative to the hole's own territory, never by a fixed fraction of the pitch.
+- **Measure the user's suspected noise source before building around it.** "The peak makes it noisy" was
+  plausible but the oracle test (true peak instead of the estimate) showed the peak causes ~5 % of the noise.
+  Run an oracle test first and report it with the new method.

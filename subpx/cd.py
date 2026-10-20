@@ -24,10 +24,11 @@ METHOD_LABELS = {
     "half_area_min_avg": "Area above half height (minimum level, averaged peak)",
     "tail_area": "Area above a low threshold near the background",
     "tail_area_norm": "Area above a fraction of the peak (no background step)",
+    "edge_area": "Area inside the steepest edge (no peak, no background step)",
 }
 # Opt-in methods insensitive to a per-hole source-pulse scale (subpx/_cpu/invariant_cd.py).
 INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min", "half_area_min_avg",
-                     "tail_area", "tail_area_norm")
+                     "tail_area", "tail_area_norm", "edge_area")
 
 
 def measure_cds(
@@ -100,11 +101,14 @@ def measure_cds(
         hole's share of the light (image minus the background map, each pixel
         shared among the holes in proportion to their fitted models), so its
         region may extend past the hole's cell: b = median of the farthest
-        fifth of the hole's own territory, averaged peak, threshold b +
+        tenth of the hole's own territory, averaged peak, threshold b +
         ``tail_area_level`` x the height. Its metric ``mean_signal`` is the
         mean light above b over the region. ``tail_area_norm`` is the same
         without the local level: each window divided by its averaged peak,
         region where the normalized pattern exceeds ``tail_area_level``.
+        ``edge_area`` uses neither the peak nor a local level: on the same
+        window, threshold = the mean brightness weighted by steepness (where
+        the light falls fastest); region = the area above it.
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
         map, then measures every cell with the background and all neighbouring
@@ -764,6 +768,7 @@ def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[s
             "half_area_min_avg": "As half_area_min, with the peak = mean of the brightest enlarged pixels covering half_area_peak_pixels original pixels (not the single highest).",
             "tail_area": "On a window of tail_window pitches around the hole holding its share of the light (image minus the background map, each pixel shared among the holes in proportion to their fitted models; the region may extend past the cell): b = median of the farthest tenth of the hole's own territory (closer to it than to any other hole), averaged peak as half_area_min_avg, threshold at tail_area_level of the height above b; mean_signal = mean of the enlarged cell above b over the region (the cell intensity).",
             "tail_area_norm": "As tail_area without a local level: the window divided by its averaged peak; region = where that normalized pattern exceeds tail_area_level (connected to the peak).",
+            "edge_area": "On tail_area's window, with neither a peak nor a local level: threshold = sum(I |grad I|) / sum(|grad I|) over the enlarged window (central differences over +-1 original px), the brightness where the light falls fastest; region = pixels connected to the brightest point and above it. Pulse-invariant (a scale moves I and the threshold together) and offset-invariant.",
             "cd_equivalent": "2 sqrt(contour_area / pi); analytic ellipse area for logquad, polygon area otherwise.",
             "cd_x_cd_y": "Axis-aligned contour extents; analytic ellipse projections for logquad.",
             "failed_cells": "Retained with valid=False, status, and NaN geometric metrics; candidate/partial contours may remain for diagnosis.",

@@ -41,6 +41,11 @@ cannot change, or cancel it:
     ``tail_area`` without a local level: each hole's window divided by its
     averaged peak, region where that normalized pattern exceeds
     ``tail_area_level``.
+``edge_area``
+    On the same window, with neither the peak nor a local level: threshold =
+    the window's mean brightness weighted by its steepness (where the light
+    falls fastest), so a level counts as much as its outline is long and the
+    flat top counts for nothing; the region is the area above it.
 
 For the ``half_area`` family cd_x / cd_y are the x / y widths of the ellipse
 with the region's area and its x and y second moments (the ellipse's diameter
@@ -62,7 +67,7 @@ from .deblend import _render_on_grids, _render_radius, render_models, roi_grids,
 
 
 INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min", "half_area_min_avg",
-                     "tail_area", "tail_area_norm")
+                     "tail_area", "tail_area_norm", "edge_area")
 _HALF_AREA = {"half_area": ("median", False), "half_area_min": ("min", False), "half_area_min_avg": ("min", True)}
 AIRY_K = 1.0290  # FWHM of the incoherent Airy pattern = AIRY_K / cutoff frequency
 _CHUNK = 4096    # holes per batched fit step: (chunk, K) arrays stay ~10 MB each
@@ -405,7 +410,8 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
     """Area above the cell's local level + ``level`` x the peak height, on a ``factor``x cubic enlargement.
 
     Local level b: ``background`` ('median' or 'min') of the cell's outermost pixels, or 'zero' (none: the
-    region is where the cell divided by its peak exceeds ``level``) (a pulse that lights the hole lights its surroundings
+    region is where the cell divided by its peak exceeds ``level``), or 'edge' (none, and no peak either: the
+    threshold is the cell's mean brightness weighted by its steepness, ``level`` unused) (a pulse that lights the hole lights its surroundings
     too, so b, the peak and the threshold scale together and the area does not). Peak: the highest enlarged
     pixel, or with ``peak_pixels`` the mean of the brightest enlarged pixels covering that many original pixels.
     The region is the connected part around the highest pixel above the threshold; CD = 2 sqrt(area / pi);
@@ -448,7 +454,7 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
         ring = mask & ~inner if level_masks is None else xp.asarray(level_masks[rows]) & mask
         if background == "median":
             b = xp.nanmedian(xp.where(ring, cell, xp.nan).reshape(k, -1), axis=1)
-        elif background == "zero":  # no local level: the pattern divided by its peak, thresholded at ``level``
+        elif background in ("zero", "edge"):  # no local level
             b = xp.zeros(k)
         else:
             b = xp.where(ring, cell, xp.inf).reshape(k, -1).min(axis=1)
@@ -461,7 +467,26 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
             n_top = min(max(1, int(round(peak_pixels * factor * factor))), H * W)
             peak = xp.partition(flat, -n_top, axis=1)[:, -n_top:].mean(axis=1)  # -inf (outside the cell): no_signal
             peak = xp.where(xp.isfinite(peak), peak, -1.0)
-        above = big_mask & (big > (level * peak)[:, None, None])
+        if background == "edge":
+            # Threshold = the mean brightness on the slope, each pixel weighted by its steepness (central difference,
+            # +-1 original px): each brightness level counts as much as its outline is long, so the flat top (the
+            # peak) and the flat surroundings count for ~nothing. No peak, no local level.
+            d = factor
+            pad = xp.pad(big, ((0, 0), (d, d), (d, d)), mode="edge")
+            steep = xp.sqrt(((pad[:, 2 * d:, d:-d] - pad[:, :-2 * d, d:-d]) / (2 * d * sy)) ** 2
+                            + ((pad[:, d:-d, 2 * d:] - pad[:, d:-d, :-2 * d]) / (2 * d * sx)) ** 2)
+            core = big_mask.copy()  # pixels whose whole difference stencil lies in the cell
+            for axis in (1, 2):
+                for shift in (d, -d):
+                    core &= xp.roll(big_mask, shift, axis=axis)
+            core[:, :d] = core[:, -d:] = False
+            core[:, :, :d] = core[:, :, -d:] = False
+            wgt = xp.where(core, steep, 0.0)
+            total = wgt.sum(axis=(1, 2))
+            cut = xp.where(total > 0, (wgt * big).sum(axis=(1, 2)) / xp.where(total > 0, total, 1.0), xp.inf)
+        else:
+            cut = level * peak
+        above = big_mask & (big > cut[:, None, None])
         region = xp.zeros((k, H * W), dtype=bool)
         region[xp.arange(k), top] = True
         region = region.reshape(k, H, W) & above
@@ -497,12 +522,12 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
         first_out = xp.where(hit.all(axis=2), len(steps), xp.argmin(hit, axis=2))
         reach = steps[xp.maximum(first_out - 1, 0)] + 0.0625
         out = {name: _to_numpy(v) for name, v in (
-            ("b", b), ("peak", peak), ("mean_signal", mean_signal), ("area", count * (sx * sy)), ("ex", extent_x), ("ey", extent_y),
+            ("b", b), ("peak", peak), ("cut", cut), ("mean_signal", mean_signal), ("area", count * (sx * sy)), ("ex", extent_x), ("ey", extent_y),
             ("touches", touches), ("cx", cx * sx), ("cy", cy * sy), ("edge", reach))}
-        signal = out["peak"] > 0
+        signal = (out["peak"] > 0) & np.isfinite(out["cut"]) & (out["cut"] < out["peak"])
         m["local_level"][rows] = out["b"]
         m["peak_signal"][rows] = np.where(signal, out["peak"], np.nan)
-        m["threshold"][rows] = np.where(signal, out["b"] + level * out["peak"], np.nan)
+        m["threshold"][rows] = np.where(signal, out["b"] + out["cut"], np.nan)
         m["mean_signal"][rows] = np.where(signal, out["mean_signal"], np.nan)
         m["area_px2"][rows] = np.where(signal, out["area"], np.nan)
         m["cd_x_px"][rows] = np.where(signal, out["ex"], np.nan)
@@ -624,7 +649,7 @@ def measure_invariant(
             found[name] = _half_area(state.cleaned[report], masks[report], origins[report], n_angles,
                                      level=half_area_level, background=background, name=name,
                                      peak_pixels=half_area_peak_pixels if averaged else None, xp=xp)
-    tails = [name for name in ("tail_area", "tail_area_norm") if name in methods]
+    tails = [name for name in ("tail_area", "tail_area_norm", "edge_area") if name in methods]
     if tails:
         pitch = pitch_px
         if pitch is None or not np.isfinite(pitch):
@@ -640,7 +665,7 @@ def measure_invariant(
         shown = dict(cells=cells[:, cut, cut], inside=inside[:, cut, cut], origins=win_origins + (middle - keep))
         for name in tails:
             found[name] = _half_area(cells, inside, win_origins, n_angles, level=tail_area_level,
-                                     background="median" if name == "tail_area" else "zero",
+                                     background={"tail_area": "median", "tail_area_norm": "zero"}.get(name, "edge"),
                                      peak_pixels=half_area_peak_pixels, name=name, level_masks=level_masks, xp=xp)
             found[name].inputs.update(shown)
             # Positions relative to the hole's own cell, as the other methods (saved results rebuild contours from them).

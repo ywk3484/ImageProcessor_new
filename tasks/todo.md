@@ -254,3 +254,21 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
       tail_area otherwise)
 - Stress set at 0.2: error per feature below tail_area in all 5 cases (e.g. mixed 150 nm 8.6 vs 14.5 %), measured
   90-100 % (tail_area 96-100 %). synthetic_ch: 2805/2805, 3 sigma 2.99 % (tail_area 3.21 %).
+
+# edge_area: boundary without the peak (2026-10-20)
+- [x] Measured first how much of the noise the peak causes (synthetic_ch, tail_area_norm): with the true,
+      noise-free peak the per-feature noise only drops 0.86 -> 0.81 %; the boundary pixels make the rest
+- [x] edge_area: threshold = mean brightness weighted by steepness (|grad|, central difference +-1 px) on
+      tail_area's window; no peak, no local level; scale- and offset-invariant
+- [x] Tried and dropped: squared-steepness weights (noisier, 1.57 %), noise-floor subtraction from the far
+      pixels (1.29 % on synthetic_ch), threshold scaled by each hole's total light (low noise but follows size x0.4)
+- [x] Report: method, colour, panel shows the wider window and the threshold rule
+
+## Review
+- Repeat test (same features, new noise + pulse, 6 shots, 100 nm, lit surroundings): repeat 0.92 % (tail_area
+  0.99, tail_area_norm 0.86); pulse leak 0.14 (0.09, 0.18).
+- synthetic_ch: 2805/2805, noise per feature 0.95 % (tail_area_norm 0.86 %), follows true size x0.81 (0.84).
+- Bright top 30 % brighter on a flat-topped spot: CD moves 1.8 % (tail_area_norm at 0.5: 6.1 %).
+- So on synthetic data it is level with the peak-based methods, not better; it helps only if the real bright
+  top fluctuates more than simple noise.
+- Suite: 198 passed, 1 skipped, same 9 pre-existing failures.
