@@ -31,7 +31,8 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
     results = {}
     for name, image in images.items():
         result = measure_cds(image, methods=("gaussian", "projection", "half_area", "half_area_min",
-                                             "half_area_min_avg", "tail_area", "tail_area_norm", "edge_area"),
+                                             "half_area_min_avg", "tail_area", "tail_area_norm", "edge_area",
+                                             "foot_area", "foot_area_ratio"),
                              **options)
         results[name] = result
         mine = {r["method"]: r for r in rows if r["image"] == name}
@@ -80,12 +81,14 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
                                np.where(result.masks, result.rois, 0).sum(axis=1), rtol=1e-5, atol=1e-4)
     for name, background in (("half_area", "median of the cell"), ("half_area_min", "minimum of the cell"),
                              ("half_area_min_avg", "minimum of the cell"), ("tail_area", "median of the farthest tenth"),
-                             ("tail_area_norm", "zero: no background step"), ("edge_area", "zero: no background step")):
+                             ("tail_area_norm", "zero: no background step"), ("edge_area", "zero: no background step"),
+                             ("foot_area", "zero: no background step"), ("foot_area_ratio", "zero: no background step")):
         half, panel = result.measurements[name], detail["half"][name]
         assert panel["background"].startswith(background)
-        assert ("brightest 4" in panel["peak_rule"]) == (name in ("half_area_min_avg", "tail_area", "tail_area_norm", "edge_area"))
+        assert ("brightest 4" in panel["peak_rule"]) == (name in ("half_area_min_avg", "tail_area", "tail_area_norm",
+                                                                   "edge_area", "foot_area", "foot_area_ratio"))
         assert panel["level_fraction"] == (0.2 if name.startswith("tail") else 0.5)
-        assert ("threshold_rule" in panel) == (name == "edge_area")
+        assert ("threshold_rule" in panel) == (name in ("edge_area", "foot_area", "foot_area_ratio"))
         np.testing.assert_allclose(_array(panel["mean"], np.float32), half.metrics["mean_signal"], rtol=1e-6)
         for key, metric in (("level", "local_level"), ("peak", "peak_signal"), ("threshold", "threshold")):
             np.testing.assert_allclose(_array(panel[key], np.float32), half.metrics[metric], rtol=1e-6)
@@ -143,7 +146,8 @@ def test_default_report_runs_the_shape_free_methods_without_inputs(tmp_path):
     with (tmp_path / "out" / "summary.csv").open(encoding="utf-8") as handle:
         methods = {r["method"] for r in csv.DictReader(handle)}
     assert methods == {"gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area",
-                       "tail_area_norm", "edge_area", "cell_intensity"}
+                       "tail_area_norm", "edge_area", "foot_area",
+                       "foot_area_ratio", "cell_intensity"}
     assert not (tmp_path / "out" / "results").exists()
     assert not (tmp_path / "out" / "data" / "x.detail.js").exists()
 

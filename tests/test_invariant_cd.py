@@ -235,7 +235,8 @@ def shaped():
     def run(**kw):
         image, centers, d, a = _shape_lattice(**kw)
         result = measure_cds(image, methods=("projection", "half_area", "half_area_min", "half_area_min_avg",
-                                             "tail_area", "tail_area_norm", "edge_area"), area_max=300,
+                                             "tail_area", "tail_area_norm", "edge_area", "foot_area",
+                                             "foot_area_ratio"), area_max=300,
                              tail_area_level=0.1)
         return result, _matched(result, centers, d, a)
     return run(), run(gain=1.2), run(grow=1.05)
@@ -262,7 +263,8 @@ def test_half_area_and_projection_agree_between_cpu_and_gpu(shaped):
     if cp is None:
         pytest.skip("CuPy not available")
     result, _ = shaped[0]
-    names = ("projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area", "tail_area_norm", "edge_area")
+    names = ("projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area", "tail_area_norm", "edge_area",
+             "foot_area", "foot_area_ratio")
     gpu = measure_cds(result.image, methods=names, area_max=300, backend="gpu", tail_area_level=0.1)
     for name in names:
         np.testing.assert_array_equal(gpu.measurements[name].status, result.measurements[name].status)
@@ -362,7 +364,7 @@ def test_wide_cells_hold_each_holes_share_of_the_light_and_level_pixels_far_from
     background = 5 + 0.1 * xx
     signal = background + model
     state = SimpleNamespace(params=params, background_map=background, model_image=model)
-    cells, inside, level, win_origins = _wide_cells(signal, state, masks, origins, np.array([1]), 10.0, 0.8)
+    cells, inside, level, _, win_origins = _wide_cells(signal, state, masks, origins, np.array([1]), 10.0, 0.8)
     assert cells.shape == (1, 17, 17) and inside.all()
     np.testing.assert_array_equal(win_origins[0], [25 - 8, 15 - 8])
     # The middle spot alone: the background removed and each pixel's light shared by the models, so with exact
@@ -490,3 +492,48 @@ def test_edge_area_measures_the_shaped_lattice(shaped):
     assert scatter < scatter_projection and abs(sensitivity) < 0.2
     mean = np.nanmean(edge.metrics["cd_equivalent_px"][use])
     assert abs(np.nanmean(bright.measurements["edge_area"].metrics["cd_equivalent_px"][use_b]) / mean - 1) < 0.01
+
+
+def test_foot_area_threshold_is_the_foot_of_the_edge_without_the_peak():
+    from scipy.ndimage import gaussian_filter
+    from subpx._cpu.invariant_cd import _half_area
+
+    # Blurred disks: the foot (where the slope flattens into the surroundings) lies in the tail, ~0.1 of the
+    # peak, set by the profile's shape. A brighter top, a pulse and a pedestal leave it in place.
+    y, x = np.mgrid[:41, :41]
+    disk = gaussian_filter(((x - 20.0) ** 2 + (y - 20.0) ** 2 <= 5.0 ** 2).astype(float), 1.8)
+    top = np.exp(-((x - 20.0) ** 2 + (y - 20.0) ** 2) / (2 * 1.5 ** 2))
+    cells = np.stack([disk, disk * (1 + 0.3 * top)])
+    masks = np.ones(cells.shape, bool)
+    origins = np.zeros((2, 2))
+    kw = dict(background="foot", peak_pixels=4.0, name="foot_area")
+    foot = _half_area(cells, masks, origins, 64, **kw)
+    assert list(foot.status) == ["ok", "ok"]
+    np.testing.assert_array_equal(foot.metrics["local_level"], 0.0)
+    fraction = foot.metrics["threshold"][0] / disk.max()
+    assert 0.05 < fraction < 0.15
+    assert foot.metrics["steepest_level"][0] > 2.5 * foot.metrics["threshold"][0]
+    norm = _half_area(cells, masks, origins, 64, level=fraction, background="zero", peak_pixels=4.0, name="x")
+    moved = lambda r: abs(r.metrics["cd_equivalent_px"][1] / r.metrics["cd_equivalent_px"][0] - 1)
+    assert moved(foot) < 0.5 * moved(norm)
+    for changed in (2.5 * cells, cells + 0.2):
+        again = _half_area(changed, masks, origins, 64, **kw)
+        np.testing.assert_allclose(again.metrics["cd_equivalent_px"], foot.metrics["cd_equivalent_px"], rtol=1e-9)
+
+
+def test_foot_area_ratio_uses_one_image_ratio_times_each_steepest_level(shaped):
+    (result, (use, truth, pulse)), (bright, (use_b, *_)), _ = shaped
+    foot, ratio = result.measurements["foot_area"], result.measurements["foot_area_ratio"]
+    r = result.meta["foot_ratio"]
+    assert 0 < r < 0.6
+    np.testing.assert_allclose(ratio.metrics["threshold"][ratio.valid],
+                               r * foot.metrics["steepest_level"][ratio.valid], rtol=1e-9)
+    for found in (foot, ratio):
+        assert found.valid[use].mean() > 0.97
+        assert np.nanmedian(found.metrics["threshold"] / found.metrics["peak_signal"]) < 0.25  # in the tail
+    # Each hole's own foot does not follow a pulse that also lights its surroundings (the ratio version, like
+    # tail_area_norm, does: its steepest level moves with the lit surroundings).
+    _, _, sensitivity = _fit_against_truth(foot.metrics["cd_equivalent_px"], truth, pulse, use & foot.valid)
+    assert abs(sensitivity) < 0.1
+    mean = np.nanmean(ratio.metrics["cd_equivalent_px"][use])
+    assert abs(np.nanmean(bright.measurements["foot_area_ratio"].metrics["cd_equivalent_px"][use_b]) / mean - 1) < 0.01

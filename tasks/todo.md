@@ -272,3 +272,15 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
 - So on synthetic data it is level with the peak-based methods, not better; it helps only if the real bright
   top fluctuates more than simple noise.
 - Suite: 198 passed, 1 skipped, same 9 pre-existing failures.
+
+# foot_area / foot_area_ratio: tail boundary without the peak (2026-10-20)
+- [x] User correction: edge_area sits at ~0.4 (steepest slope, what projection already reads); a TAIL boundary
+      was asked for. edge_area kept as is; two methods added.
+- [x] foot_area: threshold = the foot of the edge (below the steepest level, mean brightness weighted by the
+      signed Laplacian, within the hole's own territory) -> ~0.09 of the peak; no peak, no local level
+- [x] foot_area_ratio: r = image median of foot / steepest level, threshold = r x each hole's steepest level
+- Repeat test (6 shots, mixed 100 nm): foot_area_ratio 0.82 % (tail_area_norm 0.86, tail_area 0.99);
+  foot_area 2.4 % but pulse leak 0.02 with lit surroundings (ratio 0.21, tail_area_norm 0.18).
+- synthetic_ch: both 2805/2805; at the same tail height the noise is set by the height, not by the reference
+  (true peak vs estimated peak vs steepest level: 1.04-1.07 %).
+- Suite: 201 passed, 1 skipped, same 9 pre-existing failures.

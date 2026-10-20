@@ -25,10 +25,12 @@ METHOD_LABELS = {
     "tail_area": "Area above a low threshold near the background",
     "tail_area_norm": "Area above a fraction of the peak (no background step)",
     "edge_area": "Area inside the steepest edge (no peak, no background step)",
+    "foot_area": "Area inside the foot of the edge, a tail boundary (no peak, no background step)",
+    "foot_area_ratio": "Area inside the foot of the edge, foot found once per image (no peak, no background step)",
 }
 # Opt-in methods insensitive to a per-hole source-pulse scale (subpx/_cpu/invariant_cd.py).
 INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min", "half_area_min_avg",
-                     "tail_area", "tail_area_norm", "edge_area")
+                     "tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
 
 
 def measure_cds(
@@ -108,7 +110,12 @@ def measure_cds(
         region where the normalized pattern exceeds ``tail_area_level``.
         ``edge_area`` uses neither the peak nor a local level: on the same
         window, threshold = the mean brightness weighted by steepness (where
-        the light falls fastest); region = the area above it.
+        the light falls fastest); region = the area above it. ``foot_area``
+        is the tail counterpart: threshold = the brightness at the foot of
+        the edge, where the falling slope bends into the flat surroundings.
+        ``foot_area_ratio`` finds that foot once per image (median ratio of
+        foot to steepest level) and sets each hole's threshold at that ratio
+        times its own steepest level.
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
         map, then measures every cell with the background and all neighbouring
@@ -768,6 +775,8 @@ def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[s
             "half_area_min_avg": "As half_area_min, with the peak = mean of the brightest enlarged pixels covering half_area_peak_pixels original pixels (not the single highest).",
             "tail_area": "On a window of tail_window pitches around the hole holding its share of the light (image minus the background map, each pixel shared among the holes in proportion to their fitted models; the region may extend past the cell): b = median of the farthest tenth of the hole's own territory (closer to it than to any other hole), averaged peak as half_area_min_avg, threshold at tail_area_level of the height above b; mean_signal = mean of the enlarged cell above b over the region (the cell intensity).",
             "tail_area_norm": "As tail_area without a local level: the window divided by its averaged peak; region = where that normalized pattern exceeds tail_area_level (connected to the peak).",
+            "foot_area": "On tail_area's window, with neither a peak nor a local level: steepest level T = sum(I |grad I|) / sum(|grad I|); threshold = sum(I lap I) / sum(lap I) over the pixels below T in the hole's own territory (signed Laplacian, differences over +-1 original px): the brightness where the falling edge bends into the flat surroundings; region = pixels connected to the brightest point and above it. Pulse- and offset-invariant.",
+            "foot_area_ratio": "As foot_area, with the threshold = r x the hole's own steepest level, r = median over the image's holes of foot level / steepest level (meta foot_ratio).",
             "edge_area": "On tail_area's window, with neither a peak nor a local level: threshold = sum(I |grad I|) / sum(|grad I|) over the enlarged window (central differences over +-1 original px), the brightness where the light falls fastest; region = pixels connected to the brightest point and above it. Pulse-invariant (a scale moves I and the threshold together) and offset-invariant.",
             "cd_equivalent": "2 sqrt(contour_area / pi); analytic ellipse area for logquad, polygon area otherwise.",
             "cd_x_cd_y": "Axis-aligned contour extents; analytic ellipse projections for logquad.",

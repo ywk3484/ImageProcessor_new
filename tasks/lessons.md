@@ -60,3 +60,8 @@
 - **Measure the user's suspected noise source before building around it.** "The peak makes it noisy" was
   plausible but the oracle test (true peak instead of the estimate) showed the peak causes ~5 % of the noise.
   Run an oracle test first and report it with the new method.
+- **Build what was asked, at the place asked.** The user asked for a peak-free TAIL boundary; I shipped a
+  steepest-slope level (~0.4 of the peak, what projection reads) and called it done. Check the delivered level
+  against the request (here: cut/peak must be near the background) before reporting.
+- **Never replace or rename a method the user already has.** Add new methods next to existing ones; the user
+  compares them on real data.
