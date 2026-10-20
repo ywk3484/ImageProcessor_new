@@ -8,7 +8,8 @@ half the feature's own height over its local level = median of the cell edge; as
 mean of the brightest pixels, --peak-pixels of them) and tail_area (the same area count with a low threshold
 near the background, --tail-level of the height, default 0.2, measured on a wider window of the image with the
 background and every other hole removed, so the region may extend past the hole's cell; local level = median of the
-hole's own area farthest from every hole). None needs a blur or nominal CD. The cell intensity of each hole is tail_area's mean light above the local
+hole's own area farthest from every hole) and tail_area_norm (the same window divided by the pattern's averaged
+peak, area where it exceeds --tail-level, no background step). None needs a blur or nominal CD. The cell intensity of each hole is tail_area's mean light above the local
 level over its region; it gets its own statistics, map, and correlation with every CD method. The other
 subpx methods (logquad, gradient, halfmax, disk, flux_ratio) are left out: they assume a round or star-shaped
 outline, or need the blur, and disk/flux_ratio dominated the run time. --backend auto (default) uses the GPU when
@@ -58,7 +59,8 @@ if str(ROOT) not in sys.path:
 from subpx import measure_cds, save_cd_results
 from subpx.cd import METHOD_LABELS
 
-ALL_METHODS = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area")
+ALL_METHODS = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area",
+               "tail_area_norm")
 DESCRIPTIONS = {
     "gaussian": "FWHM of a 2-D Gaussian fitted to the spot (deblended). Describes the blurred spot, not the hole; "
                 "a brighter pulse can change it.",
@@ -77,6 +79,9 @@ DESCRIPTIONS = {
                  "where its own light has faded; averaged peak. The noisy bright core "
                  "barely moves the threshold; the dim tail decides the area. Its mean light above the local level "
                  "over the region is the cell intensity.",
+    "tail_area_norm": "Each pattern divided by its own averaged peak (as half_area_min_avg), then the area where the "
+                      "normalized pattern is above --tail-level (default 0.2), on the same wider window as tail_area. "
+                      "No background level is subtracted.",
 }
 # The CD and the x / y widths: statistics key suffix, metric, label.
 AXES = (("", "cd_equivalent_px", "CD"), ("_x", "cd_x_px", "x"), ("_y", "cd_y_px", "y"))
@@ -251,7 +256,7 @@ def _quantize(cells: np.ndarray, inside: np.ndarray) -> dict:
 
 def tail_detail(result) -> dict | None:
     """tail_area's wider windows (each hole's share of the light, the middle 1.5 pitches), 8-bit, for its panel."""
-    measured = result.measurements.get("tail_area")
+    measured = result.measurements.get("tail_area") or result.measurements.get("tail_area_norm")
     if measured is None or "cells" not in measured.inputs:
         return None
     cells, inside, origins = measured.inputs["cells"], measured.inputs["inside"], measured.inputs["origins"]
@@ -282,7 +287,9 @@ def detail_data(result) -> dict:
                "the cell drawn here")
     for name, background, peak in (
             ("half_area", f"median {edge}", "highest point"), ("half_area_min", f"minimum {edge}", "highest point"),
-            ("half_area_min_avg", f"minimum {edge}", averaged), ("tail_area", corners, averaged)):
+            ("half_area_min_avg", f"minimum {edge}", averaged), ("tail_area", corners, averaged),
+            ("tail_area_norm", "zero: no background step; the pattern is divided by its peak and the area is where "
+             "it exceeds the level", averaged)):
         if name not in result.measurements:
             continue
         measured = result.measurements[name]
@@ -294,8 +301,8 @@ def detail_data(result) -> dict:
                              "cx": _b64(geometry["center_local"][:, 0], "<f4"), "cy": _b64(geometry["center_local"][:, 1], "<f4"),
                              "rays": _b64(np.clip(np.rint(np.nan_to_num(rays) * 16), 0, 255), "u1"), "n_rays": int(rays.shape[1]),
                              "level_fraction": float(result.meta.get(
-                                 "tail_area_level" if name == "tail_area" else "half_area_level",
-                                 0.2 if name == "tail_area" else 0.5))}
+                                 "tail_area_level" if name.startswith("tail") else "half_area_level",
+                                 0.2 if name.startswith("tail") else 0.5))}
     return out
 
 
@@ -350,7 +357,8 @@ def _agreement_table(names: list[str], r: np.ndarray) -> str:
 
 
 COLORS = {"gaussian": "#5bbf2a", "projection": "#7a7a7a", "projection_x": "#2b8cbe", "projection_y": "#e6550d",
-          "half_area": "#d6338a", "half_area_min": "#8e44ad", "half_area_min_avg": "#d68910", "tail_area": "#138d75"}
+          "half_area": "#d6338a", "half_area_min": "#8e44ad", "half_area_min_avg": "#d68910", "tail_area": "#138d75",
+          "tail_area_norm": "#2e86c1"}
 # x / y width layers: the method's colour, lighter for x and darker for y (projection keeps its own two).
 COLORS["cell_intensity"] = "#b8860b"
 for _name, _color in list(COLORS.items()):
@@ -888,7 +896,7 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
     $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(pcx,pcy,px/2,py/2,"#e03b3b"));
     profilePlots("pp-x",X,[pcx-px/2,pcx+px/2],"x profile (column sums)");profilePlots("pp-y",Y,[pcy-py/2,pcy+py/2],"y profile (row sums)");return;}
   if(D.half&&D.half[base]){const F=D.half[base],b=F.level[i],pk=F.peak[i],t=F.threshold[i];let G=D,vals=cellValues(D,D.clean,i),hx=F.cx[i],hy=F.cy[i],old=null;
-    if(base==="tail_area"&&ENTRIES[curId].tail){const T=window.CD_TAIL[curId];
+    if(base.startsWith("tail_area")&&ENTRIES[curId].tail){const T=window.CD_TAIL[curId];
       if(!T){$("detail").innerHTML=out+"<p class='meta'>Loading the wider window…</p>";loadTail(curId);return;}
       if(!T.ready){T.ox=unpack(T.ox,Int32Array);T.oy=unpack(T.oy,Int32Array);const C=T.cells;C.codes=unpack(C.codes,Uint8Array);
         C.lo=unpack(C.lo,Float32Array);C.step=unpack(C.step,Float32Array);T.ready=true;}

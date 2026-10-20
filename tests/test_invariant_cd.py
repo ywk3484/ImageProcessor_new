@@ -235,7 +235,7 @@ def shaped():
     def run(**kw):
         image, centers, d, a = _shape_lattice(**kw)
         result = measure_cds(image, methods=("projection", "half_area", "half_area_min", "half_area_min_avg",
-                                             "tail_area"), area_max=300, tail_area_level=0.1)
+                                             "tail_area", "tail_area_norm"), area_max=300, tail_area_level=0.1)
         return result, _matched(result, centers, d, a)
     return run(), run(gain=1.2), run(grow=1.05)
 
@@ -261,7 +261,7 @@ def test_half_area_and_projection_agree_between_cpu_and_gpu(shaped):
     if cp is None:
         pytest.skip("CuPy not available")
     result, _ = shaped[0]
-    names = ("projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area")
+    names = ("projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area", "tail_area_norm")
     gpu = measure_cds(result.image, methods=names, area_max=300, backend="gpu", tail_area_level=0.1)
     for name in names:
         np.testing.assert_array_equal(gpu.measurements[name].status, result.measurements[name].status)
@@ -419,3 +419,33 @@ def test_tail_area_measures_every_hole_of_a_staggered_array():
     # The 20 % width of the Gaussian spot, within the small bias of the averaged peak on a 3 px spot.
     expected = 2 * sigma * np.sqrt(2 * np.log(1 / 0.2))
     np.testing.assert_allclose(np.median(tail.metrics["cd_equivalent_px"][tail.valid]), expected, rtol=0.08)
+
+
+def test_tail_area_norm_thresholds_each_pattern_divided_by_its_own_peak():
+    from subpx._cpu.invariant_cd import _half_area
+
+    y, x = np.mgrid[:25, :25]
+    cells = np.stack([np.exp(-((x - cx) ** 2 + (y - cy) ** 2) / (2 * 2.0 ** 2)) for cx, cy in ((12.0, 12.0), (12.3, 11.6))])
+    masks = np.ones(cells.shape, bool)
+    origins = np.zeros((2, 2))
+    kw = dict(level=0.2, background="zero", peak_pixels=4.0, name="tail_area_norm")
+    norm = _half_area(cells, masks, origins, 64, **kw)
+    assert norm.method == "tail_area_norm" and list(norm.status) == ["ok", "ok"]
+    # No background step: level 0 and threshold = 0.2 x each pattern's own (averaged) peak.
+    np.testing.assert_array_equal(norm.metrics["local_level"], 0.0)
+    np.testing.assert_allclose(norm.metrics["threshold"], 0.2 * norm.metrics["peak_signal"])
+    # Dividing a pattern by any number (a pulse) leaves its area; a pedestal under it does not (no background step).
+    brighter = _half_area(3.0 * cells, masks, origins, 64, **kw)
+    np.testing.assert_allclose(brighter.metrics["cd_equivalent_px"], norm.metrics["cd_equivalent_px"], rtol=1e-9)
+    lifted = _half_area(cells + 0.1, masks, origins, 64, **kw)
+    assert np.all(lifted.metrics["cd_equivalent_px"] > norm.metrics["cd_equivalent_px"])
+
+
+def test_tail_area_norm_measures_the_shaped_lattice(shaped):
+    (result, (use, truth, pulse)), _, _ = shaped
+    norm, projection = result.measurements["tail_area_norm"], result.measurements["projection"]
+    assert norm.valid[use].mean() > 0.99
+    _, scatter, _ = _fit_against_truth(norm.metrics["cd_equivalent_px"], truth, pulse, use & norm.valid)
+    _, scatter_projection, _ = _fit_against_truth(projection.metrics["cd_equivalent_px"], truth, pulse,
+                                                  use & projection.valid)
+    assert scatter < scatter_projection

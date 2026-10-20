@@ -247,3 +247,10 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
   reaches only ~0.56 pitch, so it was empty and the hole got no value (2562 of 2805 on examples/data/synthetic_ch).
 - Fix: level = median of the farthest tenth (at least 4 px) of the hole's own territory. synthetic_ch: 2805/2805
   measured at levels 0.1-0.5; stress set 96-100 %. Regression test on a staggered array added.
+
+# tail_area_norm (2026-10-20)
+- [x] Each pattern divided by its averaged peak (as half_area_min_avg), area where the normalized pattern exceeds
+      --tail-level; same wider shared-light window as tail_area; no background step (user's choice: identical to
+      tail_area otherwise)
+- Stress set at 0.2: error per feature below tail_area in all 5 cases (e.g. mixed 150 nm 8.6 vs 14.5 %), measured
+  90-100 % (tail_area 96-100 %). synthetic_ch: 2805/2805, 3 sigma 2.99 % (tail_area 3.21 %).
