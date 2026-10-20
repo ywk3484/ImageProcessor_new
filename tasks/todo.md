@@ -199,3 +199,16 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
 - Extra 10 nm blur along x only: half_area_min_avg x width +5.2 %, y width -0.2 %.
 - Full size GPU: 12-13 s per image (5 methods); data 15 MB + detail 57 MB per image.
 - Suite: 190 passed, 1 skipped, same 9 pre-existing failures. Browser: map, layers, panel, x/y tables OK.
+
+# tail_area and cell intensity (2026-10-20)
+- [x] tail_area: low threshold (default 0.3 of the height), local level = mean of the lowest quarter of the cell edge, averaged peak
+- [x] Cell intensity = tail_area's mean light above the local level over its region: report statistics, map (counts), CSV rows, correlation with every CD
+- [x] Tests, full-size run, browser check
+
+## Review
+- Synthetic, 90 nm blur, noise proportional to brightness (10 %): per-feature error, threshold 0.5 / 0.3 / 0.2 with the
+  lowest-quarter level: 9.2 / 6.7 / 6.5 %; valid 100 / 99.4 / 89.5 % (at 0.2 the region reaches the cell edge at
+  10.5 px pitch). Minimum level at 0.3: 8.1 % (the level weighs 0.7 in the threshold, one pixel is too noisy).
+  Mild noise only: 0.3 4.8 % vs 0.5 4.8 % (no gain). Real size +2 % reads +0.9 % at 0.3 (vs +1.0 % at 0.5).
+- Full size GPU: 15 s per image (6 methods + intensity); data 18 MB + detail 66 MB per image.
+- Suite: 191 passed, 1 skipped, same 9 pre-existing failures.

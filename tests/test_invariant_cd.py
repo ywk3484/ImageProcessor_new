@@ -124,6 +124,8 @@ def test_invalid_requests_raise():
         measure_cds(image, methods=("half_area",), area_max=200, half_area_level=1.0)
     with pytest.raises(ValueError, match="half_area_peak_pixels"):
         measure_cds(image, methods=("half_area_min_avg",), area_max=200, half_area_peak_pixels=0.5)
+    with pytest.raises(ValueError, match="tail_area_level"):
+        measure_cds(image, methods=("tail_area",), area_max=200, tail_area_level=0.0)
     measure_cds(image, methods=("projection", "half_area"), area_max=200)  # need no blur
 
 
@@ -230,8 +232,8 @@ def _shape_lattice(seed=0, gain=1.0, grow=1.0, shape=(110, 150), pitch=10.5, siz
 def shaped():
     def run(**kw):
         image, centers, d, a = _shape_lattice(**kw)
-        result = measure_cds(image, methods=("projection", "half_area", "half_area_min", "half_area_min_avg"),
-                             area_max=300)
+        result = measure_cds(image, methods=("projection", "half_area", "half_area_min", "half_area_min_avg",
+                                             "tail_area"), area_max=300)
         return result, _matched(result, centers, d, a)
     return run(), run(gain=1.2), run(grow=1.05)
 
@@ -257,11 +259,11 @@ def test_half_area_and_projection_agree_between_cpu_and_gpu(shaped):
     if cp is None:
         pytest.skip("CuPy not available")
     result, _ = shaped[0]
-    names = ("projection", "half_area", "half_area_min", "half_area_min_avg")
+    names = ("projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area")
     gpu = measure_cds(result.image, methods=names, area_max=300, backend="gpu")
     for name in names:
         np.testing.assert_array_equal(gpu.measurements[name].status, result.measurements[name].status)
-        for metric in ("cd_equivalent_px", "cd_x_px", "cd_y_px"):
+        for metric in ("cd_equivalent_px", "cd_x_px", "cd_y_px") + (("mean_signal",) if "area" in name else ()):
             np.testing.assert_allclose(gpu.measurements[name].metrics[metric],
                                        result.measurements[name].metrics[metric], rtol=1e-9)
 
@@ -314,3 +316,26 @@ def test_half_area_x_and_y_widths_are_the_equal_area_ellipse_diameters():
     k = 2 * np.sqrt(2 * np.log(2))  # half-height region of a Gaussian: an ellipse with diameters k * sigma
     np.testing.assert_allclose([m["cd_x_px"][0], m["cd_y_px"][0]], [k * 2.4, k * 1.4], rtol=0.02)
     np.testing.assert_allclose(m["cd_x_px"] * m["cd_y_px"], m["cd_equivalent_px"] ** 2, rtol=1e-9)
+
+
+def test_tail_area_reads_the_width_near_the_background_and_its_mean_signal_follows_the_pulse():
+    from subpx._cpu.invariant_cd import _half_area
+
+    y, x = np.mgrid[:25, :25]
+    cells = np.stack([np.exp(-((x - cx) ** 2 + (y - cy) ** 2) / (2 * 2.0 ** 2)) for cx, cy in ((12.0, 12.0), (12.3, 11.6))])
+    cells[:, 0, :6] -= 0.02  # a dim stretch of edge: the lowest quarter of the ring, not just one pixel
+    masks = np.ones(cells.shape, bool)
+    origins = np.zeros((2, 2))
+    tail = _half_area(cells, masks, origins, 64, level=0.3, background="low", peak_pixels=4.0, name="tail_area")
+    lit = _half_area(3.0 * (cells + 0.2), masks, origins, 64, level=0.3, background="low", peak_pixels=4.0,
+                     name="tail_area")
+    assert tail.method == "tail_area" and list(tail.status) == ["ok", "ok"]
+    ring = np.sort(np.concatenate([cells[:, 0], cells[:, -1], cells[:, 1:-1, 0], cells[:, 1:-1, -1]], axis=1), axis=1)
+    np.testing.assert_allclose(tail.metrics["local_level"], ring[:, :ring.shape[1] // 4].mean(axis=1))
+    # Threshold at 0.3 of the height: wider than the half-height region, near the 30 % width of the spot.
+    half = _half_area(cells, masks, origins, 64, background="min", peak_pixels=4.0)
+    assert np.all(tail.metrics["cd_equivalent_px"] > 1.2 * half.metrics["cd_equivalent_px"])
+    np.testing.assert_allclose(tail.metrics["cd_equivalent_px"], 2 * 2.0 * np.sqrt(2 * np.log(1 / 0.3)), rtol=0.06)
+    # A pulse: the area stays, the cell intensity scales with it.
+    np.testing.assert_allclose(lit.metrics["cd_equivalent_px"], tail.metrics["cd_equivalent_px"], rtol=1e-9)
+    np.testing.assert_allclose(lit.metrics["mean_signal"], 3.0 * tail.metrics["mean_signal"], rtol=1e-9)

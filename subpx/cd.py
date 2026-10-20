@@ -22,9 +22,11 @@ METHOD_LABELS = {
     "half_area": "Area above half height",
     "half_area_min": "Area above half height (minimum level)",
     "half_area_min_avg": "Area above half height (minimum level, averaged peak)",
+    "tail_area": "Area above a low threshold near the background",
 }
 # Opt-in methods insensitive to a per-hole source-pulse scale (subpx/_cpu/invariant_cd.py).
-INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min", "half_area_min_avg")
+INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min", "half_area_min_avg",
+                     "tail_area")
 
 
 def measure_cds(
@@ -57,6 +59,7 @@ def measure_cds(
     flux_ratio_scale: float | None = None,
     half_area_level: float = 0.5,
     half_area_peak_pixels: float = 4.0,
+    tail_area_level: float = 0.3,
 ) -> CDResult:
     """Extract Voronoi cells and measure their contours and critical dimensions.
 
@@ -90,6 +93,10 @@ def measure_cds(
         pixels instead of their median; ``half_area_min_avg`` also takes the
         peak as the mean of the brightest ``half_area_peak_pixels`` pixels'
         worth of the enlarged cell, so one outstanding pixel cannot set it.
+        ``tail_area`` uses a low threshold near the background instead:
+        b = mean of the lowest quarter of the outermost pixels, averaged peak,
+        threshold b + ``tail_area_level`` x the height. Its metric
+        ``mean_signal`` is the mean light above b over the region.
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
         map, then measures every cell with the background and all neighbouring
@@ -167,6 +174,9 @@ def measure_cds(
     half_area_peak_pixels : float
         ``half_area_min_avg``: area, in original pixels, of the brightest part
         of the enlarged cell averaged into the peak (>= 1).
+    tail_area_level : float
+        ``tail_area``: fraction of the height above the local level that
+        bounds the region (0 < level < 1; low = near the background).
 
     Returns
     -------
@@ -210,6 +220,8 @@ def measure_cds(
         raise ValueError("half_area_level must be between 0 and 1")
     if not (np.isfinite(half_area_peak_pixels) and half_area_peak_pixels >= 1):
         raise ValueError("half_area_peak_pixels must be at least 1")
+    if not (np.isfinite(tail_area_level) and 0 < tail_area_level < 1):
+        raise ValueError("tail_area_level must be between 0 and 1")
     if {"disk", "flux_ratio"} & set(methods) and nominal_cd is None and psf_fwhm is None:
         raise ValueError("methods 'disk' and 'flux_ratio' need nominal_cd or psf_fwhm (the imaging blur)")
     for name, value, lower in (("area_min", area_min, 1), ("area_max", area_max, area_min),
@@ -241,6 +253,7 @@ def measure_cds(
             cell_backend=cell_backend, device=device, nominal_cd=nominal_cd, psf_fwhm=psf_fwhm,
             dark_level=float(dark_level), flux_ratio_scale=flux_ratio_scale,
             half_area_level=float(half_area_level), half_area_peak_pixels=float(half_area_peak_pixels),
+            tail_area_level=float(tail_area_level),
         )
 
 
@@ -276,7 +289,7 @@ def _measure_cds(
     img, *, methods, background, seeds, threshold, invert, area_min, area_max, pad, n_angles, radial_step,
     smooth_sigma, fit_fraction, peak_min_distance, background_level, background_tile, deblend_iterations,
     pixel_size, unit, backend, cell_backend, device, nominal_cd=None, psf_fwhm=None, dark_level=0.0,
-    flux_ratio_scale=None, half_area_level=0.5, half_area_peak_pixels=4.0,
+    flux_ratio_scale=None, half_area_level=0.5, half_area_peak_pixels=4.0, tail_area_level=0.3,
 ) -> CDResult:
     from ._cpu.centers import _segment_binary
     from ._cpu.components import connected_components_stats_cpu
@@ -364,7 +377,8 @@ def _measure_cds(
         "area_min": int(area_min), "area_max": int(area_max), "pad": int(pad), "n_angles": int(n_angles),
         "radial_step": float(radial_step), "smooth_sigma": float(smooth_sigma),
         "fit_fraction": float(fit_fraction), "half_area_level": float(half_area_level),
-        "half_area_peak_pixels": float(half_area_peak_pixels), "cell_backend": cell_backend,
+        "half_area_peak_pixels": float(half_area_peak_pixels), "tail_area_level": float(tail_area_level),
+        "cell_backend": cell_backend,
         "measurement_backend": backend, "device": int(device),
         "segmentation_rescaled": rescaled, "components_before_filter": components_before_filter,
         "coordinates": "global [x, y] pixels; images indexed [y, x]",
@@ -457,6 +471,7 @@ def _measure_cds(
                 nominal_cd_px=None if nominal_cd is None else nominal_cd / pixel_size,
                 dark_level=sign * float(dark_level), flux_ratio_scale=flux_ratio_scale,
                 half_area_level=half_area_level, half_area_peak_pixels=half_area_peak_pixels,
+                tail_area_level=tail_area_level,
                 xp=_array_module(backend),
             )
             found.update(extra)
@@ -732,6 +747,7 @@ def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[s
             "half_area": "Cell enlarged 4x (cubic spline, scipy.ndimage.zoom order 3) after subtracting its local level b (median of the cell's outermost pixels); region = pixels connected to the peak and above half_area_level x peak height (above b); cd_equivalent = 2 sqrt(region area / pi); cd_x/cd_y = x/y diameters of the ellipse with the region's area and x/y second moments (cd_x * cd_y = cd_equivalent^2); contour = the region's last pixel along rays from its centroid (display only); no shape assumed.",
             "half_area_min": "As half_area, with the local level b = the minimum (not the median) of the cell's outermost pixels.",
             "half_area_min_avg": "As half_area_min, with the peak = mean of the brightest enlarged pixels covering half_area_peak_pixels original pixels (not the single highest).",
+            "tail_area": "As half_area_min_avg, with b = mean of the lowest quarter of the cell's outermost pixels and the threshold at tail_area_level (default 0.3) of the height above b; mean_signal = mean of the enlarged cell above b over the region (the cell intensity).",
             "cd_equivalent": "2 sqrt(contour_area / pi); analytic ellipse area for logquad, polygon area otherwise.",
             "cd_x_cd_y": "Axis-aligned contour extents; analytic ellipse projections for logquad.",
             "failed_cells": "Retained with valid=False, status, and NaN geometric metrics; candidate/partial contours may remain for diagnosis.",

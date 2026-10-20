@@ -5,7 +5,10 @@
 Methods: gaussian (deblended Gaussian FWHM), projection (x/y profile max-slope widths), half_area (area above
 half the feature's own height over its local level = median of the cell edge; assumes no shape), half_area_min
 (the same with the local level = minimum of the cell edge) and half_area_min_avg (half_area_min with the peak =
-mean of the brightest pixels, --peak-pixels of them). None needs a blur or nominal CD. The other
+mean of the brightest pixels, --peak-pixels of them) and tail_area (the same area count with a low threshold
+near the background, --tail-level of the height, default 0.3; local level = mean of the lowest quarter of the cell
+edge). None needs a blur or nominal CD. The cell intensity of each hole is tail_area's mean light above the local
+level over its region; it gets its own statistics, map, and correlation with every CD method. The other
 subpx methods (logquad, gradient, halfmax, disk, flux_ratio) are left out: they assume a round or star-shaped
 outline, or need the blur, and disk/flux_ratio dominated the run time. --backend auto (default) uses the GPU when
 CuPy finds a CUDA device; the backend actually used, and why the GPU is not, is printed at the start.
@@ -54,7 +57,7 @@ if str(ROOT) not in sys.path:
 from subpx import measure_cds, save_cd_results
 from subpx.cd import METHOD_LABELS
 
-ALL_METHODS = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg")
+ALL_METHODS = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area")
 DESCRIPTIONS = {
     "gaussian": "FWHM of a 2-D Gaussian fitted to the spot (deblended). Describes the blurred spot, not the hole; "
                 "a brighter pulse can change it.",
@@ -67,6 +70,10 @@ DESCRIPTIONS = {
     "half_area_min_avg": "As half_area_min, but the peak is the mean of the brightest pixels (--peak-pixels pixels' "
                          "worth of the enlarged cell) instead of the single brightest point, so one outstanding "
                          "pixel cannot set the threshold.",
+    "tail_area": "Area above a low threshold near the background: local level = mean of the lowest quarter of the cell "
+                 "edge, averaged peak, threshold at --tail-level (default 0.3) of the height. The noisy bright core "
+                 "barely moves the threshold; the dim tail decides the area. Its mean light above the local level "
+                 "over the region is the cell intensity.",
 }
 # The CD and the x / y widths: statistics key suffix, metric, label.
 AXES = (("", "cd_equivalent_px", "CD"), ("_x", "cd_x_px", "x"), ("_y", "cd_y_px", "y"))
@@ -98,18 +105,31 @@ def layer_values(result) -> dict[str, np.ndarray]:
     for name, measured in result.measurements.items():
         for suffix, metric, _ in AXES:
             layers[name + suffix] = np.where(measured.valid, measured.metrics[metric], np.nan)
+    intensity = cell_intensity(result)
+    if intensity is not None:
+        layers["cell_intensity"] = intensity
     return layers
 
 
+def cell_intensity(result) -> np.ndarray | None:
+    """Per hole: tail_area's mean light above the local level over its region (NaN where tail_area failed); None
+    when tail_area was not run."""
+    measured = result.measurements.get("tail_area")
+    return None if measured is None else np.where(measured.valid, measured.metrics["mean_signal"], np.nan)
+
+
 def agreement(result) -> tuple[list[str], np.ndarray]:
-    """Correlation of the per-hole CDs of every pair of methods, over the holes both measured."""
-    names = list(result.measurements)
+    """Correlation of the per-hole CDs of every pair of methods (and the cell intensity), over the holes both have."""
+    columns = {name: np.where(m.valid, m.metrics["cd_equivalent_px"], np.nan) for name, m in result.measurements.items()}
+    intensity = cell_intensity(result)
+    if intensity is not None:
+        columns["cell_intensity"] = intensity
+    names = list(columns)
     r = np.full((len(names), len(names)), np.nan)
     for i, a in enumerate(names):
         for j, b in enumerate(names):
-            x = result.measurements[a].metrics["cd_equivalent_px"]
-            y = result.measurements[b].metrics["cd_equivalent_px"]
-            ok = result.measurements[a].valid & result.measurements[b].valid & np.isfinite(x) & np.isfinite(y)
+            x, y = columns[a], columns[b]
+            ok = np.isfinite(x) & np.isfinite(y)
             if ok.sum() > 2 and x[ok].std() > 0 and y[ok].std() > 0:
                 r[i, j] = np.corrcoef(x[ok], y[ok])[0, 1]
     return names, r
@@ -163,6 +183,10 @@ def hole_data(result, layers: dict[str, np.ndarray]) -> dict:
         for suffix, _, label in AXES[1:]:
             methods[name + suffix] = {"label": f"{METHOD_LABELS[name]}, {label} width only", "base": name,
                                       "cd": _b64(layers[name + suffix], "<f4")}
+    if "cell_intensity" in layers:  # not a length: its own scale and unit
+        methods["cell_intensity"] = {"label": "Cell intensity: mean light above the local level in tail_area's region",
+                                     "base": "tail_area", "cd": _b64(layers["cell_intensity"], "<f4"),
+                                     "scale": 1.0, "unit": "counts"}
     model = result.deblend_model
     # Spot peak above background: the deblend Gaussian's amplitude (mean cell brightness without a model).
     peak = model["params"][model["report"], 0] if model else result.mean_intensity
@@ -204,9 +228,10 @@ def detail_data(result) -> dict:
         out["prof_x"], out["prof_y"] = _b64(cells.sum(axis=1), "<f4"), _b64(cells.sum(axis=2), "<f4")
     out["half"] = {}
     peak_pixels = result.meta.get("half_area_peak_pixels", 4.0)
+    averaged = f"mean of the brightest {peak_pixels:g} pixels' worth of the enlarged cell"
     for name, background, peak in (
             ("half_area", "median", "highest point"), ("half_area_min", "minimum", "highest point"),
-            ("half_area_min_avg", "minimum", f"mean of the brightest {peak_pixels:g} pixels' worth of the enlarged cell")):
+            ("half_area_min_avg", "minimum", averaged), ("tail_area", "mean of the lowest quarter", averaged)):
         if name not in result.measurements:
             continue
         measured = result.measurements[name]
@@ -214,10 +239,12 @@ def detail_data(result) -> dict:
         edge = geometry["edge_px"]
         rays = edge[:, ::max(1, edge.shape[1] // 32)][:, :32]
         out["half"][name] = {"background": background, "peak_rule": peak, "level": _b64(m["local_level"], "<f4"), "peak": _b64(m["peak_signal"], "<f4"),
-                             "threshold": _b64(m["threshold"], "<f4"),
+                             "threshold": _b64(m["threshold"], "<f4"), "mean": _b64(m["mean_signal"], "<f4"),
                              "cx": _b64(geometry["center_local"][:, 0], "<f4"), "cy": _b64(geometry["center_local"][:, 1], "<f4"),
                              "rays": _b64(np.clip(np.rint(np.nan_to_num(rays) * 16), 0, 255), "u1"), "n_rays": int(rays.shape[1]),
-                             "level_fraction": float(result.meta.get("half_area_level", 0.5))}
+                             "level_fraction": float(result.meta.get(
+                                 "tail_area_level" if name == "tail_area" else "half_area_level",
+                                 0.3 if name == "tail_area" else 0.5))}
     return out
 
 
@@ -249,6 +276,15 @@ def _stats_table(stats: dict, unit: str) -> str:
             f"{_groups(3)}</tr><tr>{columns}</tr></thead><tbody>{rows}</tbody></table>")
 
 
+def _intensity_table(stats: dict) -> str:
+    return ("<h3>Cell intensity</h3><p class='meta'>Per hole: the mean light above its local level over tail_area's "
+            "region (background and neighbours removed), in image counts. It follows the source pulse and the hole size "
+            "together (a bigger hole passes more light).</p><table class='stats'><thead><tr><th>Valid holes</th>"
+            "<th>Mean (counts)</th><th>σ (counts)</th><th>3σ (%)</th></tr></thead><tbody>"
+            f"<tr><td>{stats['valid']:,}</td><td>{_fmt(stats['mean'])}</td><td>{_fmt(stats['std'])}</td>"
+            f"<td><b>{_fmt(stats['three_sigma_pct'])}</b></td></tr></tbody></table>")
+
+
 def _agreement_table(names: list[str], r: np.ndarray) -> str:
     head = "".join(f"<th>{html.escape(n)}</th>" for n in names)
     body = "".join(f"<tr><td>{html.escape(a)}</td>" + "".join(f"<td>{_fmt(v)}</td>" for v in row) + "</tr>"
@@ -256,18 +292,48 @@ def _agreement_table(names: list[str], r: np.ndarray) -> str:
     return ("<h3>Do the methods agree on which holes are big?</h3><p class='meta'>Correlation of the per-hole CDs of "
             "two methods, over the holes both measured: 1 = they rank the holes the same, 0 = unrelated. Two different "
             "methods that agree see the same thing in each hole (a real size difference, or something both take from "
-            "the same input); low agreement means their hole-to-hole spread is mostly each method's own noise.</p>"
+            "the same input); low agreement means their hole-to-hole spread is mostly each method's own noise. "
+            "<b>cell_intensity</b> row: how much each CD follows the hole's brightness. Some of it is real (bigger holes "
+            "are brighter); a method whose CD follows brightness much more than the others takes up the source pulse.</p>"
             f"<table class='stats wide'><thead><tr><th></th>{head}</tr></thead><tbody>{body}</tbody></table>")
 
 
 COLORS = {"gaussian": "#5bbf2a", "projection": "#7a7a7a", "projection_x": "#2b8cbe", "projection_y": "#e6550d",
-          "half_area": "#d6338a", "half_area_min": "#8e44ad", "half_area_min_avg": "#d68910"}
+          "half_area": "#d6338a", "half_area_min": "#8e44ad", "half_area_min_avg": "#d68910", "tail_area": "#138d75"}
 # x / y width layers: the method's colour, lighter for x and darker for y (projection keeps its own two).
+COLORS["cell_intensity"] = "#b8860b"
 for _name, _color in list(COLORS.items()):
-    if not _name.endswith(("_x", "_y")):
+    if not _name.endswith(("_x", "_y")) and _name != "cell_intensity":
         _rgb = np.array([int(_color[i:i + 2], 16) for i in (1, 3, 5)])
         COLORS.setdefault(_name + "_x", "#%02x%02x%02x" % tuple(np.rint(_rgb + (255 - _rgb) * 0.45).astype(int)))
         COLORS.setdefault(_name + "_y", "#%02x%02x%02x" % tuple(np.rint(_rgb * 0.6).astype(int)))
+
+
+def intensity_between(entries: list[dict]) -> dict | None:
+    """Spread of the per-image mean cell intensities (as between_image_statistics); None without tail_area."""
+    means = np.array([e["intensity"]["mean"] for e in entries if not e.get("error") and e.get("intensity")])
+    if not means.size:
+        return None
+    means = means[np.isfinite(means)]
+    mean = float(means.mean()) if means.size else float("nan")
+    std = float(means.std(ddof=1)) if means.size > 1 else float("nan")
+    return {"images": int(means.size), "mean_of_means": mean, "std_of_means": std, "three_sigma": 3 * std,
+            "three_sigma_pct": 300 * std / mean if means.size > 1 and mean else float("nan")}
+
+
+def _intensity_summary(entries: list[dict]) -> str:
+    between = intensity_between(entries)
+    if between is None:
+        return ""
+    rows = "".join(
+        f"<tr><td><a href='#' data-tab='{e['id']}'>{html.escape(e['name'])}</a></td><td>{e['intensity']['valid']:,}</td>"
+        f"<td>{_fmt(e['intensity']['mean'])}</td><td>{_fmt(e['intensity']['three_sigma_pct'])}</td></tr>"
+        for e in entries if not e.get("error") and e.get("intensity"))
+    return ("<h3>Cell intensity (counts): mean light above the local level in tail_area's region</h3>"
+            f"<p class='meta'>Between images: M = {_fmt(between['mean_of_means'])}, 3s = {_fmt(between['three_sigma'], 3)} "
+            f"counts, 3s / M = <b>{_fmt(between['three_sigma_pct'], 3)} %</b> (N = {between['images']}).</p>"
+            "<table class='stats'><thead><tr><th>Image</th><th>Valid holes</th><th>Mean</th><th>Within-image 3σ (%)</th>"
+            f"</tr></thead><tbody>{rows}</tbody></table>")
 
 
 def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], notes: list[str], unit: str,
@@ -317,14 +383,16 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
         f"<table class='stats wide'><thead><tr><th rowspan='2'>Method</th><th rowspan='2'>Images (N)</th>{_groups(4)}"
         f"</tr><tr>{columns}</tr></thead><tbody>{rows}</tbody></table>"
         + table(f"Mean CD per image, m<sub>i</sub> ({unit_html})", "mean")
-        + table("Within-image 3σ (%) = 3 × σ of that image's hole CDs / its mean × 100", "three_sigma_pct"))
+        + table("Within-image 3σ (%) = 3 × σ of that image's hole CDs / its mean × 100", "three_sigma_pct")
+        + _intensity_summary(entries))
     legend = "".join(f"<li><span class='swatch' style='background:{COLORS[m]}'></span><b>{m}</b> — "
                      f"{html.escape(DESCRIPTIONS[m])}</li>" for m in methods)
     tabs = "".join(f"<button class='tab' data-tab='{e['id']}'{' disabled' if e.get('error') else ''}>"
                    f"{html.escape(e['name'])}</button>" for e in entries)
     panels = "".join(
         f"<section class='panel' id='panel-{e['id']}' hidden><h2>{html.escape(e['name'])}: statistics</h2>"
-        f"<p class='meta'>{e['holes']:,} holes · {e['width']} × {e['height']} px · {e['seconds']:.1f} s</p>{_stats_table(e['stats'], unit)}{_agreement_table(*e['agreement'])}"
+        f"<p class='meta'>{e['holes']:,} holes · {e['width']} × {e['height']} px · {e['seconds']:.1f} s</p>{_stats_table(e['stats'], unit)}"
+        f"{_intensity_table(e['intensity']) if e.get('intensity') else ''}{_agreement_table(*e['agreement'])}"
         "<h3>CD histograms</h3><div class='hists'></div></section>"
         for e in entries if not e.get("error"))
     page = (_HTML.replace("__SUMMARY__", summary).replace("__LEGEND__", legend).replace("__TABS__", tabs)
@@ -376,6 +444,9 @@ def main(argv=None) -> None:
     parser.add_argument("--peak-pixels", type=float, default=4.0,
                         help="half_area_min_avg: the peak is the mean of the brightest pixels covering this many "
                              "original pixels (of the 4x enlarged cell)")
+    parser.add_argument("--tail-level", type=float, default=0.3,
+                        help="tail_area: fraction of the height above the local level that bounds the region "
+                             "(low = near the background)")
     parser.add_argument("--pixel-size", type=float, default=1.0)
     parser.add_argument("--unit", default="px")
     parser.add_argument("--backend", choices=("cpu", "gpu", "auto"), default="auto")
@@ -415,6 +486,7 @@ def main(argv=None) -> None:
                 image, methods=methods, seeds=args.seeds, invert=args.invert, area_min=args.area_min,
                 area_max=args.area_max, pixel_size=args.pixel_size, unit=args.unit, backend=args.backend,
                 half_area_level=args.half_level, half_area_peak_pixels=args.peak_pixels,
+                tail_area_level=args.tail_level,
             )
         except Exception as error:  # one bad image must not stop the batch
             message = str(error).replace(str(path), path.name) or type(error).__name__
@@ -424,6 +496,8 @@ def main(argv=None) -> None:
             continue
         seconds = time.perf_counter() - start
         stats = cd_statistics(result)
+        intensity = cell_intensity(result)
+        intensity = None if intensity is None else _spread(intensity)
         layers = layer_values(result)
         for layer, values in layers.items():
             values = values[np.isfinite(values)]
@@ -443,7 +517,7 @@ def main(argv=None) -> None:
         entries.append({"id": ident, "name": path.name, "holes": len(result.seeds_xy), "stats": stats,
                         "width": image.shape[1], "height": image.shape[0], "seconds": seconds,
                         "image": f"images/{ident}.png", "data": f"data/{ident}.js", "detail": detail,
-                        "agreement": agreement(result)})
+                        "agreement": agreement(result), "intensity": intensity})
         for method, s in stats.items():
             rows.append({"image": path.name, "status": "ok", "method": method, "holes": len(result.seeds_xy), **s,
                          "unit": args.unit})
@@ -451,6 +525,11 @@ def main(argv=None) -> None:
                   f"3sigma within image {_plain(s['three_sigma_pct'])} %  "
                   f"(x {_plain(s['mean_x'], 3)}, {_plain(s['three_sigma_pct_x'])} %; "
                   f"y {_plain(s['mean_y'], 3)}, {_plain(s['three_sigma_pct_y'])} %)", flush=True)
+        if intensity:
+            rows.append({"image": path.name, "status": "ok", "method": "cell_intensity", "holes": len(result.seeds_xy),
+                         "cells": len(result.seeds_xy), **intensity, "unit": "counts"})
+            print(f"  {'cell intensity':17s} {intensity['valid']:7d} valid  mean {_plain(intensity['mean'], 3)} counts  "
+                  f"3sigma within image {_plain(intensity['three_sigma_pct'])} %", flush=True)
         print(f"  {seconds:.1f} s", flush=True)
     fields = (["image", "status", "method", "holes", "cells"]
               + [key + x for x, _, _ in AXES for key in ("valid", "mean", "std", "three_sigma_pct")] + ["unit", "error"])
@@ -465,6 +544,8 @@ def main(argv=None) -> None:
             for key in ("images", "mean_of_means", "std_of_means", "three_sigma", "three_sigma_pct")] + ["unit"])
         writer.writeheader()
         writer.writerows({"method": m, **b, "unit": args.unit} for m, b in between.items())
+        if intensity_between(entries):
+            writer.writerow({"method": "cell_intensity", **intensity_between(entries), "unit": "counts"})
     print("Between images (3 s / M x 100, s = std of the per-image means, N - 1):", flush=True)
     for method, b in between.items():
         print(f"  {method:17s} N={b['images']}  M {_plain(b['mean_of_means'], 3)} {args.unit}  "
@@ -583,17 +664,17 @@ function histograms(id,d){const box=document.querySelector(`#panel-${id} .hists`
     const lo=quantile(v,.005),hi=quantile(v,.995),n=40,h=new Array(n).fill(0),w=(hi-lo)/n||1;
     for(const x of v){const i=Math.floor((x-lo)/w);if(i>=0&&i<n)h[i]++;}
     const wrap=document.createElement("div");wrap.className="hist";const c=document.createElement("canvas");c.width=240;c.height=110;
-    const label=document.createElement("div");label.textContent=`${k} (${d.unit})`;wrap.append(label,c);box.appendChild(wrap);
+    const label=document.createElement("div");label.textContent=`${k} (${m.unit||d.unit})`;wrap.append(label,c);box.appendChild(wrap);
     const g=c.getContext("2d"),top=Math.max(...h);g.fillStyle=COLORS[k]||"#888";
     h.forEach((y,i)=>g.fillRect(i*6,96-y/top*90,5,y/top*90));g.fillStyle=getComputedStyle(document.body).color;g.font="10px sans-serif";
-    g.fillText((lo*d.scale).toPrecision(4),0,108);const t=(hi*d.scale).toPrecision(4);g.fillText(t,240-g.measureText(t).width,108);}}
+    const sc=m.scale??d.scale;g.fillText((lo*sc).toPrecision(4),0,108);const t=(hi*sc).toPrecision(4);g.fillText(t,240-g.measureText(t).width,108);}}
 function setMethod(){if(!cur)return;const k=$("method").value,m=cur.methods[k],v=m.sorted;
   range=$("scale").value==="shared"&&RANGES[k]?RANGES[k].slice():[quantile(v,.02),quantile(v,.98)];
   if(!(range[1]>range[0]))range=[range[0]-0.5,range[0]+0.5];
   // Colour bins: one fillStyle per bin keeps 1e5 holes fast to draw.
   bins=Array.from({length:32},()=>[]);for(let i=0;i<cur.n;i++)if(m.valid[i]&&fin(m.cd[i])){
     const b=Math.min(31,Math.max(0,Math.floor((m.cd[i]-range[0])/(range[1]-range[0])*32)));bins[b].push(i);}
-  $("lo").textContent=(range[0]*cur.scale).toPrecision(4);$("hi").textContent=(range[1]*cur.scale).toPrecision(4)+" "+cur.unit;
+  const sc=m.scale??cur.scale;$("lo").textContent=(range[0]*sc).toPrecision(4);$("hi").textContent=(range[1]*sc).toPrecision(4)+" "+(m.unit||cur.unit);
   $("ramp").style.background="linear-gradient(to right,"+[0,.25,.5,.75,1].map(viridis).join(",")+")";draw();bandPlot();if(sel>=0)renderDetail();}
 function sizeCanvas(){const r=canvas.getBoundingClientRect();canvas.width=r.width*devicePixelRatio;canvas.height=r.height*devicePixelRatio;}
 function fit(){sizeCanvas();const k=Math.min(canvas.width/cur.width,canvas.height/cur.height);
@@ -669,7 +750,7 @@ function bandPlot(){if(!cur)return;const k=$("method").value,ax=$("axis").value,
   const size=ax==="y"?cur.height:cur.width,line=ax==="y"?cur.row_bg:cur.col_bg;
   const bandBg=b=>{let s=0,c=0;for(let j=b*W;j<Math.min((b+1)*W,size);j++){s+=line[j];c++;}return s/c;};
   const pct=v=>fin(v)?(100*v).toFixed(0)+" %":"–",series=[];let rows="",nb=0,chosen=null;
-  for(const [kk,mm] of Object.entries(cur.methods)){const r=bands(mm,ax,W,size);if(r.CD.length<4)continue;
+  for(const [kk,mm] of Object.entries(cur.methods)){if(mm.unit)continue;const r=bands(mm,ax,W,size);if(r.CD.length<4)continue;
     const mean=r.CD.reduce((a,v)=>a+v,0)/r.CD.length,dev=r.CD.map(v=>v-mean),sd=Math.sqrt(dev.reduce((a,v)=>a+v*v,0)/(dev.length-1));
     const BG=r.B.map(bandBg);nb=Math.max(nb,r.CD.length);if(kk===k)chosen=r;
     series.push({xs:r.X,ys:dev,color:COLORS[kk]||"#888",width:kk===k?2.8:1.2});
@@ -691,7 +772,7 @@ function loadDetail(id){if(detailLoading===id)return;detailLoading=id;const s=do
 function prepareDetail(D){if(D.ready)return;D.ox=unpack(D.ox,Int32Array);D.oy=unpack(D.oy,Int32Array);
   const C=D.clean;C.codes=unpack(C.codes,Uint8Array);C.lo=unpack(C.lo,Float32Array);C.step=unpack(C.step,Float32Array);
   if(D.prof_x){D.prof_x=unpack(D.prof_x,Float32Array);D.prof_y=unpack(D.prof_y,Float32Array);}
-  for(const F of Object.values(D.half||{})){for(const k of ["level","peak","threshold","cx","cy"])F[k]=unpack(F[k],Float32Array);F.rays=unpack(F.rays,Uint8Array);}D.ready=true;}
+  for(const F of Object.values(D.half||{})){for(const k of ["level","peak","threshold","mean","cx","cy"])F[k]=unpack(F[k],Float32Array);F.rays=unpack(F.rays,Uint8Array);}D.ready=true;}
 function cellValues(D,part,i){const n=D.h*D.w,out=new Float32Array(n);for(let p=0;p<n;p++){const c=part.codes[i*n+p];out[p]=c===255?NaN:part.lo[i]+c*part.step[i];}return out;}
 function drawCell(id,D,vals,overlay,diverging){const cv=$(id),s=Math.max(6,Math.floor(170/Math.max(D.h,D.w)));cv.width=D.w*s;cv.height=D.h*s;
   const g=cv.getContext("2d");let [lo,hi]=extent(vals);const a=Math.max(Math.abs(lo),Math.abs(hi))||1;
@@ -711,7 +792,7 @@ function profilePlots(prefix,prof,edges,label){const sp=spline(prof),xs=[],vs=[]
     title:"slope of the curve (edges = its highest and lowest point)",xl:"pixel in the cell window"});}
 function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").value,m=cur.methods[k],base=m.base||k;
   let rows="";for(const [kk,mm] of Object.entries(cur.methods)){const v=mm.cd[i];
-    rows+=`<tr><td><span class="swatch" style="background:${COLORS[kk]||"#888"}"></span>${kk}</td><td>${fin(v)?(v*cur.scale).toFixed(3)+" "+cur.unit:"–"}</td><td>${mm.status_names[mm.status[i]]}</td></tr>`;}
+    rows+=`<tr><td><span class="swatch" style="background:${COLORS[kk]||"#888"}"></span>${kk}</td><td>${fin(v)?(v*(mm.scale??cur.scale)).toFixed(3)+" "+(mm.unit||cur.unit):"–"}</td><td>${mm.status_names[mm.status[i]]}</td></tr>`;}
   let out=`<b>Hole ${i}</b> at x ${m.x[i].toFixed(2)}, y ${m.y[i].toFixed(2)} px<table>${rows}</table>`;
   const D=window.CD_DETAIL[curId];
   if(!ENTRIES[curId].detail){$("detail").innerHTML=out+"<p class='meta'>Hole details were not written (--no-hole-details).</p>";return;}
@@ -734,6 +815,7 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
       <div class="cells"><figure><canvas id="dc-a"></canvas>cell and region outline</figure><figure><canvas id="dc-b"></canvas>original pixels above the threshold (red)</figure></div>
       <table><tr><td>local level b</td><td>${fin(b)?b.toPrecision(4):"–"}</td></tr><tr><td>peak height above b (${F.peak_rule})</td><td>${fin(pk)?pk.toPrecision(4):"–"}</td></tr>
       <tr><td>threshold = b + ${F.level_fraction} × height</td><td>${fin(t)?t.toPrecision(4):"–"}</td></tr>
+      <tr><td>mean light above b in the region${base==="tail_area"?" (cell intensity)":""}</td><td>${fin(F.mean[i])?F.mean[i].toPrecision(4):"–"}</td></tr>
       <tr><td>region area</td><td>${fin(cdv)?(Math.PI*cdv*cdv/4).toFixed(2)+" px²":"–"}</td></tr>
       <tr><td>CD = 2 √(area / π)</td><td>${fin(cdv)?cdv.toFixed(3)+" px = "+(cdv*cur.scale).toFixed(2)+" "+cur.unit:"–"}</td></tr></table>
       <p class="meta">The outline is drawn from 32 directions around the region's centre, so it is approximate for very irregular shapes; the area itself is counted pixel by pixel on the enlarged cell.</p>`;
