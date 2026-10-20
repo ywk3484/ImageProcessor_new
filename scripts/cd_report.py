@@ -6,8 +6,9 @@ Methods: gaussian (deblended Gaussian FWHM), projection (x/y profile max-slope w
 half the feature's own height over its local level = median of the cell edge; assumes no shape), half_area_min
 (the same with the local level = minimum of the cell edge) and half_area_min_avg (half_area_min with the peak =
 mean of the brightest pixels, --peak-pixels of them) and tail_area (the same area count with a low threshold
-near the background, --tail-level of the height, default 0.3; local level = mean of the lowest quarter of the cell
-edge). None needs a blur or nominal CD. The cell intensity of each hole is tail_area's mean light above the local
+near the background, --tail-level of the height, default 0.2, measured on a wider window of the image with the
+background and every other hole removed, so the region may extend past the hole's cell; local level = median of the
+hole's own area farthest from every hole). None needs a blur or nominal CD. The cell intensity of each hole is tail_area's mean light above the local
 level over its region; it gets its own statistics, map, and correlation with every CD method. The other
 subpx methods (logquad, gradient, halfmax, disk, flux_ratio) are left out: they assume a round or star-shaped
 outline, or need the blur, and disk/flux_ratio dominated the run time. --backend auto (default) uses the GPU when
@@ -70,8 +71,10 @@ DESCRIPTIONS = {
     "half_area_min_avg": "As half_area_min, but the peak is the mean of the brightest pixels (--peak-pixels pixels' "
                          "worth of the enlarged cell) instead of the single brightest point, so one outstanding "
                          "pixel cannot set the threshold.",
-    "tail_area": "Area above a low threshold near the background: local level = mean of the lowest quarter of the cell "
-                 "edge, averaged peak, threshold at --tail-level (default 0.3) of the height. The noisy bright core "
+    "tail_area": "Area above a low threshold near the background (--tail-level of the height, default 0.2), measured "
+                 "on a wider window with the background and all other holes removed, so the area may reach past the "
+                 "hole's cell. Local level = median of the hole's own area farthest from every hole (its corners), "
+                 "where its own light has faded; averaged peak. The noisy bright core "
                  "barely moves the threshold; the dim tail decides the area. Its mean light above the local level "
                  "over the region is the cell intensity.",
 }
@@ -164,7 +167,40 @@ def _b64(array: np.ndarray, dtype: str) -> str:
     return base64.b64encode(np.ascontiguousarray(array, dtype=dtype).tobytes()).decode("ascii")
 
 
-def hole_data(result, layers: dict[str, np.ndarray]) -> dict:
+RAYS = 32  # directions per outline on the map
+
+
+def contour_rays(measured, n: int = RAYS) -> np.ndarray:
+    """Each hole's measured outline as its distance (px) from the hole's center in ``n`` directions (angle 2 pi j / n,
+    x right, y down); NaN where there is none. Radial outlines (half_area family) are subsampled from their own rays;
+    ellipse outlines (gaussian, projection) are read off the ellipse through their polygon."""
+    geometry = measured.geometry
+    if "edge_px" in geometry:
+        edges = geometry["edge_px"]
+        return edges[:, ::max(1, edges.shape[1] // n)][:, :n].astype(float)
+    points = measured.contours_xy[:, :-1]  # drop the closing point
+    center = points.mean(axis=1, keepdims=True)
+    offset = points - center
+    # A uniformly sampled ellipse c + A (cos t, sin t) has covariance A A^T / 2; its outline is p^T (A A^T)^-1 p = 1.
+    shape_matrix = 2 * np.einsum("nki,nkj->nij", offset, offset) / offset.shape[1]
+    ok = np.isfinite(shape_matrix).all(axis=(1, 2)) & (np.linalg.det(np.nan_to_num(shape_matrix)) > 1e-12)
+    inverse = np.full_like(shape_matrix, np.nan)
+    inverse[ok] = np.linalg.inv(shape_matrix[ok])
+    angles = 2 * np.pi * np.arange(n) / n
+    d = np.stack((np.cos(angles), np.sin(angles)), axis=1)
+    return 1 / np.sqrt(np.einsum("ai,nij,aj->na", d, inverse, d))
+
+
+def rays_data(result, name: str) -> dict:
+    """``contour_rays`` of one method as 8-bit steps of ``unit`` px, base64 (255 = no outline)."""
+    rays = contour_rays(result.measurements[name])
+    finite = np.isfinite(rays)
+    unit = max(1 / 16, float(rays[finite].max()) / 254) if finite.any() else 1 / 16
+    codes = np.where(finite, np.clip(np.rint(np.nan_to_num(rays) / unit), 0, 254), 255)
+    return {"n": int(rays.shape[1]), "unit": unit, "rays": _b64(codes, "u1")}
+
+
+def hole_data(result, layers: dict[str, np.ndarray], ident: str = "") -> dict:
     """Per map layer: hole centers, CD (px), validity and status as base64 arrays; plus what the band profile needs.
 
     The x / y width layers name their ``base`` method and share its centers and status.
@@ -179,6 +215,7 @@ def hole_data(result, layers: dict[str, np.ndarray]) -> dict:
             "cd": _b64(layers[name], "<f4"),
             "valid": _b64(measured.valid, "u1"), "status": _b64(codes, "u1" if len(statuses) < 256 else "<u2"),
             "status_names": statuses.tolist(), "status_wide": len(statuses) >= 256,
+            "rays_file": f"data/{ident}.{name}.rays.js",
         }
         for suffix, _, label in AXES[1:]:
             methods[name + suffix] = {"label": f"{METHOD_LABELS[name]}, {label} width only", "base": name,
@@ -229,9 +266,12 @@ def detail_data(result) -> dict:
     out["half"] = {}
     peak_pixels = result.meta.get("half_area_peak_pixels", 4.0)
     averaged = f"mean of the brightest {peak_pixels:g} pixels' worth of the enlarged cell"
+    edge = "of the cell's outermost pixels"
+    corners = ("median of the hole's own area at least 0.6 pitch from it (its corners, farthest from every hole), on a "
+               "wider window with all other holes removed; the area may reach past the cell drawn here")
     for name, background, peak in (
-            ("half_area", "median", "highest point"), ("half_area_min", "minimum", "highest point"),
-            ("half_area_min_avg", "minimum", averaged), ("tail_area", "mean of the lowest quarter", averaged)):
+            ("half_area", f"median {edge}", "highest point"), ("half_area_min", f"minimum {edge}", "highest point"),
+            ("half_area_min_avg", f"minimum {edge}", averaged), ("tail_area", corners, averaged)):
         if name not in result.measurements:
             continue
         measured = result.measurements[name]
@@ -244,7 +284,7 @@ def detail_data(result) -> dict:
                              "rays": _b64(np.clip(np.rint(np.nan_to_num(rays) * 16), 0, 255), "u1"), "n_rays": int(rays.shape[1]),
                              "level_fraction": float(result.meta.get(
                                  "tail_area_level" if name == "tail_area" else "half_area_level",
-                                 0.3 if name == "tail_area" else 0.5))}
+                                 0.2 if name == "tail_area" else 0.5))}
     return out
 
 
@@ -444,9 +484,11 @@ def main(argv=None) -> None:
     parser.add_argument("--peak-pixels", type=float, default=4.0,
                         help="half_area_min_avg: the peak is the mean of the brightest pixels covering this many "
                              "original pixels (of the 4x enlarged cell)")
-    parser.add_argument("--tail-level", type=float, default=0.3,
+    parser.add_argument("--tail-level", type=float, default=0.2,
                         help="tail_area: fraction of the height above the local level that bounds the region "
                              "(low = near the background)")
+    parser.add_argument("--tail-window", type=float, default=0.8,
+                        help="tail_area: half-width of its window around each hole, in pitches (0.5 to 2)")
     parser.add_argument("--pixel-size", type=float, default=1.0)
     parser.add_argument("--unit", default="px")
     parser.add_argument("--backend", choices=("cpu", "gpu", "auto"), default="auto")
@@ -486,7 +528,7 @@ def main(argv=None) -> None:
                 image, methods=methods, seeds=args.seeds, invert=args.invert, area_min=args.area_min,
                 area_max=args.area_max, pixel_size=args.pixel_size, unit=args.unit, backend=args.backend,
                 half_area_level=args.half_level, half_area_peak_pixels=args.peak_pixels,
-                tail_area_level=args.tail_level,
+                tail_area_level=args.tail_level, tail_window=args.tail_window,
             )
         except Exception as error:  # one bad image must not stop the batch
             message = str(error).replace(str(path), path.name) or type(error).__name__
@@ -504,8 +546,12 @@ def main(argv=None) -> None:
             samples.setdefault(layer, []).append(rng.choice(values, min(values.size, 50_000), replace=False))
         Image.fromarray(display_image(image)).save(output / "images" / f"{ident}.png")
         (output / "data" / f"{ident}.js").write_text(
-            f"window.CD_DATA[{json.dumps(ident)}]=" + json.dumps(hole_data(result, layers), allow_nan=False) + ";\n",
-            encoding="utf-8")
+            f"window.CD_DATA[{json.dumps(ident)}]=" + json.dumps(hole_data(result, layers, ident), allow_nan=False)
+            + ";\n", encoding="utf-8")
+        for name in result.measurements:  # measured outlines, loaded by the map when zoomed in
+            (output / "data" / f"{ident}.{name}.rays.js").write_text(
+                f"window.CD_RAYS[{json.dumps(ident + '/' + name)}]=" + json.dumps(rays_data(result, name)) + ";\n",
+                encoding="utf-8")
         detail = None
         if not args.no_hole_details:
             detail = f"data/{ident}.detail.js"
@@ -608,7 +654,7 @@ __NOTES__ __SUMMARY__<h2>Methods</h2><ul class="legend">__LEGEND__</ul></section
 <label>Colours <select id="scale"><option value="shared">same for all images</option><option value="image">per image</option></select></label>
 <button id="fit">Fit image</button><label><input type="checkbox" id="show" checked> Show holes</label>
 <span id="bar"><span id="lo"></span><span id="ramp"></span><span id="hi"></span></span>
-<span class="meta">Drag to pan · wheel to zoom · click a hole</span></div>
+<span class="meta">Drag to pan · wheel to zoom (zoomed in: each hole's measured outline, coloured by its size) · click a hole</span></div>
 <div class="split"><div id="stage"><canvas id="canvas"></canvas></div><div id="detail"></div></div>
 <h3>Band profile: where does banding come from?</h3>
 <div class="controls"><label>Bands of <select id="axis"><option value="y">rows (along y)</option><option value="x">columns (along x)</option></select></label>
@@ -625,7 +671,7 @@ __NOTES__ __SUMMARY__<h2>Methods</h2><ul class="legend">__LEGEND__</ul></section
 __PANELS__
 </main>
 <script>
-window.CD_DATA={};window.CD_DETAIL={};
+window.CD_DATA={};window.CD_DETAIL={};window.CD_RAYS={};
 const ENTRIES=__ENTRIES__, COLORS=__COLORS__, RANGES=__RANGES__, $=id=>document.getElementById(id);
 const HINT="<p class='meta'>Click a hole to see how the selected method measured it.</p>";
 const VIRIDIS=[[68,1,84],[72,40,120],[62,74,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[110,206,88],[181,222,43],[253,231,37]];
@@ -681,12 +727,14 @@ function fit(){sizeCanvas();const k=Math.min(canvas.width/cur.width,canvas.heigh
   view={k,tx:(canvas.width-k*cur.width)/2,ty:(canvas.height-k*cur.height)/2};draw();}
 function draw(){if(!cur||!img||!view)return;ctx.setTransform(1,0,0,1,0,0);ctx.fillStyle="#000";ctx.fillRect(0,0,canvas.width,canvas.height);
   const {k,tx,ty}=view;ctx.setTransform(k,0,0,k,tx,ty);ctx.imageSmoothingEnabled=k<2;ctx.drawImage(img,0,0);
-  if(!$("show").checked||!bins)return;const m=cur.methods[$("method").value];
+  if(!$("show").checked||!bins)return;const m=cur.methods[$("method").value],bn=m.base||$("method").value,bm=cur.methods[bn];
   const x0=-tx/k-20,y0=-ty/k-20,x1=(canvas.width-tx)/k+20,y1=(canvas.height-ty)/k+20,dots=k*4<6;
-  ctx.lineWidth=1.5/k;
+  ctx.lineWidth=1.5/k;if(!dots)loadRays(bn);const R=bm.rays,nr=bm.ray_n,u=bm.ray_unit;
   bins.forEach((list,b)=>{const col=viridis((b+.5)/32);ctx.fillStyle=col;ctx.strokeStyle=col;if(!dots)ctx.beginPath();
     for(const i of list){const x=m.x[i]+.5,y=m.y[i]+.5;if(x<x0||x>x1||y<y0||y>y1)continue;
       if(dots){const s=Math.max(1.6/k,Math.min(m.cd[i],3));ctx.fillRect(x-s/2,y-s/2,s,s);}
+      else if(R&&R[i*nr]!==255){for(let j=0;j<=nr;j++){const a=RAY_ANG[nr][j%nr],r=R[i*nr+j%nr]*u;
+        if(j)ctx.lineTo(x+r*a[0],y+r*a[1]);else ctx.moveTo(x+r*a[0],y+r*a[1]);}}
       else{ctx.moveTo(x+m.cd[i]/2,y);ctx.arc(x,y,m.cd[i]/2,0,2*Math.PI);}}
     if(!dots)ctx.stroke();});
   if(!dots){ctx.strokeStyle="#9a9a9a";ctx.beginPath();const c=3;
@@ -694,6 +742,13 @@ function draw(){if(!cur||!img||!view)return;ctx.setTransform(1,0,0,1,0,0);ctx.fi
       ctx.moveTo(x-c,y-c);ctx.lineTo(x+c,y+c);ctx.moveTo(x-c,y+c);ctx.lineTo(x+c,y-c);}ctx.stroke();}
   if(sel>=0){const x=m.x[sel]+.5,y=m.y[sel]+.5;ctx.strokeStyle="#ff3b3b";ctx.lineWidth=2.5/k;ctx.beginPath();
     ctx.arc(x,y,Math.max(fin(m.cd[sel])?m.cd[sel]/2+1:4,8/k),0,2*Math.PI);ctx.stroke();}}
+// Measured outlines: one file per method and image, loaded once the map is zoomed in far enough to draw them.
+const RAY_ANG={};
+function loadRays(name){const bm=cur.methods[name];if(!bm||bm.rays||bm.raysLoading||!bm.rays_file)return;bm.raysLoading=true;
+  const id=curId,s=document.createElement("script");s.src=bm.rays_file;
+  s.onload=()=>{const F=window.CD_RAYS[id+"/"+name];if(!F)return;bm.rays=unpack(F.rays,Uint8Array);bm.ray_n=F.n;bm.ray_unit=F.unit;
+    if(!RAY_ANG[F.n])RAY_ANG[F.n]=[...Array(F.n)].map((_,j)=>[Math.cos(2*Math.PI*j/F.n),Math.sin(2*Math.PI*j/F.n)]);if(curId===id)draw();};
+  s.onerror=()=>{bm.raysLoading=false;bm.rays_file=null;};document.body.appendChild(s);}
 function pick(px,py){const m=cur.methods[$("method").value],x=(px-view.tx)/view.k-.5,y=(py-view.ty)/view.k-.5;
   let best=-1,bd=Infinity;for(let i=0;i<cur.n;i++){const d=(m.x[i]-x)**2+(m.y[i]-y)**2;if(d<bd){bd=d;best=i;}}
   if(best<0||bd>36)return;sel=best;renderDetail();draw();}
@@ -811,7 +866,7 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
     const above=vals.map(v=>fin(v)?(v>t?1:-1):NaN),nr=F.n_rays,pts=[];
     for(let r=0;r<nr;r++){const a=2*Math.PI*r/nr,q=F.rays[i*nr+r]/16;pts.push([hx+q*Math.cos(a),hy+q*Math.sin(a)]);}
     const poly=(g,s)=>{if(!fin(hx))return;g.strokeStyle=COLORS[base];g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
-    out+=`<h3>${base}</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the ${F.background} of the cell's outermost pixels; its peak is the ${F.peak_rule}. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold b + ${F.level_fraction} × (peak − b). CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
+    out+=`<h3>${base}</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the ${F.background}; its peak is the ${F.peak_rule}. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold b + ${F.level_fraction} × (peak − b). CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
       <div class="cells"><figure><canvas id="dc-a"></canvas>cell and region outline</figure><figure><canvas id="dc-b"></canvas>original pixels above the threshold (red)</figure></div>
       <table><tr><td>local level b</td><td>${fin(b)?b.toPrecision(4):"–"}</td></tr><tr><td>peak height above b (${F.peak_rule})</td><td>${fin(pk)?pk.toPrecision(4):"–"}</td></tr>
       <tr><td>threshold = b + ${F.level_fraction} × height</td><td>${fin(t)?t.toPrecision(4):"–"}</td></tr>

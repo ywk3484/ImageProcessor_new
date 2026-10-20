@@ -212,3 +212,17 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
   Mild noise only: 0.3 4.8 % vs 0.5 4.8 % (no gain). Real size +2 % reads +0.9 % at 0.3 (vs +1.0 % at 0.5).
 - Full size GPU: 15 s per image (6 methods + intensity); data 18 MB + detail 66 MB per image.
 - Suite: 191 passed, 1 skipped, same 9 pre-existing failures.
+
+# Wide tail_area window, outlines on the map (2026-10-20)
+- [x] tail_area on a wider window (0.8 pitch half-width) of image - background - all other holes' models; region may
+      pass the cell; local level = median of the hole's own territory beyond 0.6 pitch; default level 0.2
+- [x] Map: each hole's measured outline (32 directions, lazily loaded per method) coloured by size when zoomed in
+- [x] Tests, full-size run, browser check
+
+## Review
+- Cause of the old failures (measured): the hole's own light at 20 % height was as wide as its cell, and the level
+  taken from the cell edge held that light. Wide window: 100 % measured at levels 0.1-0.5.
+- Synthetic, 10 % brightness noise: level 0.2 error 5.3 % (old cell: 6.5 %, 10 % of holes lost). Pulse leak 0.15 with
+  each hole's surroundings lit by its own pulse as a sharp patch; ~0.02 without that patch.
+- Full size GPU: 17 s per image; outline files 4 MB per method per image, loaded on demand.
+- Suite: 194 passed, 1 skipped, same 9 pre-existing failures.

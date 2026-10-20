@@ -126,6 +126,8 @@ def test_invalid_requests_raise():
         measure_cds(image, methods=("half_area_min_avg",), area_max=200, half_area_peak_pixels=0.5)
     with pytest.raises(ValueError, match="tail_area_level"):
         measure_cds(image, methods=("tail_area",), area_max=200, tail_area_level=0.0)
+    with pytest.raises(ValueError, match="tail_window"):
+        measure_cds(image, methods=("tail_area",), area_max=200, tail_window=3.0)
     measure_cds(image, methods=("projection", "half_area"), area_max=200)  # need no blur
 
 
@@ -233,7 +235,7 @@ def shaped():
     def run(**kw):
         image, centers, d, a = _shape_lattice(**kw)
         result = measure_cds(image, methods=("projection", "half_area", "half_area_min", "half_area_min_avg",
-                                             "tail_area"), area_max=300)
+                                             "tail_area"), area_max=300, tail_area_level=0.1)
         return result, _matched(result, centers, d, a)
     return run(), run(gain=1.2), run(grow=1.05)
 
@@ -260,7 +262,7 @@ def test_half_area_and_projection_agree_between_cpu_and_gpu(shaped):
         pytest.skip("CuPy not available")
     result, _ = shaped[0]
     names = ("projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area")
-    gpu = measure_cds(result.image, methods=names, area_max=300, backend="gpu")
+    gpu = measure_cds(result.image, methods=names, area_max=300, backend="gpu", tail_area_level=0.1)
     for name in names:
         np.testing.assert_array_equal(gpu.measurements[name].status, result.measurements[name].status)
         for metric in ("cd_equivalent_px", "cd_x_px", "cd_y_px") + (("mean_signal",) if "area" in name else ()):
@@ -323,15 +325,14 @@ def test_tail_area_reads_the_width_near_the_background_and_its_mean_signal_follo
 
     y, x = np.mgrid[:25, :25]
     cells = np.stack([np.exp(-((x - cx) ** 2 + (y - cy) ** 2) / (2 * 2.0 ** 2)) for cx, cy in ((12.0, 12.0), (12.3, 11.6))])
-    cells[:, 0, :6] -= 0.02  # a dim stretch of edge: the lowest quarter of the ring, not just one pixel
     masks = np.ones(cells.shape, bool)
+    far = np.broadcast_to(np.hypot(x - 12, y - 12) >= 9, cells.shape)  # the level pixels: where the spot has faded
     origins = np.zeros((2, 2))
-    tail = _half_area(cells, masks, origins, 64, level=0.3, background="low", peak_pixels=4.0, name="tail_area")
-    lit = _half_area(3.0 * (cells + 0.2), masks, origins, 64, level=0.3, background="low", peak_pixels=4.0,
-                     name="tail_area")
+    kw = dict(level=0.3, background="median", peak_pixels=4.0, name="tail_area", level_masks=far)
+    tail = _half_area(cells, masks, origins, 64, **kw)
+    lit = _half_area(3.0 * (cells + 0.2), masks, origins, 64, **kw)
     assert tail.method == "tail_area" and list(tail.status) == ["ok", "ok"]
-    ring = np.sort(np.concatenate([cells[:, 0], cells[:, -1], cells[:, 1:-1, 0], cells[:, 1:-1, -1]], axis=1), axis=1)
-    np.testing.assert_allclose(tail.metrics["local_level"], ring[:, :ring.shape[1] // 4].mean(axis=1))
+    np.testing.assert_allclose(tail.metrics["local_level"], [np.median(c[f]) for c, f in zip(cells, far)])
     # Threshold at 0.3 of the height: wider than the half-height region, near the 30 % width of the spot.
     half = _half_area(cells, masks, origins, 64, background="min", peak_pixels=4.0)
     assert np.all(tail.metrics["cd_equivalent_px"] > 1.2 * half.metrics["cd_equivalent_px"])
@@ -339,3 +340,52 @@ def test_tail_area_reads_the_width_near_the_background_and_its_mean_signal_follo
     # A pulse: the area stays, the cell intensity scales with it.
     np.testing.assert_allclose(lit.metrics["cd_equivalent_px"], tail.metrics["cd_equivalent_px"], rtol=1e-9)
     np.testing.assert_allclose(lit.metrics["mean_signal"], 3.0 * tail.metrics["mean_signal"], rtol=1e-9)
+
+
+def test_wide_cells_hold_each_hole_alone_and_level_pixels_far_from_every_hole():
+    from types import SimpleNamespace
+    from subpx._cpu.deblend import render_models
+    from subpx._cpu.invariant_cd import _wide_cells
+
+    # Three spots on a row, 10 px apart, over a sloped background; one fitted Gaussian per spot (exact here).
+    shape = (30, 50)
+    origins = np.array([[9.0, 9.0], [19.0, 9.0], [29.0, 9.0]])  # 12 x 12 cells around x = 15, 25, 35; y = 15
+    params = np.array([[50.0, 6.0, 6.0, -np.log(1.8), 0.0, -np.log(1.8)],
+                       [80.0, 6.2, 5.9, -np.log(2.0), 0.1, -np.log(1.6)],
+                       [60.0, 5.8, 6.1, -np.log(1.7), 0.0, -np.log(1.9)]])
+    masks = np.ones((3, 12, 12), bool)
+    global_params = params.copy()
+    global_params[:, 1:3] += origins
+    model = render_models(global_params, shape, radius_cap=12)
+    yy, xx = np.indices(shape)
+    background = 5 + 0.1 * xx
+    signal = background + model
+    state = SimpleNamespace(params=params, background_map=background, model_image=model)
+    cells, inside, level, win_origins = _wide_cells(signal, state, masks, origins, np.array([1]), 10.0, 0.8)
+    assert cells.shape == (1, 17, 17) and inside.all()
+    np.testing.assert_array_equal(win_origins[0], [25 - 8, 15 - 8])
+    # The middle spot alone: its neighbours and the background removed, its own light intact.
+    own = render_models(global_params[1:2], shape, radius_cap=12)
+    np.testing.assert_allclose(cells[0], own[7:24, 17:34], atol=1e-4)
+    # Level pixels: its own territory (closer to it than to either neighbour) at least 0.6 pitch = 6 px from it.
+    gx, gy = xx[7:24, 17:34], yy[7:24, 17:34]
+    cx, cy = global_params[1, 1:3]
+    mine = np.hypot(gx - cx, gy - cy)
+    others = np.minimum(*(np.hypot(gx - q[1], gy - q[2]) for q in global_params[[0, 2]]))
+    np.testing.assert_array_equal(level[0], (mine >= 6) & (mine <= others))
+    assert level[0].sum() > 20
+
+
+def test_tail_area_measures_every_hole_at_a_threshold_near_the_background(shaped):
+    (result, (use, truth, pulse)), _, _ = shaped
+    tail, projection = result.measurements["tail_area"], result.measurements["projection"]
+    assert result.meta["tail_area_level"] == 0.1
+    # At 10 % of the height each hole's area reaches past its own cell; the wider window still holds it.
+    assert tail.valid[use].mean() > 0.99
+    _, scatter, _ = _fit_against_truth(tail.metrics["cd_equivalent_px"], truth, pulse, use & tail.valid)
+    _, scatter_projection, _ = _fit_against_truth(projection.metrics["cd_equivalent_px"], truth, pulse,
+                                                  use & projection.valid)
+    assert scatter < scatter_projection
+    # Positions relative to each hole's own cell, as for the other methods (saved results rebuild contours from them).
+    np.testing.assert_allclose(tail.geometry["center_local"][tail.valid] + result.origins_xy[tail.valid],
+                               tail.centers_xy[tail.valid])

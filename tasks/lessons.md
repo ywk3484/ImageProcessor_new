@@ -46,3 +46,7 @@
   points per edge) and noise did. Test the replacement before proposing it.
 - **Report speed matters on the user's machine.** Time every stage on a full-size image and drop or move to
   the GPU what dominates before adding more.
+- **Never state a cause in a result summary that was not measured.** "Neighbours' light gets in" at a low
+  threshold was a guess; the measured cause was the feature's own tail being wider than its cell (Voronoi
+  cell clipped to box + pad) and the edge-based local level holding that tail. Diagnose (e.g. render each
+  feature alone, noiseless) before explaining a failure rate.

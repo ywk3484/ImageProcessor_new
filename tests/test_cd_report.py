@@ -77,12 +77,12 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
     assert np.all(np.abs(cells - result.rois)[result.masks] <= 0.51 * np.repeat(step, h * w).reshape(-1, h, w)[result.masks] + 1e-4)
     np.testing.assert_allclose(_array(detail["prof_x"], np.float32).reshape(-1, w),
                                np.where(result.masks, result.rois, 0).sum(axis=1), rtol=1e-5, atol=1e-4)
-    for name, background in (("half_area", "median"), ("half_area_min", "minimum"), ("half_area_min_avg", "minimum"),
-                             ("tail_area", "mean of the lowest quarter")):
+    for name, background in (("half_area", "median of the cell"), ("half_area_min", "minimum of the cell"),
+                             ("half_area_min_avg", "minimum of the cell"), ("tail_area", "median of the hole's own")):
         half, panel = result.measurements[name], detail["half"][name]
-        assert panel["background"] == background
+        assert panel["background"].startswith(background)
         assert ("brightest 4" in panel["peak_rule"]) == (name in ("half_area_min_avg", "tail_area"))
-        assert panel["level_fraction"] == (0.3 if name == "tail_area" else 0.5)
+        assert panel["level_fraction"] == (0.2 if name == "tail_area" else 0.5)
         np.testing.assert_allclose(_array(panel["mean"], np.float32), half.metrics["mean_signal"], rtol=1e-6)
         for key, metric in (("level", "local_level"), ("peak", "peak_signal"), ("threshold", "threshold")):
             np.testing.assert_allclose(_array(panel[key], np.float32), half.metrics[metric], rtol=1e-6)
@@ -98,6 +98,18 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
     assert set(data["methods"]) == {name + suffix for name in result.measurements
                                     for suffix in ("", "_x", "_y")} | {"cell_intensity"}
     assert data["methods"]["cell_intensity"]["unit"] == "counts" and data["methods"]["cell_intensity"]["scale"] == 1
+    # Measured outlines for the map: one file per method, 32 directions; the half_area family's are its own rays.
+    from scripts.cd_report import contour_rays
+    for name in result.measurements:
+        rays = _load_js(out / data["methods"][name]["rays_file"], "CD_RAYS")
+        assert rays["n"] == 32
+        codes = _array(rays["rays"], np.uint8).reshape(-1, 32)
+        expected = contour_rays(result.measurements[name])
+        finite = np.isfinite(expected)
+        np.testing.assert_array_equal(codes == 255, ~finite)
+        np.testing.assert_allclose(codes[finite] * rays["unit"], expected[finite], atol=rays["unit"] / 2 + 1e-6)
+    tail = result.measurements["tail_area"]
+    np.testing.assert_allclose(contour_rays(tail)[tail.valid], tail.geometry["edge_px"][tail.valid][:, ::4])
     np.testing.assert_allclose(page_ranges["half_area_min_x"], np.quantile(np.concatenate(
         [r.measurements["half_area_min"].metrics["cd_x_px"][r.measurements["half_area_min"].valid]
          for r in results.values()]), [0.02, 0.98]))
@@ -126,3 +138,16 @@ def test_default_report_runs_the_shape_free_methods_without_inputs(tmp_path):
                        "cell_intensity"}
     assert not (tmp_path / "out" / "results").exists()
     assert not (tmp_path / "out" / "data" / "x.detail.js").exists()
+
+
+def test_contour_rays_of_an_ellipse_outline_follow_the_ellipse():
+    from types import SimpleNamespace
+    from scripts.cd_report import contour_rays
+
+    t = np.linspace(0, 2 * np.pi, 129)  # 128 points and the closing one, as the methods' contours
+    a, b, angle = 3.0, 1.5, np.pi / 6
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    points = (rotation @ np.stack((a * np.cos(t), b * np.sin(t))))[None].transpose(0, 2, 1) + [40.0, 20.0]
+    rays = contour_rays(SimpleNamespace(geometry={}, contours_xy=points), n=32)[0]
+    theta = 2 * np.pi * np.arange(32) / 32 - angle  # direction in the ellipse's own frame
+    np.testing.assert_allclose(rays, a * b / np.hypot(b * np.cos(theta), a * np.sin(theta)), rtol=1e-6)
