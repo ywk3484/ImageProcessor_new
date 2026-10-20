@@ -20,9 +20,10 @@ METHOD_LABELS = {
     "flux_ratio": "Hole light / own background",
     "projection": "x/y projection max-slope width",
     "half_area": "Area above half height",
+    "half_area_min": "Area above half height (minimum level)",
 }
 # Opt-in methods insensitive to a per-hole source-pulse scale (subpx/_cpu/invariant_cd.py).
-INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area")
+INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min")
 
 
 def measure_cds(
@@ -82,6 +83,8 @@ def measure_cds(
         ``half_area_level`` x the peak height above b, on a 4x cubic-spline
         enlargement of the cell (CD = 2 sqrt(area / pi), the equal-area circle;
         cd_x / cd_y = the region's extents). It assumes no shape.
+        ``half_area_min`` is the same with b = the minimum of the outermost
+        pixels instead of their median.
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
         map, then measures every cell with the background and all neighbouring
@@ -155,7 +158,7 @@ def measure_cds(
         so that several images are compared on one scale.
     half_area_level : float
         Fraction of the peak height above the local level that bounds the
-        ``half_area`` region (0 < level < 1).
+        ``half_area`` / ``half_area_min`` region (0 < level < 1).
 
     Returns
     -------
@@ -715,6 +718,7 @@ def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[s
             "flux_ratio": "Hole light (sum over the cell above the disk fit's local background, neighbours removed) divided by that local background minus dark_level; CD = 2 sqrt(ratio / pi) times flux_ratio_scale (given, else median matched to nominal_cd when given, else 1).",
             "projection": "Column and row sums of the neighbour-removed cell; cd_x/cd_y = distance between each profile's steepest rise and steepest fall (cubic spline); cd_equivalent = their mean; contour = axis-aligned ellipse with those axes.",
             "half_area": "Cell enlarged 4x (cubic spline, scipy.ndimage.zoom order 3) after subtracting its local level b (median of the cell's outermost pixels); region = pixels connected to the peak and above half_area_level x peak height (above b); cd_equivalent = 2 sqrt(region area / pi); cd_x/cd_y = the region's x/y extents; contour = the region's last pixel along rays from its centroid (display only); no shape assumed.",
+            "half_area_min": "As half_area, with the local level b = the minimum (not the median) of the cell's outermost pixels.",
             "cd_equivalent": "2 sqrt(contour_area / pi); analytic ellipse area for logquad, polygon area otherwise.",
             "cd_x_cd_y": "Axis-aligned contour extents; analytic ellipse projections for logquad.",
             "failed_cells": "Retained with valid=False, status, and NaN geometric metrics; candidate/partial contours may remain for diagnosis.",
@@ -755,13 +759,19 @@ def load_cd_results(path, *, rois: bool = True) -> CDResult:
         model["tile_px"] = int(model["tile_px"])
     origins = arrays["origins_xy"]
     n_angles = int(meta.get("n_angles", 128))
+    # Each method's arrays, by the longest method name prefixing them ("half_area_" also prefixes "half_area_min_...").
+    owned = {method: {} for method in methods}
+    for name in list(arrays):
+        owners = [method for method in methods if name.startswith(f"{method}_")]
+        if owners:
+            owner = max(owners, key=len)
+            owned[owner][name[len(owner) + 1:]] = arrays.pop(name)
     measurements = {}
     for method in methods:
-        prefix = f"{method}_"
-        fields = {name: arrays.pop(prefix + name) for name in _METHOD_ARRAYS if prefix + name in arrays}
-        geometry = {name[len(prefix + "geometry_"):]: arrays.pop(name)
-                    for name in list(arrays) if name.startswith(prefix + "geometry_")}
-        metrics = {name[len(prefix):]: arrays.pop(name) for name in list(arrays) if name.startswith(prefix)}
+        own = owned[method]
+        fields = {name: own.pop(name) for name in _METHOD_ARRAYS if name in own}
+        geometry = {name[len("geometry_"):]: own.pop(name) for name in list(own) if name.startswith("geometry_")}
+        metrics = own
         if "contours_xy" not in fields:
             if "edge_px" in geometry:
                 fields["contours_xy"] = radial_contours(geometry["center_local"], geometry["edge_px"], origins, n_angles)

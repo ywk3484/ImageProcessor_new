@@ -228,7 +228,7 @@ def _shape_lattice(seed=0, gain=1.0, grow=1.0, shape=(110, 150), pitch=10.5, siz
 def shaped():
     def run(**kw):
         image, centers, d, a = _shape_lattice(**kw)
-        result = measure_cds(image, methods=("projection", "half_area"), area_max=300)
+        result = measure_cds(image, methods=("projection", "half_area", "half_area_min"), area_max=300)
         return result, _matched(result, centers, d, a)
     return run(), run(gain=1.2), run(grow=1.05)
 
@@ -254,8 +254,26 @@ def test_half_area_and_projection_agree_between_cpu_and_gpu(shaped):
     if cp is None:
         pytest.skip("CuPy not available")
     result, _ = shaped[0]
-    gpu = measure_cds(result.image, methods=("projection", "half_area"), area_max=300, backend="gpu")
-    for name in ("projection", "half_area"):
+    gpu = measure_cds(result.image, methods=("projection", "half_area", "half_area_min"), area_max=300, backend="gpu")
+    for name in ("projection", "half_area", "half_area_min"):
         np.testing.assert_array_equal(gpu.measurements[name].status, result.measurements[name].status)
         np.testing.assert_allclose(gpu.measurements[name].metrics["cd_equivalent_px"],
                                    result.measurements[name].metrics["cd_equivalent_px"], rtol=1e-9)
+
+
+def test_half_area_min_takes_the_lowest_cell_edge_pixel_and_ignores_scale_and_pedestal():
+    from subpx._cpu.invariant_cd import _half_area
+
+    cells = _gaussian_cells([(7.0, 7.0), (7.3, 6.6)])
+    cells[:, 0, 5] -= 0.05  # one low pixel on the cell edge sets the minimum level
+    masks = np.ones(cells.shape, bool)
+    origins = np.zeros((2, 2))
+    median, low = _half_area(cells, masks, origins, 64), _half_area(cells, masks, origins, 64, background="min")
+    lit = _half_area(3.0 * (cells + 0.2), masks, origins, 64, background="min")
+    assert low.method == "half_area_min" and list(low.status) == ["ok", "ok"]
+    ring = np.concatenate([cells[:, 0], cells[:, -1], cells[:, 1:-1, 0], cells[:, 1:-1, -1]], axis=1)
+    np.testing.assert_allclose(low.metrics["local_level"], ring.min(axis=1))
+    assert np.all(low.metrics["local_level"] < median.metrics["local_level"])
+    # A lower level puts the half-height threshold lower: a larger region.
+    assert np.all(low.metrics["cd_equivalent_px"] > median.metrics["cd_equivalent_px"])
+    np.testing.assert_allclose(lit.metrics["cd_equivalent_px"], low.metrics["cd_equivalent_px"], rtol=1e-9)

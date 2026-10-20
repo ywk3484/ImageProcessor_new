@@ -30,7 +30,7 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
     assert [r["image"] for r in rows if r["status"] == "failed"] == ["broken.png"]
     results = {}
     for name, image in images.items():
-        result = measure_cds(image, methods=("gaussian", "projection", "half_area"), **options)
+        result = measure_cds(image, methods=("gaussian", "projection", "half_area", "half_area_min"), **options)
         results[name] = result
         mine = {r["method"]: r for r in rows if r["image"] == name}
         assert set(mine) == set(result.measurements)
@@ -62,12 +62,14 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
     assert np.all(np.abs(cells - result.rois)[result.masks] <= 0.51 * np.repeat(step, h * w).reshape(-1, h, w)[result.masks] + 1e-4)
     np.testing.assert_allclose(_array(detail["prof_x"], np.float32).reshape(-1, w),
                                np.where(result.masks, result.rois, 0).sum(axis=1), rtol=1e-5, atol=1e-4)
-    half = result.measurements["half_area"]
-    for key, metric in (("level", "local_level"), ("peak", "peak_signal"), ("threshold", "threshold")):
-        np.testing.assert_allclose(_array(detail["half"][key], np.float32), half.metrics[metric], rtol=1e-6)
-    rays = _array(detail["half"]["rays"], np.uint8).reshape(len(half.valid), -1) / 16
-    ok = half.valid
-    np.testing.assert_allclose(rays[ok], half.geometry["edge_px"][ok][:, ::4], atol=1 / 32 + 1e-6)
+    for name, background in (("half_area", "median"), ("half_area_min", "minimum")):
+        half, panel = result.measurements[name], detail["half"][name]
+        assert panel["background"] == background
+        for key, metric in (("level", "local_level"), ("peak", "peak_signal"), ("threshold", "threshold")):
+            np.testing.assert_allclose(_array(panel[key], np.float32), half.metrics[metric], rtol=1e-6)
+        rays = _array(panel["rays"], np.uint8).reshape(len(half.valid), -1) / 16
+        ok = half.valid
+        np.testing.assert_allclose(rays[ok], half.geometry["edge_px"][ok][:, ::4], atol=1 / 32 + 1e-6)
     # One colour range per map layer, shared by the images: 2nd-98th percentile of both images' CDs together.
     page_ranges = json.loads(page.split("RANGES=")[1].split(", $=")[0])
     pooled = np.concatenate([r.measurements["projection"].metrics["cd_y_px"][r.measurements["projection"].valid]
@@ -96,6 +98,6 @@ def test_default_report_runs_the_three_shape_free_methods_without_inputs(tmp_pat
     main([str(tmp_path / "in"), "--output", str(tmp_path / "out"), "--backend", "cpu", "--no-hole-details"])
     with (tmp_path / "out" / "summary.csv").open(encoding="utf-8") as handle:
         methods = {r["method"] for r in csv.DictReader(handle)}
-    assert methods == {"gaussian", "projection", "half_area"}
+    assert methods == {"gaussian", "projection", "half_area", "half_area_min"}
     assert not (tmp_path / "out" / "results").exists()
     assert not (tmp_path / "out" / "data" / "x.detail.js").exists()

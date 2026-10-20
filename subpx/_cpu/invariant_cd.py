@@ -20,8 +20,11 @@ cannot change, or cancel it:
     Area of the region around the peak brighter than the cell's local level
     plus half the peak height above it, on a 4x cubic-spline enlargement of
     the cell; CD = equal-area circle diameter. Assumes no shape.
+``half_area_min``
+    ``half_area`` with the local level taken as the minimum of the cell's
+    outermost pixels instead of their median.
 
-``projection`` and ``half_area`` run on NumPy or CuPy (``xp``). All work on cells with the neighbouring holes' models removed (from
+``projection``, ``half_area`` and ``half_area_min`` run on NumPy or CuPy (``xp``). All work on cells with the neighbouring holes' models removed (from
 ``deblend``). Lengths are in pixels.
 """
 
@@ -36,7 +39,7 @@ from .cd import radial_contours
 from .deblend import _render_on_grids, _render_radius, render_models, roi_grids, sigma_major, windows, FWHM_K
 
 
-INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area")
+INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min")
 AIRY_K = 1.0290  # FWHM of the incoherent Airy pattern = AIRY_K / cutoff frequency
 _CHUNK = 4096    # holes per batched fit step: (chunk, K) arrays stay ~10 MB each
 _CALIBRATION_HOLES = 2000
@@ -373,15 +376,16 @@ def _grow(region):
 
 
 def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_angles: int,
-               level: float = 0.5, factor: int = 4, xp=np) -> CDMethodResult:
+               level: float = 0.5, factor: int = 4, background: str = "median", xp=np) -> CDMethodResult:
     """Area above the cell's local level + ``level`` x the peak height, on a ``factor``x cubic enlargement.
 
-    Local level b: median of the cell's outermost pixels (a pulse that lights the hole lights its surroundings
+    Local level b: ``background`` ('median' or 'min') of the cell's outermost pixels (a pulse that lights the hole lights its surroundings
     too, so b, the peak and the threshold scale together and the area does not). The region is the connected
     part around the peak above the threshold; CD = 2 sqrt(area / pi), cd_x / cd_y = its x / y extents.
     """
     n, h, w = masks.shape
-    result = _empty("half_area", n, n_angles, ("local_level", "threshold"))
+    result = _empty("half_area" if background == "median" else "half_area_min", n, n_angles,
+                    ("local_level", "threshold"))
     if not n:
         return result
     zy, ny = _zoom_operators(h, factor)
@@ -409,7 +413,11 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
         inner[:, :, :-1] &= mask[:, :, 1:]
         inner[:, [0, -1]] = False
         inner[:, :, [0, -1]] = False
-        b = xp.nanmedian(xp.where(mask & ~inner, cell, xp.nan).reshape(k, -1), axis=1)
+        ring = mask & ~inner
+        if background == "median":
+            b = xp.nanmedian(xp.where(ring, cell, xp.nan).reshape(k, -1), axis=1)
+        else:
+            b = xp.where(ring, cell, xp.inf).reshape(k, -1).min(axis=1)
         big = zy[None] @ xp.where(mask, cell - b[:, None, None], 0.0) @ zx.T[None]
         big_mask = (ny[None] @ mask.astype(float) @ nx.T[None]) > 0.5
         flat = xp.where(big_mask, big, -xp.inf).reshape(k, -1)
@@ -486,7 +494,7 @@ def measure_invariant(
     ``nominal_cd_px`` (the blur is then chosen so the median fitted diameter
     equals it). ``flux_ratio`` is scaled by ``flux_ratio_scale`` when given,
     else so that its median equals ``nominal_cd_px``. ``projection`` and
-    ``half_area`` need neither and run on ``xp`` (NumPy or CuPy).
+    ``half_area``/``half_area_min`` need neither and run on ``xp`` (NumPy or CuPy).
     """
     found, info = {}, {}
     if "projection" in methods:
@@ -494,6 +502,9 @@ def measure_invariant(
     if "half_area" in methods:
         found["half_area"] = _half_area(state.cleaned[report], masks[report], origins[report], n_angles,
                                         level=half_area_level, xp=xp)
+    if "half_area_min" in methods:
+        found["half_area_min"] = _half_area(state.cleaned[report], masks[report], origins[report], n_angles,
+                                            level=half_area_level, background="min", xp=xp)
     if "disk" not in methods and "flux_ratio" not in methods:
         return found, info
     if psf_fwhm_px is None and nominal_cd_px is None:

@@ -2,8 +2,9 @@
 
     python scripts/cd_report.py FOLDER --output REPORT --pixel-size 21 --unit nm
 
-Methods: gaussian (deblended Gaussian FWHM), projection (x/y profile max-slope widths) and half_area (area above
-half the feature's own height over its local level; assumes no shape). None needs a blur or nominal CD. The other
+Methods: gaussian (deblended Gaussian FWHM), projection (x/y profile max-slope widths), half_area (area above
+half the feature's own height over its local level = median of the cell edge; assumes no shape) and half_area_min
+(the same with the local level = minimum of the cell edge). None needs a blur or nominal CD. The other
 subpx methods (logquad, gradient, halfmax, disk, flux_ratio) are left out: they assume a round or star-shaped
 outline, or need the blur, and disk/flux_ratio dominated the run time. --backend auto (default) uses the GPU when
 CuPy finds one.
@@ -50,7 +51,7 @@ if str(ROOT) not in sys.path:
 from subpx import measure_cds, save_cd_results
 from subpx.cd import METHOD_LABELS
 
-ALL_METHODS = ("gaussian", "projection", "half_area")
+ALL_METHODS = ("gaussian", "projection", "half_area", "half_area_min")
 DESCRIPTIONS = {
     "gaussian": "FWHM of a 2-D Gaussian fitted to the spot (deblended). Describes the blurred spot, not the hole; "
                 "a brighter pulse can change it.",
@@ -58,6 +59,8 @@ DESCRIPTIONS = {
     "half_area": "Area of the region around the peak brighter than the cell's local level plus half the peak height "
                  "(cell enlarged 4x by smooth interpolation), as the diameter of a circle of that area. Assumes no "
                  "shape; a pulse that brightens the feature and its surroundings together does not change it.",
+    "half_area_min": "As half_area, but the local level is the minimum of the cell's outermost pixels instead of their "
+                     "median, so the feature's own tail reaching the cell edge cannot raise it.",
 }
 # Extra map layers: (layer, metric, label) per method.
 LAYERS = {"projection": (("projection_x", "cd_x_px", "projection, x width only"),
@@ -181,16 +184,19 @@ def detail_data(result) -> dict:
     if "projection" in result.measurements:
         cells = np.where(result.masks, result.rois, 0.0)
         out["prof_x"], out["prof_y"] = _b64(cells.sum(axis=1), "<f4"), _b64(cells.sum(axis=2), "<f4")
-    if "half_area" in result.measurements:
-        measured = result.measurements["half_area"]
+    out["half"] = {}
+    for name, background in (("half_area", "median"), ("half_area_min", "minimum")):
+        if name not in result.measurements:
+            continue
+        measured = result.measurements[name]
         m, geometry = measured.metrics, measured.geometry
         edge = geometry["edge_px"]
         rays = edge[:, ::max(1, edge.shape[1] // 32)][:, :32]
-        out["half"] = {"level": _b64(m["local_level"], "<f4"), "peak": _b64(m["peak_signal"], "<f4"),
-                       "threshold": _b64(m["threshold"], "<f4"),
-                       "cx": _b64(geometry["center_local"][:, 0], "<f4"), "cy": _b64(geometry["center_local"][:, 1], "<f4"),
-                       "rays": _b64(np.clip(np.rint(np.nan_to_num(rays) * 16), 0, 255), "u1"), "n_rays": int(rays.shape[1]),
-                       "level_fraction": float(result.meta.get("half_area_level", 0.5))}
+        out["half"][name] = {"background": background, "level": _b64(m["local_level"], "<f4"), "peak": _b64(m["peak_signal"], "<f4"),
+                             "threshold": _b64(m["threshold"], "<f4"),
+                             "cx": _b64(geometry["center_local"][:, 0], "<f4"), "cy": _b64(geometry["center_local"][:, 1], "<f4"),
+                             "rays": _b64(np.clip(np.rint(np.nan_to_num(rays) * 16), 0, 255), "u1"), "n_rays": int(rays.shape[1]),
+                             "level_fraction": float(result.meta.get("half_area_level", 0.5))}
     return out
 
 
@@ -225,7 +231,7 @@ def _agreement_table(names: list[str], r: np.ndarray) -> str:
 
 
 COLORS = {"gaussian": "#5bbf2a", "projection": "#7a7a7a", "projection_x": "#2b8cbe", "projection_y": "#e6550d",
-          "half_area": "#d6338a"}
+          "half_area": "#d6338a", "half_area_min": "#8e44ad"}
 
 
 def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], notes: list[str], unit: str,
@@ -605,7 +611,7 @@ function loadDetail(id){if(detailLoading===id)return;detailLoading=id;const s=do
 function prepareDetail(D){if(D.ready)return;D.ox=unpack(D.ox,Int32Array);D.oy=unpack(D.oy,Int32Array);
   const C=D.clean;C.codes=unpack(C.codes,Uint8Array);C.lo=unpack(C.lo,Float32Array);C.step=unpack(C.step,Float32Array);
   if(D.prof_x){D.prof_x=unpack(D.prof_x,Float32Array);D.prof_y=unpack(D.prof_y,Float32Array);}
-  if(D.half){const F=D.half;for(const k of ["level","peak","threshold","cx","cy"])F[k]=unpack(F[k],Float32Array);F.rays=unpack(F.rays,Uint8Array);}D.ready=true;}
+  for(const F of Object.values(D.half||{})){for(const k of ["level","peak","threshold","cx","cy"])F[k]=unpack(F[k],Float32Array);F.rays=unpack(F.rays,Uint8Array);}D.ready=true;}
 function cellValues(D,part,i){const n=D.h*D.w,out=new Float32Array(n);for(let p=0;p<n;p++){const c=part.codes[i*n+p];out[p]=c===255?NaN:part.lo[i]+c*part.step[i];}return out;}
 function drawCell(id,D,vals,overlay,diverging){const cv=$(id),s=Math.max(6,Math.floor(170/Math.max(D.h,D.w)));cv.width=D.w*s;cv.height=D.h*s;
   const g=cv.getContext("2d");let [lo,hi]=extent(vals);const a=Math.max(Math.abs(lo),Math.abs(hi))||1;
@@ -640,11 +646,11 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
       <canvas class="plot" id="pp-y-v" style="height:150px"></canvas><canvas class="plot" id="pp-y-s" style="height:90px"></canvas>`;
     $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(pcx,pcy,px/2,py/2,"#e03b3b"));
     profilePlots("pp-x",X,[pcx-px/2,pcx+px/2],"x profile (column sums)");profilePlots("pp-y",Y,[pcy-py/2,pcy+py/2],"y profile (row sums)");return;}
-  if(base==="half_area"&&D.half){const F=D.half,vals=cellValues(D,D.clean,i),b=F.level[i],pk=F.peak[i],t=F.threshold[i],hx=F.cx[i],hy=F.cy[i];
+  if(D.half&&D.half[base]){const F=D.half[base],vals=cellValues(D,D.clean,i),b=F.level[i],pk=F.peak[i],t=F.threshold[i],hx=F.cx[i],hy=F.cy[i];
     const above=vals.map(v=>fin(v)?(v>t?1:-1):NaN),nr=F.n_rays,pts=[];
     for(let r=0;r<nr;r++){const a=2*Math.PI*r/nr,q=F.rays[i*nr+r]/16;pts.push([hx+q*Math.cos(a),hy+q*Math.sin(a)]);}
-    const poly=(g,s)=>{if(!fin(hx))return;g.strokeStyle="#d6338a";g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
-    out+=`<h3>half_area</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the median of the cell's outermost pixels. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold b + ${F.level_fraction} × (peak − b). CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
+    const poly=(g,s)=>{if(!fin(hx))return;g.strokeStyle=COLORS[base];g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
+    out+=`<h3>${base}</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the ${F.background} of the cell's outermost pixels. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold b + ${F.level_fraction} × (peak − b). CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
       <div class="cells"><figure><canvas id="dc-a"></canvas>cell and region outline</figure><figure><canvas id="dc-b"></canvas>original pixels above the threshold (red)</figure></div>
       <table><tr><td>local level b</td><td>${fin(b)?b.toPrecision(4):"–"}</td></tr><tr><td>peak height above b</td><td>${fin(pk)?pk.toPrecision(4):"–"}</td></tr>
       <tr><td>threshold = b + ${F.level_fraction} × height</td><td>${fin(t)?t.toPrecision(4):"–"}</td></tr>
