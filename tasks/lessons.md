@@ -53,3 +53,7 @@
 - **Test on harder synthetic patterns before shipping a method.** The wide tail_area passed on 100 nm round-ish
   features but failed on the user's patterns; bigger or square features (Gaussian neighbour models misfit) made
   almost all fail. Run the stress set (bigger, squares, more blur) and check the share measured, not just error.
+- **Test array layouts, not only square grids, and use the user's own example image.** tail_area took its level
+  from "own territory beyond 0.6 pitch"; on a staggered array the territory ends at ~0.56 pitch, so the level was
+  empty and almost every hole got no value. examples/data/synthetic_ch (staggered) reproduces it in seconds.
+  Define per-hole regions relative to the hole's own territory, never by a fixed fraction of the pitch.

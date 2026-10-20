@@ -31,9 +31,9 @@ cannot change, or cancel it:
     The same area count with a low threshold, near the background, on a
     wider window, ``tail_window`` pitches around the hole, holding the hole's
     own share of the light (each pixel shared among the holes in proportion
-    to their fitted models), so the region may extend past the hole's cell. Local level = median of the hole's own territory
-    beyond 0.6 pitch (the corners farthest from every hole, where its tail has
-    faded); averaged peak; threshold at ``tail_area_level`` of the height.
+    to their fitted models), so the region may extend past the hole's cell. Local level = median of the farthest tenth of the
+    hole's own territory (closer to it than to any other hole), where its tail
+    has faded; averaged peak; threshold at ``tail_area_level`` of the height.
     The peak's noise enters the threshold only with that weight, and the dim
     tail has less shot noise than the bright core. Its ``mean_signal`` (mean
     light above the local level over the region) is the cell intensity.
@@ -525,8 +525,8 @@ def _wide_cells(signal: np.ndarray, state, masks: np.ndarray, origins: np.ndarra
     map, each pixel shared among the holes in proportion to their fitted models there (own model / sum of all).
     Near a neighbour's centre the neighbour's share is ~all however well its model fits, so a misfit (big, square
     or ringing spots) leaves no bright leftover for the region to spill into. Returns (cells, inside the image,
-    level pixels, window origins): the level pixels are the hole's own territory (closer to it than to any other
-    hole) at least 0.6 pitch from it, the darkest place where its own tail has faded."""
+    level pixels, window origins): the level pixels are the farthest tenth (at least 4 pixels) of the hole's own
+    territory (closer to it than to any other hole), the darkest place where its own tail has faded."""
     from scipy.spatial import cKDTree
 
     n_all, h, w = masks.shape
@@ -576,7 +576,14 @@ def _wide_cells(signal: np.ndarray, state, masks: np.ndarray, origins: np.ndarra
         near = xp.asarray(centers_all[neighbours[sl]])  # (c, k, 2)
         dist = xp.sqrt((gx[:, None] - near[:, :, 0, None, None]) ** 2 + (gy[:, None] - near[:, :, 1, None, None]) ** 2)
         mine = dist[:, 0] <= dist[:, 1:].min(axis=1) if k > 1 else xp.ones_like(dist[:, 0], dtype=bool)
-        level = inside & mine & (dist[:, 0] >= 0.6 * pitch)
+        # Level pixels: the farthest tenth (at least 4 pixels) of the hole's own territory, whatever the layout
+        # (square, staggered, irregular): where its own light has faded most.
+        own_area = inside & mine
+        rows_c = own_area.shape[0]
+        far = xp.sort(xp.where(own_area, dist[:, 0], -xp.inf).reshape(rows_c, -1), axis=1)[:, ::-1]
+        count = own_area.reshape(rows_c, -1).sum(axis=1)
+        keep = xp.clip(xp.maximum(count // 10, 4), 1, far.shape[1]) - 1
+        level = own_area & (dist[:, 0] >= far[xp.arange(rows_c), keep][:, None, None])
         # Each pixel's light is shared among the holes in proportion to their models there: near a neighbour's
         # centre its share is ~all, however well its model fits, so a misfit leaves no bright leftover to spill into.
         cells[sl] = _to_numpy(xp.where(inside, win * own / (total + floor), 0.0)).astype(np.float32)

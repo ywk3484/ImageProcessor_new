@@ -78,7 +78,7 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
     np.testing.assert_allclose(_array(detail["prof_x"], np.float32).reshape(-1, w),
                                np.where(result.masks, result.rois, 0).sum(axis=1), rtol=1e-5, atol=1e-4)
     for name, background in (("half_area", "median of the cell"), ("half_area_min", "minimum of the cell"),
-                             ("half_area_min_avg", "minimum of the cell"), ("tail_area", "median of the hole's own")):
+                             ("half_area_min_avg", "minimum of the cell"), ("tail_area", "median of the farthest tenth")):
         half, panel = result.measurements[name], detail["half"][name]
         assert panel["background"].startswith(background)
         assert ("brightest 4" in panel["peak_rule"]) == (name in ("half_area_min_avg", "tail_area"))

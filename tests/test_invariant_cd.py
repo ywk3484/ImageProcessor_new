@@ -375,13 +375,15 @@ def test_wide_cells_hold_each_holes_share_of_the_light_and_level_pixels_far_from
     neighbour = (15 - 3, 35 - 13)  # its centre in the window
     assert shared[neighbour] < 0.01 * 80
     np.testing.assert_allclose(shared[12, 12], cells[0][8, 8], rtol=0.01)  # its own centre: unchanged
-    # Level pixels: its own territory (closer to it than to either neighbour) at least 0.6 pitch = 6 px from it.
+    # Level pixels: the farthest tenth of its own territory (closer to it than to either neighbour).
     gx, gy = xx[7:24, 17:34], yy[7:24, 17:34]
     cx, cy = global_params[1, 1:3]
     mine = np.hypot(gx - cx, gy - cy)
     others = np.minimum(*(np.hypot(gx - q[1], gy - q[2]) for q in global_params[[0, 2]]))
-    np.testing.assert_array_equal(level[0], (mine >= 6) & (mine <= others))
-    assert level[0].sum() > 20
+    territory = mine <= others
+    cut = np.sort(mine[territory])[::-1][territory.sum() // 10 - 1]
+    np.testing.assert_array_equal(level[0], territory & (mine >= cut))
+    assert level[0].sum() >= territory.sum() // 10
 
 
 def test_tail_area_measures_every_hole_at_a_threshold_near_the_background(shaped):
@@ -397,3 +399,23 @@ def test_tail_area_measures_every_hole_at_a_threshold_near_the_background(shaped
     # Positions relative to each hole's own cell, as for the other methods (saved results rebuild contours from them).
     np.testing.assert_allclose(tail.geometry["center_local"][tail.valid] + result.origins_xy[tail.valid],
                                tail.centers_xy[tail.valid])
+
+
+def test_tail_area_measures_every_hole_of_a_staggered_array():
+    # Rows offset by half a pitch: each hole's own territory reaches only ~0.56 pitch, so the local level must come
+    # from the farthest part of the territory, not from a fixed distance.
+    rng = np.random.default_rng(3)
+    height, width, pitch, sigma = 90, 130, 8.0, 3.0 / (2 * np.sqrt(2 * np.log(2)))
+    yy, xx = np.indices((height, width))
+    image = np.full((height, width), 15.0)
+    for row, y in enumerate(np.arange(6, height - 5, pitch)):
+        for x in np.arange(6 + (row % 2) * pitch / 2, width - 5, pitch):
+            cx, cy = x + rng.uniform(-0.2, 0.2), y + rng.uniform(-0.2, 0.2)
+            image += 60 * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * sigma ** 2))
+    image = np.rint(image + rng.normal(0, 0.7, image.shape))
+    result = measure_cds(image, methods=("tail_area",), area_max=50, tail_area_level=0.2)
+    tail = result.measurements["tail_area"]
+    assert tail.valid.mean() > 0.99
+    # The 20 % width of the Gaussian spot, within the small bias of the averaged peak on a 3 px spot.
+    expected = 2 * sigma * np.sqrt(2 * np.log(1 / 0.2))
+    np.testing.assert_allclose(np.median(tail.metrics["cd_equivalent_px"][tail.valid]), expected, rtol=0.08)

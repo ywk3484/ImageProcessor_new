@@ -277,8 +277,9 @@ def detail_data(result) -> dict:
     peak_pixels = result.meta.get("half_area_peak_pixels", 4.0)
     averaged = f"mean of the brightest {peak_pixels:g} pixels' worth of the enlarged cell"
     edge = "of the cell's outermost pixels"
-    corners = ("median of the hole's own area at least 0.6 pitch from it (its corners, farthest from every hole), on a "
-               "wider window with all other holes removed; the area may reach past the cell drawn here")
+    corners = ("median of the farthest tenth of the hole's own area (the pixels closer to it than to any other hole), "
+               "where its light has faded, on a wider window holding its share of the light; the area may reach past "
+               "the cell drawn here")
     for name, background, peak in (
             ("half_area", f"median {edge}", "highest point"), ("half_area_min", f"minimum {edge}", "highest point"),
             ("half_area_min_avg", f"minimum {edge}", averaged), ("tail_area", corners, averaged)):

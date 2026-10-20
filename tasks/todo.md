@@ -241,3 +241,9 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
 - Pulse leak ~0.02 without per-hole lit patches; 0.23 with the synthetic sharp lit patches.
 - Full size GPU: 21 s per image; tail window file 39 MB per image (loaded on opening its panel).
 - Suite: 194 passed, 1 skipped, same 9 pre-existing failures.
+
+# tail_area: no value on staggered arrays (2026-10-20)
+- Cause: the local level came from the hole's territory beyond 0.6 pitch; on a staggered array the territory
+  reaches only ~0.56 pitch, so it was empty and the hole got no value (2562 of 2805 on examples/data/synthetic_ch).
+- Fix: level = median of the farthest tenth (at least 4 px) of the hole's own territory. synthetic_ch: 2805/2805
+  measured at levels 0.1-0.5; stress set 96-100 %. Regression test on a staggered array added.
