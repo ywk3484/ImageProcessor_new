@@ -23,8 +23,16 @@ cannot change, or cancel it:
 ``half_area_min``
     ``half_area`` with the local level taken as the minimum of the cell's
     outermost pixels instead of their median.
+``half_area_min_avg``
+    ``half_area_min`` with the peak taken as the mean of the brightest
+    pixels (a fixed area) instead of the single brightest point, so one
+    outstanding pixel cannot set the threshold.
 
-``projection``, ``half_area`` and ``half_area_min`` run on NumPy or CuPy (``xp``). All work on cells with the neighbouring holes' models removed (from
+For the ``half_area`` family cd_x / cd_y are the x / y widths of the ellipse
+with the region's area and its x and y second moments (the ellipse's diameter
+along x and y), so cd_x * cd_y = cd_equivalent ** 2.
+
+``projection`` and the ``half_area`` family run on NumPy or CuPy (``xp``). All work on cells with the neighbouring holes' models removed (from
 ``deblend``). Lengths are in pixels.
 """
 
@@ -39,7 +47,8 @@ from .cd import radial_contours
 from .deblend import _render_on_grids, _render_radius, render_models, roi_grids, sigma_major, windows, FWHM_K
 
 
-INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min")
+INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min", "half_area_min_avg")
+_HALF_AREA = {"half_area": ("median", False), "half_area_min": ("min", False), "half_area_min_avg": ("min", True)}
 AIRY_K = 1.0290  # FWHM of the incoherent Airy pattern = AIRY_K / cutoff frequency
 _CHUNK = 4096    # holes per batched fit step: (chunk, K) arrays stay ~10 MB each
 _CALIBRATION_HOLES = 2000
@@ -376,16 +385,19 @@ def _grow(region):
 
 
 def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_angles: int,
-               level: float = 0.5, factor: int = 4, background: str = "median", xp=np) -> CDMethodResult:
+               level: float = 0.5, factor: int = 4, background: str = "median", peak_pixels: float | None = None,
+               xp=np) -> CDMethodResult:
     """Area above the cell's local level + ``level`` x the peak height, on a ``factor``x cubic enlargement.
 
     Local level b: ``background`` ('median' or 'min') of the cell's outermost pixels (a pulse that lights the hole lights its surroundings
-    too, so b, the peak and the threshold scale together and the area does not). The region is the connected
-    part around the peak above the threshold; CD = 2 sqrt(area / pi), cd_x / cd_y = its x / y extents.
+    too, so b, the peak and the threshold scale together and the area does not). Peak: the highest enlarged
+    pixel, or with ``peak_pixels`` the mean of the brightest enlarged pixels covering that many original pixels.
+    The region is the connected part around the highest pixel above the threshold; CD = 2 sqrt(area / pi);
+    cd_x / cd_y = widths of the equal-area ellipse with the region's x / y second moments.
     """
     n, h, w = masks.shape
-    result = _empty("half_area" if background == "median" else "half_area_min", n, n_angles,
-                    ("local_level", "threshold"))
+    name = {spec: key for key, spec in _HALF_AREA.items()}[background, peak_pixels is not None]
+    result = _empty(name, n, n_angles, ("local_level", "threshold"))
     if not n:
         return result
     zy, ny = _zoom_operators(h, factor)
@@ -423,6 +435,10 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
         flat = xp.where(big_mask, big, -xp.inf).reshape(k, -1)
         top = xp.argmax(flat, axis=1)
         peak = flat[xp.arange(k), top]
+        if peak_pixels is not None:
+            n_top = min(max(1, int(round(peak_pixels * factor * factor))), H * W)
+            peak = xp.partition(flat, -n_top, axis=1)[:, -n_top:].mean(axis=1)  # -inf (outside the cell): no_signal
+            peak = xp.where(xp.isfinite(peak), peak, -1.0)
         above = big_mask & (big > (level * peak)[:, None, None])
         region = xp.zeros((k, H * W), dtype=bool)
         region[xp.arange(k), top] = True
@@ -433,14 +449,18 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
                 break
             region = grown
         count = region.sum(axis=(1, 2))
-        cols, lines = region.any(axis=1), region.any(axis=2)
-        extent_x = (W - xp.argmax(cols[:, ::-1], axis=1) - xp.argmax(cols, axis=1)) * sx
-        extent_y = (H - xp.argmax(lines[:, ::-1], axis=1) - xp.argmax(lines, axis=1)) * sy
         touches = ((_grow(region) & ~big_mask).any(axis=(1, 2)) | region[:, [0, -1]].any(axis=(1, 2))
                    | region[:, :, [0, -1]].any(axis=(1, 2)))
         weight = xp.maximum(count, 1)
         cy = (region.sum(axis=2) * gy).sum(axis=1) / weight
         cx = (region.sum(axis=1) * gx).sum(axis=1) / weight
+        var_x = (region.sum(axis=1) * (gx[None] - cx[:, None]) ** 2).sum(axis=1) / weight * sx * sx
+        var_y = (region.sum(axis=2) * (gy[None] - cy[:, None]) ** 2).sum(axis=1) / weight * sy * sy
+        # Equal-area ellipse with the region's x/y spread: its diameters along x and y (exact for an axis-aligned
+        # ellipse; cd_x * cd_y = cd_equivalent^2).
+        cd_eq = 2 * xp.sqrt(count * (sx * sy) / np.pi)
+        ratio = xp.sqrt(xp.sqrt(xp.maximum(var_x, 1e-12) / xp.maximum(var_y, 1e-12)))
+        extent_x, extent_y = cd_eq * ratio, cd_eq / ratio
         # Contour for display: the region's last pixel along each ray from its centroid. Rays stop just beyond
         # the farthest region pixel of the chunk (a few px), not at the cell diagonal.
         far = ((gx[None, None] - cx[:, None, None]) * sx) ** 2 + ((gy[None, :, None] - cy[:, None, None]) * sy) ** 2
@@ -485,7 +505,7 @@ def measure_invariant(
     signal: np.ndarray, state, masks: np.ndarray, origins: np.ndarray, report: np.ndarray, *,
     methods: tuple[str, ...], n_angles: int, psf_fwhm_px: float | None = None,
     nominal_cd_px: float | None = None, dark_level: float = 0.0, flux_ratio_scale: float | None = None,
-    rounds: int = 2, half_area_level: float = 0.5, xp=np,
+    rounds: int = 2, half_area_level: float = 0.5, half_area_peak_pixels: float = 4.0, xp=np,
 ) -> tuple[dict[str, CDMethodResult], dict]:
     """Pulse-invariant methods for the reported cells of a converged ``deblend`` state.
 
@@ -494,17 +514,16 @@ def measure_invariant(
     ``nominal_cd_px`` (the blur is then chosen so the median fitted diameter
     equals it). ``flux_ratio`` is scaled by ``flux_ratio_scale`` when given,
     else so that its median equals ``nominal_cd_px``. ``projection`` and
-    ``half_area``/``half_area_min`` need neither and run on ``xp`` (NumPy or CuPy).
+    the ``half_area`` family need neither and run on ``xp`` (NumPy or CuPy).
     """
     found, info = {}, {}
     if "projection" in methods:
         found["projection"] = _projection(state.cleaned[report], masks[report], origins[report], n_angles, xp=xp)
-    if "half_area" in methods:
-        found["half_area"] = _half_area(state.cleaned[report], masks[report], origins[report], n_angles,
-                                        level=half_area_level, xp=xp)
-    if "half_area_min" in methods:
-        found["half_area_min"] = _half_area(state.cleaned[report], masks[report], origins[report], n_angles,
-                                            level=half_area_level, background="min", xp=xp)
+    for name, (background, averaged) in _HALF_AREA.items():
+        if name in methods:
+            found[name] = _half_area(state.cleaned[report], masks[report], origins[report], n_angles,
+                                     level=half_area_level, background=background,
+                                     peak_pixels=half_area_peak_pixels if averaged else None, xp=xp)
     if "disk" not in methods and "flux_ratio" not in methods:
         return found, info
     if psf_fwhm_px is None and nominal_cd_px is None:

@@ -21,6 +21,14 @@ analysis = [
     "matplotlib>=3.9",
     "pillow>=10.4",
 ]
+gpu = [
+    "cupy-cuda12x[ctk]==14.2.0",
+    "cuda-toolkit==12.6.3",
+    "nvidia-nvjitlink-cu12==12.6.85",
+]
+viewer = ["PyQt6>=6.7", "pyqtgraph>=0.13.7", "PyOpenGL>=3.1.7", "matplotlib>=3.9"]
+notebook = ["jupyterlab>=4.2", "ipykernel>=6.29"]
+dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 where = ["."]

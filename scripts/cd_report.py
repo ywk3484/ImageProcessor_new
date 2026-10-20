@@ -3,11 +3,12 @@
     python scripts/cd_report.py FOLDER --output REPORT --pixel-size 21 --unit nm
 
 Methods: gaussian (deblended Gaussian FWHM), projection (x/y profile max-slope widths), half_area (area above
-half the feature's own height over its local level = median of the cell edge; assumes no shape) and half_area_min
-(the same with the local level = minimum of the cell edge). None needs a blur or nominal CD. The other
+half the feature's own height over its local level = median of the cell edge; assumes no shape), half_area_min
+(the same with the local level = minimum of the cell edge) and half_area_min_avg (half_area_min with the peak =
+mean of the brightest pixels, --peak-pixels of them). None needs a blur or nominal CD. The other
 subpx methods (logquad, gradient, halfmax, disk, flux_ratio) are left out: they assume a round or star-shaped
 outline, or need the blur, and disk/flux_ratio dominated the run time. --backend auto (default) uses the GPU when
-CuPy finds one.
+CuPy finds a CUDA device; the backend actually used, and why the GPU is not, is printed at the start.
 
 Open REPORT/index.html in a browser (works from the folder, no server). It has a summary tab and one tab per image.
 
@@ -17,7 +18,9 @@ of image i (over the holes that method measured validly) and N the number of ima
     s = sqrt( sum_i (m_i - M)^2 / (N - 1) )
     between-image 3 sigma % = 3 s / M x 100        (also given as 3 s in --unit)
 Below that, per image and method: valid holes, mean CD and the within-image 3 sigma % = 3 sigma / mean x 100,
-sigma being the standard deviation of that image's hole CDs (N - 1 in the denominator).
+sigma being the standard deviation of that image's hole CDs (N - 1 in the denominator). Every statistic is given
+for the CD and separately for the x and the y width (cd_x_px / cd_y_px of each method; for the half_area family
+the x / y diameters of the ellipse with the region's area and x / y spread), e.g. for an aberration along x.
 
 Each image tab starts with the CD map: the image with every detected hole drawn at its CD (drag to pan, wheel
 to zoom; method, zoom and pan stay when switching tabs; colours on one scale for all images by default). Clicking
@@ -51,7 +54,7 @@ if str(ROOT) not in sys.path:
 from subpx import measure_cds, save_cd_results
 from subpx.cd import METHOD_LABELS
 
-ALL_METHODS = ("gaussian", "projection", "half_area", "half_area_min")
+ALL_METHODS = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg")
 DESCRIPTIONS = {
     "gaussian": "FWHM of a 2-D Gaussian fitted to the spot (deblended). Describes the blurred spot, not the hole; "
                 "a brighter pulse can change it.",
@@ -61,32 +64,40 @@ DESCRIPTIONS = {
                  "shape; a pulse that brightens the feature and its surroundings together does not change it.",
     "half_area_min": "As half_area, but the local level is the minimum of the cell's outermost pixels instead of their "
                      "median, so the feature's own tail reaching the cell edge cannot raise it.",
+    "half_area_min_avg": "As half_area_min, but the peak is the mean of the brightest pixels (--peak-pixels pixels' "
+                         "worth of the enlarged cell) instead of the single brightest point, so one outstanding "
+                         "pixel cannot set the threshold.",
 }
-# Extra map layers: (layer, metric, label) per method.
-LAYERS = {"projection": (("projection_x", "cd_x_px", "projection, x width only"),
-                         ("projection_y", "cd_y_px", "projection, y width only"))}
+# The CD and the x / y widths: statistics key suffix, metric, label.
+AXES = (("", "cd_equivalent_px", "CD"), ("_x", "cd_x_px", "x"), ("_y", "cd_y_px", "y"))
+
+
+def _spread(values: np.ndarray) -> dict:
+    values = values[np.isfinite(values)]
+    mean = float(values.mean()) if values.size else float("nan")
+    std = float(values.std(ddof=1)) if values.size > 1 else float("nan")
+    return {"valid": int(values.size), "mean": mean, "std": std,
+            "three_sigma_pct": 300 * std / mean if values.size > 1 and mean else float("nan")}
 
 
 def cd_statistics(result) -> dict[str, dict]:
-    """Per method: cells, valid holes, mean, sigma and 3 sigma % of the valid holes' CDs (in result.unit)."""
+    """Per method: cells, valid holes, mean, sigma and 3 sigma % of the valid holes' CDs (in result.unit); the same
+    for the x and y widths under the keys ``valid_x``, ``mean_x``, ... and ``..._y``."""
     stats = {}
     for name, measured in result.measurements.items():
-        values = measured.metrics["cd_equivalent_px"][measured.valid] * result.pixel_size
-        values = values[np.isfinite(values)]
-        mean = float(values.mean()) if values.size else float("nan")
-        std = float(values.std(ddof=1)) if values.size > 1 else float("nan")
-        stats[name] = {"cells": int(len(measured.valid)), "valid": int(values.size), "mean": mean, "std": std,
-                       "three_sigma_pct": 300 * std / mean if values.size > 1 and mean else float("nan")}
+        stats[name] = {"cells": int(len(measured.valid))}
+        for suffix, metric, _ in AXES:
+            spread = _spread(measured.metrics[metric][measured.valid] * result.pixel_size)
+            stats[name].update({key + suffix: value for key, value in spread.items()})
     return stats
 
 
 def layer_values(result) -> dict[str, np.ndarray]:
-    """Per map layer: each hole's CD in px, NaN where the method failed (projection adds its x and y widths)."""
+    """Per map layer: each hole's CD in px, NaN where the method failed; ``<method>_x`` / ``_y``: its x / y widths."""
     layers = {}
     for name, measured in result.measurements.items():
-        layers[name] = np.where(measured.valid, measured.metrics["cd_equivalent_px"], np.nan)
-        for layer, metric, _ in LAYERS.get(name, ()):
-            layers[layer] = np.where(measured.valid, measured.metrics[metric], np.nan)
+        for suffix, metric, _ in AXES:
+            layers[name + suffix] = np.where(measured.valid, measured.metrics[metric], np.nan)
     return layers
 
 
@@ -105,15 +116,21 @@ def agreement(result) -> tuple[list[str], np.ndarray]:
 
 
 def between_image_statistics(entries: list[dict], methods: tuple[str, ...]) -> dict[str, dict]:
-    """Per method: spread of the per-image mean CDs over the images that method measured (see module docstring)."""
+    """Per method: spread of the per-image mean CDs over the images that method measured (see module docstring);
+    the same for the mean x and y widths under the keys ``images_x``, ``mean_of_means_x``, ... and ``..._y``."""
     stats = {}
     for name in methods:
-        means = np.array([e["stats"][name]["mean"] for e in entries if not e.get("error") and name in e["stats"]])
-        means = means[np.isfinite(means)]
-        mean = float(means.mean()) if means.size else float("nan")
-        std = float(means.std(ddof=1)) if means.size > 1 else float("nan")
-        stats[name] = {"images": int(means.size), "mean_of_means": mean, "std_of_means": std, "three_sigma": 3 * std,
-                       "three_sigma_pct": 300 * std / mean if means.size > 1 and mean else float("nan")}
+        stats[name] = {}
+        for suffix, _, _ in AXES:
+            means = np.array([e["stats"][name]["mean" + suffix] for e in entries
+                              if not e.get("error") and name in e["stats"]])
+            means = means[np.isfinite(means)]
+            mean = float(means.mean()) if means.size else float("nan")
+            std = float(means.std(ddof=1)) if means.size > 1 else float("nan")
+            stats[name].update({
+                "images" + suffix: int(means.size), "mean_of_means" + suffix: mean, "std_of_means" + suffix: std,
+                "three_sigma" + suffix: 3 * std,
+                "three_sigma_pct" + suffix: 300 * std / mean if means.size > 1 and mean else float("nan")})
     return stats
 
 
@@ -130,7 +147,7 @@ def _b64(array: np.ndarray, dtype: str) -> str:
 def hole_data(result, layers: dict[str, np.ndarray]) -> dict:
     """Per map layer: hole centers, CD (px), validity and status as base64 arrays; plus what the band profile needs.
 
-    Extra layers (projection's x/y widths) name their ``base`` method and share its centers and status.
+    The x / y width layers name their ``base`` method and share its centers and status.
     """
     seeds = result.seeds_xy
     methods = {}
@@ -143,8 +160,9 @@ def hole_data(result, layers: dict[str, np.ndarray]) -> dict:
             "valid": _b64(measured.valid, "u1"), "status": _b64(codes, "u1" if len(statuses) < 256 else "<u2"),
             "status_names": statuses.tolist(), "status_wide": len(statuses) >= 256,
         }
-        for layer, _, label in LAYERS.get(name, ()):
-            methods[layer] = {"label": label, "base": name, "cd": _b64(layers[layer], "<f4")}
+        for suffix, _, label in AXES[1:]:
+            methods[name + suffix] = {"label": f"{METHOD_LABELS[name]}, {label} width only", "base": name,
+                                      "cd": _b64(layers[name + suffix], "<f4")}
     model = result.deblend_model
     # Spot peak above background: the deblend Gaussian's amplitude (mean cell brightness without a model).
     peak = model["params"][model["report"], 0] if model else result.mean_intensity
@@ -185,14 +203,17 @@ def detail_data(result) -> dict:
         cells = np.where(result.masks, result.rois, 0.0)
         out["prof_x"], out["prof_y"] = _b64(cells.sum(axis=1), "<f4"), _b64(cells.sum(axis=2), "<f4")
     out["half"] = {}
-    for name, background in (("half_area", "median"), ("half_area_min", "minimum")):
+    peak_pixels = result.meta.get("half_area_peak_pixels", 4.0)
+    for name, background, peak in (
+            ("half_area", "median", "highest point"), ("half_area_min", "minimum", "highest point"),
+            ("half_area_min_avg", "minimum", f"mean of the brightest {peak_pixels:g} pixels' worth of the enlarged cell")):
         if name not in result.measurements:
             continue
         measured = result.measurements[name]
         m, geometry = measured.metrics, measured.geometry
         edge = geometry["edge_px"]
         rays = edge[:, ::max(1, edge.shape[1] // 32)][:, :32]
-        out["half"][name] = {"background": background, "level": _b64(m["local_level"], "<f4"), "peak": _b64(m["peak_signal"], "<f4"),
+        out["half"][name] = {"background": background, "peak_rule": peak, "level": _b64(m["local_level"], "<f4"), "peak": _b64(m["peak_signal"], "<f4"),
                              "threshold": _b64(m["threshold"], "<f4"),
                              "cx": _b64(geometry["center_local"][:, 0], "<f4"), "cy": _b64(geometry["center_local"][:, 1], "<f4"),
                              "rays": _b64(np.clip(np.rint(np.nan_to_num(rays) * 16), 0, 255), "u1"), "n_rays": int(rays.shape[1]),
@@ -209,14 +230,23 @@ def _plain(value: float, digits: int = 2) -> str:
     return "-" if not np.isfinite(value) else f"{value:.{digits}f}"
 
 
+def _groups(span: int) -> str:
+    """One header cell per AXES entry (CD, x width, y width), each spanning ``span`` columns."""
+    return "".join(f"<th colspan='{span}' class='group'>{'CD' if not x else label + ' width'}</th>"
+                   for x, _, label in AXES)
+
+
 def _stats_table(stats: dict, unit: str) -> str:
+    u = html.escape(unit)
     rows = "".join(
         f"<tr><td><span class='swatch' style='background:{COLORS[m]}'></span>{html.escape(METHOD_LABELS[m])} "
-        f"<code>{m}</code></td><td>{s['valid']:,} / {s['cells']:,}</td><td>{_fmt(s['mean'])}</td>"
-        f"<td>{_fmt(s['std'])}</td><td><b>{_fmt(s['three_sigma_pct'])}</b></td></tr>"
+        f"<code>{m}</code></td><td>{s['valid']:,} / {s['cells']:,}</td>"
+        + "".join(f"<td class='first'>{_fmt(s['mean' + x])}</td><td>{_fmt(s['std' + x])}</td>"
+                  f"<td><b>{_fmt(s['three_sigma_pct' + x])}</b></td>" for x, _, _ in AXES) + "</tr>"
         for m, s in stats.items())
-    return (f"<table class='stats'><thead><tr><th>Method</th><th>Valid holes</th><th>Mean CD ({html.escape(unit)})</th>"
-            f"<th>σ ({html.escape(unit)})</th><th>3σ (%)</th></tr></thead><tbody>{rows}</tbody></table>")
+    columns = "".join(f"<th>Mean ({u})</th><th>σ ({u})</th><th>3σ (%)</th>" for _ in AXES)
+    return (f"<table class='stats wide'><thead><tr><th rowspan='2'>Method</th><th rowspan='2'>Valid holes</th>"
+            f"{_groups(3)}</tr><tr>{columns}</tr></thead><tbody>{rows}</tbody></table>")
 
 
 def _agreement_table(names: list[str], r: np.ndarray) -> str:
@@ -231,7 +261,13 @@ def _agreement_table(names: list[str], r: np.ndarray) -> str:
 
 
 COLORS = {"gaussian": "#5bbf2a", "projection": "#7a7a7a", "projection_x": "#2b8cbe", "projection_y": "#e6550d",
-          "half_area": "#d6338a", "half_area_min": "#8e44ad"}
+          "half_area": "#d6338a", "half_area_min": "#8e44ad", "half_area_min_avg": "#d68910"}
+# x / y width layers: the method's colour, lighter for x and darker for y (projection keeps its own two).
+for _name, _color in list(COLORS.items()):
+    if not _name.endswith(("_x", "_y")):
+        _rgb = np.array([int(_color[i:i + 2], 16) for i in (1, 3, 5)])
+        COLORS.setdefault(_name + "_x", "#%02x%02x%02x" % tuple(np.rint(_rgb + (255 - _rgb) * 0.45).astype(int)))
+        COLORS.setdefault(_name + "_y", "#%02x%02x%02x" % tuple(np.rint(_rgb * 0.6).astype(int)))
 
 
 def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], notes: list[str], unit: str,
@@ -241,35 +277,45 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
     ``ranges``: per map layer, the CD colour range (px) shared by all images.
     """
     def table(title, key):
-        head = "".join(f"<th><span class='swatch' style='background:{COLORS[m]}'></span>{html.escape(m)}</th>"
-                       for m in methods)
+        """Per image: ``key`` of the CD, the x and the y width (one column group each) of every method."""
+        names = "".join(f"<th><span class='swatch' style='background:{COLORS[m]}'></span>{html.escape(m)}</th>"
+                        for _ in AXES for m in methods)
         body = []
         for e in entries:
             if e.get("error"):
-                body.append(f"<tr><td>{html.escape(e['name'])}</td><td colspan='{1 + len(methods)}' class='error'>"
-                            f"failed: {html.escape(e['error'])}</td></tr>")
+                body.append(f"<tr><td>{html.escape(e['name'])}</td><td colspan='{1 + len(AXES) * len(methods)}' "
+                            f"class='error'>failed: {html.escape(e['error'])}</td></tr>")
                 continue
-            cells = "".join(f"<td title='{e['stats'][m]['valid']:,} valid holes'>{_fmt(e['stats'][m][key])}</td>"
-                            if m in e["stats"] else "<td>–</td>" for m in methods)
+            cells = "".join(
+                (f"<td{' class=first' if j == 0 else ''} title='{e['stats'][m]['valid' + x]:,} valid holes'>"
+                 f"{_fmt(e['stats'][m][key + x])}</td>") if m in e["stats"] else "<td>–</td>"
+                for x, _, _ in AXES for j, m in enumerate(methods))
             body.append(f"<tr><td><a href='#' data-tab='{e['id']}'>{html.escape(e['name'])}</a></td>"
                         f"<td>{e['holes']:,}</td>{cells}</tr>")
-        return (f"<h3>{title}</h3><table class='stats wide'><thead><tr><th>Image</th><th>Holes</th>{head}</tr></thead>"
+        return (f"<h3>{title}</h3><table class='stats wide'><thead><tr><th rowspan='2'>Image</th>"
+                f"<th rowspan='2'>Holes</th>{_groups(len(methods))}</tr><tr>{names}</tr></thead>"
                 f"<tbody>{''.join(body)}</tbody></table>")
 
     between = between_image_statistics(entries, methods)
     unit_html = html.escape(unit)
     rows = "".join(
         f"<tr><td><span class='swatch' style='background:{COLORS[m]}'></span>{html.escape(METHOD_LABELS[m])} "
-        f"<code>{m}</code></td><td>{b['images']}</td><td>{_fmt(b['mean_of_means'])}</td><td>{_fmt(b['std_of_means'], 3)}</td>"
-        f"<td>{_fmt(b['three_sigma'], 3)}</td><td><b>{_fmt(b['three_sigma_pct'], 3)}</b></td></tr>"
+        f"<code>{m}</code></td><td>{b['images']}</td>"
+        + "".join(f"<td class='first'>{_fmt(b['mean_of_means' + x])}</td><td>{_fmt(b['std_of_means' + x], 3)}</td>"
+                  f"<td>{_fmt(b['three_sigma' + x], 3)}</td><td><b>{_fmt(b['three_sigma_pct' + x], 3)}</b></td>"
+                  for x, _, _ in AXES) + "</tr>"
         for m, b in between.items())
+    columns = "".join(f"<th>M ({unit_html})</th><th>s ({unit_html})</th><th>3s ({unit_html})</th><th>3s / M (%)</th>"
+                      for _ in AXES)
     summary = (
         "<h3>Between images: do the images show the same mean CD?</h3>"
         "<p class='meta'>Per method, m<sub>i</sub> = mean CD of image i over its validly measured holes, N = number of "
         "images. M = (m<sub>1</sub> + … + m<sub>N</sub>) / N; s = √( Σ (m<sub>i</sub> − M)² / (N − 1) ); "
-        "<b>between-image 3σ % = 3 s / M × 100</b>.</p>"
-        f"<table class='stats'><thead><tr><th>Method</th><th>Images (N)</th><th>M ({unit_html})</th>"
-        f"<th>s ({unit_html})</th><th>3s ({unit_html})</th><th>3s / M (%)</th></tr></thead><tbody>{rows}</tbody></table>"
+        "<b>between-image 3σ % = 3 s / M × 100</b>. The same is given for each method's x width and y width "
+        "(for the half_area family: the x / y diameters of the ellipse with the region's area and x / y spread), "
+        "so a difference between the two directions, e.g. from an aberration along x, shows up.</p>"
+        f"<table class='stats wide'><thead><tr><th rowspan='2'>Method</th><th rowspan='2'>Images (N)</th>{_groups(4)}"
+        f"</tr><tr>{columns}</tr></thead><tbody>{rows}</tbody></table>"
         + table(f"Mean CD per image, m<sub>i</sub> ({unit_html})", "mean")
         + table("Within-image 3σ (%) = 3 × σ of that image's hole CDs / its mean × 100", "three_sigma_pct"))
     legend = "".join(f"<li><span class='swatch' style='background:{COLORS[m]}'></span><b>{m}</b> — "
@@ -294,6 +340,29 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
     return path
 
 
+def describe_backend(requested: str) -> str:
+    """Which backend measure_cds will use for ``requested``, and why not the GPU when it falls back to the CPU."""
+    if requested == "cpu":
+        return "CPU (--backend cpu)"
+    try:
+        import cupy
+    except Exception as error:  # not installed, or its CUDA libraries are missing
+        reason = f"CuPy cannot be imported ({type(error).__name__}: {error})"
+    else:
+        try:
+            if cupy.cuda.runtime.getDeviceCount():
+                name = cupy.cuda.runtime.getDeviceProperties(0)["name"]
+                name = name.decode() if isinstance(name, bytes) else name
+                cupy.arange(4).sum().item()  # a real kernel: needs the CUDA runtime and compiler libraries
+                return f"GPU ({name}, CuPy {cupy.__version__})"
+            reason = "CuPy finds no CUDA device"
+        except Exception as error:
+            reason = f"CuPy cannot use the GPU ({type(error).__name__}: {error})"
+    if requested == "gpu":
+        return f"GPU requested, but {reason}"
+    return f"CPU, because {reason}. GPU setup: docs/gpu.md"
+
+
 def main(argv=None) -> None:
     from PIL import Image
     from scripts.analyze_contact_holes import load_image
@@ -304,6 +373,9 @@ def main(argv=None) -> None:
     parser.add_argument("--methods", nargs="+", choices=ALL_METHODS, default=list(ALL_METHODS))
     parser.add_argument("--half-level", type=float, default=0.5,
                         help="half_area: fraction of the peak height above the local level that bounds the region")
+    parser.add_argument("--peak-pixels", type=float, default=4.0,
+                        help="half_area_min_avg: the peak is the mean of the brightest pixels covering this many "
+                             "original pixels (of the 4x enlarged cell)")
     parser.add_argument("--pixel-size", type=float, default=1.0)
     parser.add_argument("--unit", default="px")
     parser.add_argument("--backend", choices=("cpu", "gpu", "auto"), default="auto")
@@ -325,6 +397,7 @@ def main(argv=None) -> None:
     output = args.output
     for sub in ("images", "data"):
         (output / sub).mkdir(parents=True, exist_ok=True)
+    print(f"Backend: {describe_backend(args.backend)}", flush=True)
     entries, rows, used = [], [], set()
     samples = {}  # per map layer: a sample of every image's CDs, for the shared colour range
     rng = np.random.default_rng(0)
@@ -341,7 +414,7 @@ def main(argv=None) -> None:
             result = measure_cds(
                 image, methods=methods, seeds=args.seeds, invert=args.invert, area_min=args.area_min,
                 area_max=args.area_max, pixel_size=args.pixel_size, unit=args.unit, backend=args.backend,
-                half_area_level=args.half_level,
+                half_area_level=args.half_level, half_area_peak_pixels=args.peak_pixels,
             )
         except Exception as error:  # one bad image must not stop the batch
             message = str(error).replace(str(path), path.name) or type(error).__name__
@@ -374,24 +447,29 @@ def main(argv=None) -> None:
         for method, s in stats.items():
             rows.append({"image": path.name, "status": "ok", "method": method, "holes": len(result.seeds_xy), **s,
                          "unit": args.unit})
-            print(f"  {method:11s} {s['valid']:7d} valid  mean {_plain(s['mean'], 3)} {args.unit}  "
-                  f"3sigma within image {_plain(s['three_sigma_pct'])} %", flush=True)
+            print(f"  {method:17s} {s['valid']:7d} valid  mean {_plain(s['mean'], 3)} {args.unit}  "
+                  f"3sigma within image {_plain(s['three_sigma_pct'])} %  "
+                  f"(x {_plain(s['mean_x'], 3)}, {_plain(s['three_sigma_pct_x'])} %; "
+                  f"y {_plain(s['mean_y'], 3)}, {_plain(s['three_sigma_pct_y'])} %)", flush=True)
         print(f"  {seconds:.1f} s", flush=True)
-    fields = ["image", "status", "method", "holes", "cells", "valid", "mean", "std", "three_sigma_pct", "unit", "error"]
+    fields = (["image", "status", "method", "holes", "cells"]
+              + [key + x for x, _, _ in AXES for key in ("valid", "mean", "std", "three_sigma_pct")] + ["unit", "error"])
     with (output / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
     between = between_image_statistics(entries, methods)
     with (output / "between_images.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["method", "images", "mean_of_means", "std_of_means", "three_sigma",
-                                                    "three_sigma_pct", "unit"])
+        writer = csv.DictWriter(handle, fieldnames=["method"] + [
+            key + x for x, _, _ in AXES
+            for key in ("images", "mean_of_means", "std_of_means", "three_sigma", "three_sigma_pct")] + ["unit"])
         writer.writeheader()
         writer.writerows({"method": m, **b, "unit": args.unit} for m, b in between.items())
     print("Between images (3 s / M x 100, s = std of the per-image means, N - 1):", flush=True)
     for method, b in between.items():
-        print(f"  {method:11s} N={b['images']}  M {_plain(b['mean_of_means'], 3)} {args.unit}  "
-              f"3s {_plain(b['three_sigma'], 3)} {args.unit}  {_plain(b['three_sigma_pct'], 3)} %", flush=True)
+        print(f"  {method:17s} N={b['images']}  M {_plain(b['mean_of_means'], 3)} {args.unit}  "
+              f"3s {_plain(b['three_sigma'], 3)} {args.unit}  {_plain(b['three_sigma_pct'], 3)} %  "
+              f"(x {_plain(b['three_sigma_pct_x'], 3)} %, y {_plain(b['three_sigma_pct_y'], 3)} %)", flush=True)
     ranges = {}
     for layer, parts in samples.items():
         pooled = np.concatenate(parts)
@@ -435,6 +513,8 @@ ul.legend{padding-left:18px;color:var(--muted)}ul.legend b{color:var(--fg)}
 .cells canvas{display:block;image-rendering:pixelated;border:1px solid var(--line)}
 canvas.plot{width:100%;display:block;margin:4px 0}
 .explain{color:var(--muted);margin:4px 0 8px}
+table.stats th.group{text-align:center!important}
+table.stats td.first,table.stats th.group{border-left:1px solid var(--line)}
 </style></head><body>
 <header><h1>CD report</h1></header>
 <nav><button class="tab active" data-tab="summary">Summary</button>__TABS__</nav>
@@ -453,7 +533,7 @@ __NOTES__ __SUMMARY__<h2>Methods</h2><ul class="legend">__LEGEND__</ul></section
 <div class="controls"><label>Bands of <select id="axis"><option value="y">rows (along y)</option><option value="x">columns (along x)</option></select></label>
 <label>Band width (px) <input id="bandw" type="number" min="1" step="1" style="width:6em"></label></div>
 <p class="explain">Each band averages the holes whose centre falls in it (default width: one hole pitch, i.e. one row of holes per band). The top plot shows every map's band means, each minus its own image mean, so the maps can be compared directly; the table gives each map's band-to-band spread. How to read it:</p>
-<ul class="explain"><li>Bands mainly in <b>projection_y</b> (or mainly in projection_x): the light changes from one pixel line to the next (scan or sensor lines), which distorts each hole's width across the lines.</li>
+<ul class="explain"><li>Every method also has an x width (<b>…_x</b>) and a y width (<b>…_y</b>) map. Bands mainly in the y widths (or mainly in the x widths): the light changes from one pixel line to the next (scan or sensor lines), which distorts each hole's width across the lines.</li>
 <li>Bands in the Deblended Gaussian but not in half_area or projection: the light level leaks into the Gaussian CD (half_area and projection ignore a change of light level).</li>
 <li>The same bands in half_area and in both projection directions: most likely real CD differences on the mask.</li>
 <li>Bands that follow the sub-pixel position: the method is tied to the pixel grid.</li></ul>
@@ -650,9 +730,9 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
     const above=vals.map(v=>fin(v)?(v>t?1:-1):NaN),nr=F.n_rays,pts=[];
     for(let r=0;r<nr;r++){const a=2*Math.PI*r/nr,q=F.rays[i*nr+r]/16;pts.push([hx+q*Math.cos(a),hy+q*Math.sin(a)]);}
     const poly=(g,s)=>{if(!fin(hx))return;g.strokeStyle=COLORS[base];g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
-    out+=`<h3>${base}</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the ${F.background} of the cell's outermost pixels. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold b + ${F.level_fraction} × (peak − b). CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
+    out+=`<h3>${base}</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the ${F.background} of the cell's outermost pixels; its peak is the ${F.peak_rule}. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold b + ${F.level_fraction} × (peak − b). CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
       <div class="cells"><figure><canvas id="dc-a"></canvas>cell and region outline</figure><figure><canvas id="dc-b"></canvas>original pixels above the threshold (red)</figure></div>
-      <table><tr><td>local level b</td><td>${fin(b)?b.toPrecision(4):"–"}</td></tr><tr><td>peak height above b</td><td>${fin(pk)?pk.toPrecision(4):"–"}</td></tr>
+      <table><tr><td>local level b</td><td>${fin(b)?b.toPrecision(4):"–"}</td></tr><tr><td>peak height above b (${F.peak_rule})</td><td>${fin(pk)?pk.toPrecision(4):"–"}</td></tr>
       <tr><td>threshold = b + ${F.level_fraction} × height</td><td>${fin(t)?t.toPrecision(4):"–"}</td></tr>
       <tr><td>region area</td><td>${fin(cdv)?(Math.PI*cdv*cdv/4).toFixed(2)+" px²":"–"}</td></tr>
       <tr><td>CD = 2 √(area / π)</td><td>${fin(cdv)?cdv.toFixed(3)+" px = "+(cdv*cur.scale).toFixed(2)+" "+cur.unit:"–"}</td></tr></table>

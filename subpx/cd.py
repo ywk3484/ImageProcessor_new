@@ -21,9 +21,10 @@ METHOD_LABELS = {
     "projection": "x/y projection max-slope width",
     "half_area": "Area above half height",
     "half_area_min": "Area above half height (minimum level)",
+    "half_area_min_avg": "Area above half height (minimum level, averaged peak)",
 }
 # Opt-in methods insensitive to a per-hole source-pulse scale (subpx/_cpu/invariant_cd.py).
-INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min")
+INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min", "half_area_min_avg")
 
 
 def measure_cds(
@@ -55,6 +56,7 @@ def measure_cds(
     dark_level: float = 0.0,
     flux_ratio_scale: float | None = None,
     half_area_level: float = 0.5,
+    half_area_peak_pixels: float = 4.0,
 ) -> CDResult:
     """Extract Voronoi cells and measure their contours and critical dimensions.
 
@@ -82,9 +84,12 @@ def measure_cds(
         pixels) and the region around the peak brighter than b plus
         ``half_area_level`` x the peak height above b, on a 4x cubic-spline
         enlargement of the cell (CD = 2 sqrt(area / pi), the equal-area circle;
-        cd_x / cd_y = the region's extents). It assumes no shape.
+        cd_x / cd_y = the x / y diameters of the ellipse with the region's
+        area and x / y second moments). It assumes no shape.
         ``half_area_min`` is the same with b = the minimum of the outermost
-        pixels instead of their median.
+        pixels instead of their median; ``half_area_min_avg`` also takes the
+        peak as the mean of the brightest ``half_area_peak_pixels`` pixels'
+        worth of the enlarged cell, so one outstanding pixel cannot set it.
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
         map, then measures every cell with the background and all neighbouring
@@ -158,7 +163,10 @@ def measure_cds(
         so that several images are compared on one scale.
     half_area_level : float
         Fraction of the peak height above the local level that bounds the
-        ``half_area`` / ``half_area_min`` region (0 < level < 1).
+        ``half_area`` family's region (0 < level < 1).
+    half_area_peak_pixels : float
+        ``half_area_min_avg``: area, in original pixels, of the brightest part
+        of the enlarged cell averaged into the peak (>= 1).
 
     Returns
     -------
@@ -200,6 +208,8 @@ def measure_cds(
         raise ValueError("dark_level must be finite")
     if not (np.isfinite(half_area_level) and 0 < half_area_level < 1):
         raise ValueError("half_area_level must be between 0 and 1")
+    if not (np.isfinite(half_area_peak_pixels) and half_area_peak_pixels >= 1):
+        raise ValueError("half_area_peak_pixels must be at least 1")
     if {"disk", "flux_ratio"} & set(methods) and nominal_cd is None and psf_fwhm is None:
         raise ValueError("methods 'disk' and 'flux_ratio' need nominal_cd or psf_fwhm (the imaging blur)")
     for name, value, lower in (("area_min", area_min, 1), ("area_max", area_max, area_min),
@@ -230,7 +240,7 @@ def measure_cds(
             deblend_iterations=deblend_iterations, pixel_size=pixel_size, unit=unit, backend=backend,
             cell_backend=cell_backend, device=device, nominal_cd=nominal_cd, psf_fwhm=psf_fwhm,
             dark_level=float(dark_level), flux_ratio_scale=flux_ratio_scale,
-            half_area_level=float(half_area_level),
+            half_area_level=float(half_area_level), half_area_peak_pixels=float(half_area_peak_pixels),
         )
 
 
@@ -266,7 +276,7 @@ def _measure_cds(
     img, *, methods, background, seeds, threshold, invert, area_min, area_max, pad, n_angles, radial_step,
     smooth_sigma, fit_fraction, peak_min_distance, background_level, background_tile, deblend_iterations,
     pixel_size, unit, backend, cell_backend, device, nominal_cd=None, psf_fwhm=None, dark_level=0.0,
-    flux_ratio_scale=None, half_area_level=0.5,
+    flux_ratio_scale=None, half_area_level=0.5, half_area_peak_pixels=4.0,
 ) -> CDResult:
     from ._cpu.centers import _segment_binary
     from ._cpu.components import connected_components_stats_cpu
@@ -353,7 +363,8 @@ def _measure_cds(
         "background": background, "seeds": seeds, "threshold": threshold, "invert": bool(invert),
         "area_min": int(area_min), "area_max": int(area_max), "pad": int(pad), "n_angles": int(n_angles),
         "radial_step": float(radial_step), "smooth_sigma": float(smooth_sigma),
-        "fit_fraction": float(fit_fraction), "half_area_level": float(half_area_level), "cell_backend": cell_backend,
+        "fit_fraction": float(fit_fraction), "half_area_level": float(half_area_level),
+        "half_area_peak_pixels": float(half_area_peak_pixels), "cell_backend": cell_backend,
         "measurement_backend": backend, "device": int(device),
         "segmentation_rescaled": rescaled, "components_before_filter": components_before_filter,
         "coordinates": "global [x, y] pixels; images indexed [y, x]",
@@ -445,7 +456,8 @@ def _measure_cds(
                 psf_fwhm_px=None if psf_fwhm is None else psf_fwhm / pixel_size,
                 nominal_cd_px=None if nominal_cd is None else nominal_cd / pixel_size,
                 dark_level=sign * float(dark_level), flux_ratio_scale=flux_ratio_scale,
-                half_area_level=half_area_level, xp=_array_module(backend),
+                half_area_level=half_area_level, half_area_peak_pixels=half_area_peak_pixels,
+                xp=_array_module(backend),
             )
             found.update(extra)
             meta.update(info)
@@ -717,8 +729,9 @@ def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[s
             "disk": "Diameter d of a round hole that, imaged through a circular-pupil (Airy) blur of FWHM psf_fwhm_px and averaged over each pixel, best fits the cell (least squares, free amplitude, center and local background per hole, neighbours' fitted models removed); the contour is the hole edge, not the spot. cd_uncertainty_px is d's standard error from the fit.",
             "flux_ratio": "Hole light (sum over the cell above the disk fit's local background, neighbours removed) divided by that local background minus dark_level; CD = 2 sqrt(ratio / pi) times flux_ratio_scale (given, else median matched to nominal_cd when given, else 1).",
             "projection": "Column and row sums of the neighbour-removed cell; cd_x/cd_y = distance between each profile's steepest rise and steepest fall (cubic spline); cd_equivalent = their mean; contour = axis-aligned ellipse with those axes.",
-            "half_area": "Cell enlarged 4x (cubic spline, scipy.ndimage.zoom order 3) after subtracting its local level b (median of the cell's outermost pixels); region = pixels connected to the peak and above half_area_level x peak height (above b); cd_equivalent = 2 sqrt(region area / pi); cd_x/cd_y = the region's x/y extents; contour = the region's last pixel along rays from its centroid (display only); no shape assumed.",
+            "half_area": "Cell enlarged 4x (cubic spline, scipy.ndimage.zoom order 3) after subtracting its local level b (median of the cell's outermost pixels); region = pixels connected to the peak and above half_area_level x peak height (above b); cd_equivalent = 2 sqrt(region area / pi); cd_x/cd_y = x/y diameters of the ellipse with the region's area and x/y second moments (cd_x * cd_y = cd_equivalent^2); contour = the region's last pixel along rays from its centroid (display only); no shape assumed.",
             "half_area_min": "As half_area, with the local level b = the minimum (not the median) of the cell's outermost pixels.",
+            "half_area_min_avg": "As half_area_min, with the peak = mean of the brightest enlarged pixels covering half_area_peak_pixels original pixels (not the single highest).",
             "cd_equivalent": "2 sqrt(contour_area / pi); analytic ellipse area for logquad, polygon area otherwise.",
             "cd_x_cd_y": "Axis-aligned contour extents; analytic ellipse projections for logquad.",
             "failed_cells": "Retained with valid=False, status, and NaN geometric metrics; candidate/partial contours may remain for diagnosis.",

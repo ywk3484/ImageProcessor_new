@@ -1,5 +1,51 @@
 # GPU backend notes
 
+## Setup: what to install
+
+`backend="auto"` uses the GPU only when CuPy imports **and** finds a CUDA device;
+otherwise it silently runs on the CPU. `scripts/cd_report.py` prints the backend
+it will use, and the reason when it is the CPU, as its first line:
+`Backend: GPU (NVIDIA ...)` or `Backend: CPU, because ...`.
+
+1. **NVIDIA driver.** `nvidia-smi` must work and show `CUDA Version: 12.x` or
+   newer (driver >= 525.60.13 on Linux, >= 527.41 on Windows). A newer driver
+   (e.g. CUDA 13) also runs CUDA 12 programs. No system CUDA Toolkit is needed.
+2. **CuPy with its CUDA libraries, in the same Python environment that runs the
+   scripts** (check with `python -c "import sys; print(sys.executable)"`):
+
+   ```bash
+   python -m pip install "cupy-cuda12x[ctk]"
+   ```
+
+   `cupy-cuda12x` alone is not enough: it does not bundle the CUDA runtime,
+   NVRTC (the kernel compiler), cuBLAS, cuFFT, cuRAND, cuSOLVER and cuSPARSE.
+   The `[ctk]` extra installs them as pip packages (`cuda-toolkit[...]==12.*`).
+   Tested here: CuPy 14.2.0 on an RTX 4060 Ti. Do not install two CuPy
+   packages side by side (`pip list | grep -i cupy` must show exactly one).
+3. **Check:**
+
+   ```bash
+   python -c "import cupy; print(cupy.cuda.runtime.getDeviceCount(), cupy.arange(4).sum())"
+   ```
+
+   It prints `1 6` (or more devices). The first call compiles kernels and takes
+   a few seconds; compiled kernels are cached in `~/.cupy/kernel_cache`.
+4. **Docker only:** the host needs the NVIDIA Container Toolkit, and the
+   container must be started with `--gpus all` (compose: a `deploy.resources`
+   GPU reservation).
+
+Typical failures:
+
+| Message | Cause | Fix |
+|---|---|---|
+| `CuPy cannot be imported (ModuleNotFoundError ...)` | CuPy not installed in this environment | step 2 |
+| `... libnvrtc.so ... / nvrtc64_*.dll ... not found` | CuPy without its CUDA libraries | step 2 with `[ctk]` |
+| `CuPy finds no CUDA device` / `cudaErrorNoDevice` / `cudaErrorInsufficientDriver` | no driver, too old a driver, or a container without `--gpus all` | steps 1 and 4 |
+| `CUDA path could not be detected` warning (Windows) | harmless with `[ctk]` | none |
+
+Run with `--backend gpu` instead of `auto` to get an error instead of a silent
+CPU fallback.
+
 ## Public contract
 The stable public API stays short and task-based:
 - `detect_centers(..., backend="gpu")`

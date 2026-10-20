@@ -185,3 +185,17 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
 - Full size (99.7k features, 2048x5408): report 10.8-11.5 s per image on GPU (was 79-89 s); half_area alone
   2.2 s GPU / 17.5 s CPU; data 7.2 MB + detail 45 MB per image.
 - Suite: 187 passed, 1 skipped, same 9 pre-existing failures.
+
+# half_area_min, half_area_min_avg, x/y statistics, GPU setup (2026-10-20)
+- [x] half_area_min: local level = minimum of the cell edge (user: better repeatability on real data)
+- [x] half_area_min_avg: peak = mean of the brightest 4 px' worth of the enlarged cell (--peak-pixels)
+- [x] half_area family cd_x/cd_y: equal-area ellipse diameters from the region's x/y second moments (were 1/4-px extents)
+- [x] Report: CD, x and y statistics in every table, summary.csv, between_images.csv; x/y map layers for every method
+- [x] Report prints the backend used and why not the GPU; docs/gpu.md setup section
+
+## Review
+- Synthetic (90 nm blur, 0.3 % pixels spiked +15..40): CD error half_area_min 10.2 % -> half_area_min_avg 6.3 %
+  (peak_pixels 1/2/4/8: 8.3/7.1/6.3/6.1 %; 8 lowers the size response, so 4 is the default). No spikes, disks: 4.6 -> 3.7 %.
+- Extra 10 nm blur along x only: half_area_min_avg x width +5.2 %, y width -0.2 %.
+- Full size GPU: 12-13 s per image (5 methods); data 15 MB + detail 57 MB per image.
+- Suite: 190 passed, 1 skipped, same 9 pre-existing failures. Browser: map, layers, panel, x/y tables OK.

@@ -122,6 +122,8 @@ def test_invalid_requests_raise():
         measure_cds(image, methods=("disk",), area_max=200, nominal_cd=30.0)
     with pytest.raises(ValueError, match="half_area_level"):
         measure_cds(image, methods=("half_area",), area_max=200, half_area_level=1.0)
+    with pytest.raises(ValueError, match="half_area_peak_pixels"):
+        measure_cds(image, methods=("half_area_min_avg",), area_max=200, half_area_peak_pixels=0.5)
     measure_cds(image, methods=("projection", "half_area"), area_max=200)  # need no blur
 
 
@@ -228,7 +230,8 @@ def _shape_lattice(seed=0, gain=1.0, grow=1.0, shape=(110, 150), pitch=10.5, siz
 def shaped():
     def run(**kw):
         image, centers, d, a = _shape_lattice(**kw)
-        result = measure_cds(image, methods=("projection", "half_area", "half_area_min"), area_max=300)
+        result = measure_cds(image, methods=("projection", "half_area", "half_area_min", "half_area_min_avg"),
+                             area_max=300)
         return result, _matched(result, centers, d, a)
     return run(), run(gain=1.2), run(grow=1.05)
 
@@ -254,11 +257,13 @@ def test_half_area_and_projection_agree_between_cpu_and_gpu(shaped):
     if cp is None:
         pytest.skip("CuPy not available")
     result, _ = shaped[0]
-    gpu = measure_cds(result.image, methods=("projection", "half_area", "half_area_min"), area_max=300, backend="gpu")
-    for name in ("projection", "half_area", "half_area_min"):
+    names = ("projection", "half_area", "half_area_min", "half_area_min_avg")
+    gpu = measure_cds(result.image, methods=names, area_max=300, backend="gpu")
+    for name in names:
         np.testing.assert_array_equal(gpu.measurements[name].status, result.measurements[name].status)
-        np.testing.assert_allclose(gpu.measurements[name].metrics["cd_equivalent_px"],
-                                   result.measurements[name].metrics["cd_equivalent_px"], rtol=1e-9)
+        for metric in ("cd_equivalent_px", "cd_x_px", "cd_y_px"):
+            np.testing.assert_allclose(gpu.measurements[name].metrics[metric],
+                                       result.measurements[name].metrics[metric], rtol=1e-9)
 
 
 def test_half_area_min_takes_the_lowest_cell_edge_pixel_and_ignores_scale_and_pedestal():
@@ -277,3 +282,35 @@ def test_half_area_min_takes_the_lowest_cell_edge_pixel_and_ignores_scale_and_pe
     # A lower level puts the half-height threshold lower: a larger region.
     assert np.all(low.metrics["cd_equivalent_px"] > median.metrics["cd_equivalent_px"])
     np.testing.assert_allclose(lit.metrics["cd_equivalent_px"], low.metrics["cd_equivalent_px"], rtol=1e-9)
+
+
+def test_half_area_min_avg_peak_resists_one_outstanding_pixel():
+    from subpx._cpu.invariant_cd import _half_area
+
+    cells = _gaussian_cells([(7.0, 7.0), (7.3, 6.6)])
+    spiked = cells.copy()
+    spiked[:, 7, 7] += 0.4  # one pixel 40 % above the spot's peak
+    masks = np.ones(cells.shape, bool)
+    origins = np.zeros((2, 2))
+    single = [_half_area(c, masks, origins, 64, background="min").metrics["cd_equivalent_px"] for c in (cells, spiked)]
+    mean = [_half_area(c, masks, origins, 64, background="min", peak_pixels=4.0) for c in (cells, spiked)]
+    assert mean[0].method == "half_area_min_avg" and list(mean[1].status) == ["ok", "ok"]
+    # The spike raises the single-point peak, hence the threshold, and shrinks the region far more than the average.
+    shrink_single = 1 - single[1] / single[0]
+    shrink_mean = 1 - mean[1].metrics["cd_equivalent_px"] / mean[0].metrics["cd_equivalent_px"]
+    assert np.all(shrink_single > 0.1) and np.all(shrink_mean < 0.5 * shrink_single)
+    # Still pulse-proof: the spot and its surroundings scaled together.
+    lit = _half_area(3.0 * (spiked + 0.2), masks, origins, 64, background="min", peak_pixels=4.0)
+    np.testing.assert_allclose(lit.metrics["cd_equivalent_px"], mean[1].metrics["cd_equivalent_px"], rtol=1e-9)
+
+
+def test_half_area_x_and_y_widths_are_the_equal_area_ellipse_diameters():
+    from subpx._cpu.invariant_cd import _half_area
+
+    y, x = np.mgrid[:21, :21]
+    cells = np.exp(-((x - 10.2) ** 2 / (2 * 2.4 ** 2) + (y - 9.8) ** 2 / (2 * 1.4 ** 2)))[None]
+    result = _half_area(cells, np.ones(cells.shape, bool), np.zeros((1, 2)), 64)
+    m = result.metrics
+    k = 2 * np.sqrt(2 * np.log(2))  # half-height region of a Gaussian: an ellipse with diameters k * sigma
+    np.testing.assert_allclose([m["cd_x_px"][0], m["cd_y_px"][0]], [k * 2.4, k * 1.4], rtol=0.02)
+    np.testing.assert_allclose(m["cd_x_px"] * m["cd_y_px"], m["cd_equivalent_px"] ** 2, rtol=1e-9)
