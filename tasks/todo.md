@@ -284,3 +284,10 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
 - synthetic_ch: both 2805/2805; at the same tail height the noise is set by the height, not by the reference
   (true peak vs estimated peak vs steepest level: 1.04-1.07 %).
 - Suite: 201 passed, 1 skipped, same 9 pre-existing failures.
+
+# Brightness between images (2026-10-21)
+- [x] image_intensity: simple mean of all pixels per image; between-image 3 s / M x 100 (s with N - 1)
+- [x] cell_intensity: the same over the per-image mean cell intensities (was computed but only as a small line in
+      the HTML, not in the console); both now in a "Between images: brightness" table, the console and
+      between_images.csv; image intensity also per image in summary.csv and the image tab
+- Check: 3 copies of synthetic_ch scaled x1.00 / 1.05 / 0.97 -> image intensity 12.2 %, gains alone 12.0 %.

@@ -26,6 +26,9 @@ of image i (over the holes that method measured validly) and N the number of ima
     M = (m_1 + ... + m_N) / N
     s = sqrt( sum_i (m_i - M)^2 / (N - 1) )
     between-image 3 sigma % = 3 s / M x 100        (also given as 3 s in --unit)
+The same between-image 3 sigma % is given for two brightness values per image, in image counts: the image
+intensity (simple mean of all pixels of the image) and the cell intensity (mean over the holes of each hole's
+cell intensity, see below).
 Below that, per image and method: valid holes, mean CD and the within-image 3 sigma % = 3 sigma / mean x 100,
 sigma being the standard deviation of that image's hole CDs (N - 1 in the denominator). Every statistic is given
 for the CD and separately for the x and the y width (cd_x_px / cd_y_px of each method; for the half_area family
@@ -168,14 +171,18 @@ def between_image_statistics(entries: list[dict], methods: tuple[str, ...]) -> d
         for suffix, _, _ in AXES:
             means = np.array([e["stats"][name]["mean" + suffix] for e in entries
                               if not e.get("error") and name in e["stats"]])
-            means = means[np.isfinite(means)]
-            mean = float(means.mean()) if means.size else float("nan")
-            std = float(means.std(ddof=1)) if means.size > 1 else float("nan")
-            stats[name].update({
-                "images" + suffix: int(means.size), "mean_of_means" + suffix: mean, "std_of_means" + suffix: std,
-                "three_sigma" + suffix: 3 * std,
-                "three_sigma_pct" + suffix: 300 * std / mean if means.size > 1 and mean else float("nan")})
+            stats[name].update({key + suffix: value for key, value in _between_values(means).items()})
     return stats
+
+
+def _between_values(values) -> dict:
+    """Spread of one value per image: N, M (mean), s (standard deviation, N - 1), 3 s and 3 s / M x 100."""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    mean = float(values.mean()) if values.size else float("nan")
+    std = float(values.std(ddof=1)) if values.size > 1 else float("nan")
+    return {"images": int(values.size), "mean_of_means": mean, "std_of_means": std, "three_sigma": 3 * std,
+            "three_sigma_pct": 300 * std / mean if values.size > 1 and mean else float("nan")}
 
 
 def display_image(image: np.ndarray) -> np.ndarray:
@@ -400,31 +407,46 @@ for _name, _color in list(COLORS.items()):
         COLORS.setdefault(_name + "_y", "#%02x%02x%02x" % tuple(np.rint(_rgb * 0.6).astype(int)))
 
 
-def intensity_between(entries: list[dict]) -> dict | None:
-    """Spread of the per-image mean cell intensities (as between_image_statistics); None without tail_area."""
-    means = np.array([e["intensity"]["mean"] for e in entries if not e.get("error") and e.get("intensity")])
-    if not means.size:
-        return None
-    means = means[np.isfinite(means)]
-    mean = float(means.mean()) if means.size else float("nan")
-    std = float(means.std(ddof=1)) if means.size > 1 else float("nan")
-    return {"images": int(means.size), "mean_of_means": mean, "std_of_means": std, "three_sigma": 3 * std,
-            "three_sigma_pct": 300 * std / mean if means.size > 1 and mean else float("nan")}
+BRIGHTNESS = {"image_intensity": "Image intensity: simple mean of all pixels of the image",
+              "cell_intensity": "Cell intensity: mean over the holes of each hole's cell intensity"}
 
 
-def _intensity_summary(entries: list[dict]) -> str:
-    between = intensity_between(entries)
-    if between is None:
-        return ""
+def brightness_between(entries: list[dict]) -> dict[str, dict]:
+    """Between-image spread (as between_image_statistics) of the image intensity (mean of all pixels) and, when
+    tail_area ran, of the cell intensity (mean over the holes), one value per image."""
+    done = [e for e in entries if not e.get("error")]
+    out = {"image_intensity": _between_values([e["image_mean"] for e in done])}
+    cells = [e["intensity"]["mean"] for e in done if e.get("intensity")]
+    if cells:
+        out["cell_intensity"] = _between_values(cells)
+    return out
+
+
+def _brightness_summary(entries: list[dict]) -> str:
+    between = brightness_between(entries)
     rows = "".join(
-        f"<tr><td><a href='#' data-tab='{e['id']}'>{html.escape(e['name'])}</a></td><td>{e['intensity']['valid']:,}</td>"
-        f"<td>{_fmt(e['intensity']['mean'])}</td><td>{_fmt(e['intensity']['three_sigma_pct'])}</td></tr>"
-        for e in entries if not e.get("error") and e.get("intensity"))
-    return ("<h3>Cell intensity (counts): mean light above the local level in tail_area's region</h3>"
-            f"<p class='meta'>Between images: M = {_fmt(between['mean_of_means'])}, 3s = {_fmt(between['three_sigma'], 3)} "
-            f"counts, 3s / M = <b>{_fmt(between['three_sigma_pct'], 3)} %</b> (N = {between['images']}).</p>"
-            "<table class='stats'><thead><tr><th>Image</th><th>Valid holes</th><th>Mean</th><th>Within-image 3σ (%)</th>"
-            f"</tr></thead><tbody>{rows}</tbody></table>")
+        f"<tr><td>{html.escape(BRIGHTNESS[name])} <code>{name}</code></td><td>{b['images']}</td>"
+        f"<td class='first'>{_fmt(b['mean_of_means'])}</td><td>{_fmt(b['std_of_means'], 3)}</td>"
+        f"<td>{_fmt(b['three_sigma'], 3)}</td><td><b>{_fmt(b['three_sigma_pct'], 3)}</b></td></tr>"
+        for name, b in between.items())
+    cell = "cell_intensity" in between
+    per_image = "".join(
+        f"<tr><td><a href='#' data-tab='{e['id']}'>{html.escape(e['name'])}</a></td><td>{_fmt(e['image_mean'])}</td>"
+        + (f"<td>{_fmt(e['intensity']['mean'])}</td><td>{e['intensity']['valid']:,}</td>"
+           f"<td>{_fmt(e['intensity']['three_sigma_pct'])}</td>" if e.get("intensity") else
+           ("<td>–</td><td>–</td><td>–</td>" if cell else "")) + "</tr>"
+        for e in entries if not e.get("error"))
+    cell_head = ("<th>Cell intensity, mean over holes</th><th>Valid holes</th><th>Within-image 3σ of the cell "
+                 "intensity (%)</th>") if cell else ""
+    return ("<h3>Between images: brightness</h3><p class='meta'>One value per image, in image counts: the image "
+            "intensity is the simple mean of all its pixels; the cell intensity is the mean over its holes of each "
+            "hole's mean light above the local level in tail_area's region. M, s and 3 s / M as for the CD above "
+            "(s with N − 1).</p>"
+            "<table class='stats'><thead><tr><th>Brightness</th><th>Images (N)</th><th>M (counts)</th>"
+            "<th>s (counts)</th><th>3s (counts)</th><th>3s / M (%)</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+            "<table class='stats'><thead><tr><th>Image</th><th>Image intensity (mean of all pixels)</th>"
+            f"{cell_head}</tr></thead><tbody>{per_image}</tbody></table>")
 
 
 def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], notes: list[str], unit: str,
@@ -475,14 +497,15 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
         f"</tr><tr>{columns}</tr></thead><tbody>{rows}</tbody></table>"
         + table(f"Mean CD per image, m<sub>i</sub> ({unit_html})", "mean")
         + table("Within-image 3σ (%) = 3 × σ of that image's hole CDs / its mean × 100", "three_sigma_pct")
-        + _intensity_summary(entries))
+        + _brightness_summary(entries))
     legend = "".join(f"<li><span class='swatch' style='background:{COLORS[m]}'></span><b>{m}</b> — "
                      f"{html.escape(DESCRIPTIONS[m])}</li>" for m in methods)
     tabs = "".join(f"<button class='tab' data-tab='{e['id']}'{' disabled' if e.get('error') else ''}>"
                    f"{html.escape(e['name'])}</button>" for e in entries)
     panels = "".join(
         f"<section class='panel' id='panel-{e['id']}' hidden><h2>{html.escape(e['name'])}: statistics</h2>"
-        f"<p class='meta'>{e['holes']:,} holes · {e['width']} × {e['height']} px · {e['seconds']:.1f} s</p>{_stats_table(e['stats'], unit)}"
+        f"<p class='meta'>{e['holes']:,} holes · {e['width']} × {e['height']} px · image intensity (mean of all "
+        f"pixels) {_fmt(e['image_mean'])} counts · {e['seconds']:.1f} s</p>{_stats_table(e['stats'], unit)}"
         f"{_intensity_table(e['intensity']) if e.get('intensity') else ''}{_agreement_table(*e['agreement'])}"
         "<h3>CD histograms</h3><div class='hists'></div></section>"
         for e in entries if not e.get("error"))
@@ -588,6 +611,7 @@ def main(argv=None) -> None:
             rows.append({"image": path.name, "status": "failed", "error": message})
             continue
         seconds = time.perf_counter() - start
+        image_mean = float(np.mean(image, dtype=np.float64))  # simple mean of all pixels, as loaded
         stats = cd_statistics(result)
         intensity = cell_intensity(result)
         intensity = None if intensity is None else _spread(intensity)
@@ -619,7 +643,7 @@ def main(argv=None) -> None:
         entries.append({"id": ident, "name": path.name, "holes": len(result.seeds_xy), "stats": stats,
                         "width": image.shape[1], "height": image.shape[0], "seconds": seconds,
                         "image": f"images/{ident}.png", "data": f"data/{ident}.js", "detail": detail, "tail": tail,
-                        "agreement": agreement(result), "intensity": intensity})
+                        "agreement": agreement(result), "intensity": intensity, "image_mean": image_mean})
         for method, s in stats.items():
             rows.append({"image": path.name, "status": "ok", "method": method, "holes": len(result.seeds_xy), **s,
                          "unit": args.unit})
@@ -632,6 +656,9 @@ def main(argv=None) -> None:
                          "cells": len(result.seeds_xy), **intensity, "unit": "counts"})
             print(f"  {'cell intensity':17s} {intensity['valid']:7d} valid  mean {_plain(intensity['mean'], 3)} counts  "
                   f"3sigma within image {_plain(intensity['three_sigma_pct'])} %", flush=True)
+        rows.append({"image": path.name, "status": "ok", "method": "image_intensity", "holes": len(result.seeds_xy),
+                     "valid": int(image.size), "mean": image_mean, "unit": "counts"})
+        print(f"  {'image intensity':17s} {image.size:7d} px     mean {_plain(image_mean, 3)} counts", flush=True)
         print(f"  {seconds:.1f} s", flush=True)
     fields = (["image", "status", "method", "holes", "cells"]
               + [key + x for x, _, _ in AXES for key in ("valid", "mean", "std", "three_sigma_pct")] + ["unit", "error"])
@@ -646,13 +673,16 @@ def main(argv=None) -> None:
             for key in ("images", "mean_of_means", "std_of_means", "three_sigma", "three_sigma_pct")] + ["unit"])
         writer.writeheader()
         writer.writerows({"method": m, **b, "unit": args.unit} for m, b in between.items())
-        if intensity_between(entries):
-            writer.writerow({"method": "cell_intensity", **intensity_between(entries), "unit": "counts"})
+        brightness = brightness_between(entries)
+        writer.writerows({"method": name, **b, "unit": "counts"} for name, b in brightness.items())
     print("Between images (3 s / M x 100, s = std of the per-image means, N - 1):", flush=True)
     for method, b in between.items():
         print(f"  {method:17s} N={b['images']}  M {_plain(b['mean_of_means'], 3)} {args.unit}  "
               f"3s {_plain(b['three_sigma'], 3)} {args.unit}  {_plain(b['three_sigma_pct'], 3)} %  "
               f"(x {_plain(b['three_sigma_pct_x'], 3)} %, y {_plain(b['three_sigma_pct_y'], 3)} %)", flush=True)
+    for name, b in brightness.items():
+        print(f"  {name:17s} N={b['images']}  M {_plain(b['mean_of_means'], 3)} counts  "
+              f"3s {_plain(b['three_sigma'], 3)} counts  {_plain(b['three_sigma_pct'], 3)} %", flush=True)
     ranges = {}
     for layer, parts in samples.items():
         pooled = np.concatenate(parts)

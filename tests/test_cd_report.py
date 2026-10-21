@@ -36,7 +36,10 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
                              **options)
         results[name] = result
         mine = {r["method"]: r for r in rows if r["image"] == name}
-        assert set(mine) == set(result.measurements) | {"cell_intensity"}
+        assert set(mine) == set(result.measurements) | {"cell_intensity", "image_intensity"}
+        # Image intensity: the simple mean of all pixels.
+        assert mine["image_intensity"]["unit"] == "counts" and int(mine["image_intensity"]["valid"]) == image.size
+        assert np.isclose(float(mine["image_intensity"]["mean"]), image.astype(float).mean())
         # Cell intensity: tail_area's mean light above its local level, over the holes tail_area measured.
         tail = result.measurements["tail_area"]
         light = tail.metrics["mean_signal"][tail.valid]
@@ -52,9 +55,11 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
                 assert np.isclose(float(mine[method]["three_sigma_pct" + suffix]), 300 * cd.std(ddof=1) / cd.mean())
     with (out / "between_images.csv").open(encoding="utf-8") as handle:
         between = {r["method"]: r for r in csv.DictReader(handle)}
-    intensity_means = np.array([float(r["mean"]) for r in rows if r.get("method") == "cell_intensity"])
-    assert np.isclose(float(between["cell_intensity"]["three_sigma_pct"]),
-                      300 * intensity_means.std(ddof=1) / intensity_means.mean())
+    for name in ("cell_intensity", "image_intensity"):  # one value per image: 3 s / M x 100 over the images
+        values = np.array([float(r["mean"]) for r in rows if r.get("method") == name])
+        assert values.size == 2 and int(between[name]["images"]) == 2 and between[name]["unit"] == "counts"
+        assert np.isclose(float(between[name]["mean_of_means"]), values.mean())
+        assert np.isclose(float(between[name]["three_sigma_pct"]), 300 * values.std(ddof=1) / values.mean())
     for method in result.measurements:
         for suffix in ("", "_x", "_y"):
             means = np.array([float(r["mean" + suffix]) for r in rows if r.get("method") == method])
@@ -64,7 +69,8 @@ def test_report_statistics_match_direct_measurement_and_failed_images_are_listed
                               300 * means.std(ddof=1) / means.mean())
     page = (out / "index.html").read_text(encoding="utf-8")
     assert "Between images" in page and "half_area_min_avg" in page and "y width" in page
-    assert "tail_area" in page and "Cell intensity" in page
+    assert "tail_area" in page and "Cell intensity" in page and "Between images: brightness" in page
+    assert "image_intensity" in page and "Image intensity" in page
     assert "a_scan" in page and "broken.png" in page and "failed:" in page
     assert (out / "data" / "a_scan.js").read_text(encoding="utf-8").startswith('window.CD_DATA["a_scan"]=')
     assert (out / "images" / "b.png").exists()
@@ -147,7 +153,7 @@ def test_default_report_runs_the_shape_free_methods_without_inputs(tmp_path):
         methods = {r["method"] for r in csv.DictReader(handle)}
     assert methods == {"gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area",
                        "tail_area_norm", "edge_area", "foot_area",
-                       "foot_area_ratio", "cell_intensity"}
+                       "foot_area_ratio", "cell_intensity", "image_intensity"}
     assert not (tmp_path / "out" / "results").exists()
     assert not (tmp_path / "out" / "data" / "x.detail.js").exists()
 
