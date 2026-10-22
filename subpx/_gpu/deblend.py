@@ -390,9 +390,9 @@ def deblend(
     origins_d = cp.asarray(origins)
     caps = cpu.sigma_caps(masks)
 
-    def global_params(p):
+    def global_params(p, sl=slice(None)):
         g = p.copy()
-        g[:, 1:3] += origins
+        g[:, 1:3] += origins[sl]
         return g
 
     def background_of(model_d, p, st):
@@ -405,7 +405,7 @@ def deblend(
         return _background_device(image_d - model_d, free, tile, usable_d)
 
     def clean(p, background_d, model_d, sl):
-        gp = global_params(p[sl])
+        gp = global_params(p[sl], sl)
         radius = cpu._render_radius(gp, radius_cap).astype(np.int32)
         cells = masks_d[sl]
         out = cp.empty(cells.shape, dtype=cp.float64)
