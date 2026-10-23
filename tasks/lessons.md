@@ -65,3 +65,9 @@
   against the request (here: cut/peak must be near the background) before reporting.
 - **Never replace or rename a method the user already has.** Add new methods next to existing ones; the user
   compares them on real data.
+- **A measurement tool measures; do not add statistics the user did not ask for.** For the batch run I proposed a
+  between-page 3 sigma per TIFF; the user computes statistics afterwards, and repeatability ("between-image") is
+  between 3 datasets of the same area, while hundreds of TIFFs are ONE dataset. Ask what one file / one dataset is
+  before grouping anything.
+- **Ask questions in the user's terms.** "Which pages should the between-image 3 sigma compare?" was not understood.
+  Say what the choice changes in their output, with their own objects (dataset, TIFF, page), not my internal plan.

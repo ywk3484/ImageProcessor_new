@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+import time
 
 import numpy as np
 
@@ -65,6 +66,7 @@ def measure_cds(
     half_area_peak_pixels: float = 4.0,
     tail_area_level: float = 0.2,
     tail_window: float = 1.2,
+    outlines: bool = True,
 ) -> CDResult:
     """Extract Voronoi cells and measure their contours and critical dimensions.
 
@@ -200,6 +202,11 @@ def measure_cds(
     tail_window : float
         ``tail_area`` / ``tail_area_norm``: half-width of the window around each hole, in pitches
         (0.5 to 2).
+    outlines : bool
+        False skips the display outlines of the ``half_area`` family (their
+        ``contours_xy``, ``geometry['edge_px']`` and ``perimeter_px`` stay NaN),
+        for runs that keep only the numbers; every CD, width, centre, status
+        and other metric is unchanged.
 
     Returns
     -------
@@ -247,6 +254,8 @@ def measure_cds(
         raise ValueError("tail_area_level must be between 0 and 1")
     if not (np.isfinite(tail_window) and 0.5 <= tail_window <= 2):
         raise ValueError("tail_window must be between 0.5 and 2 pitches")
+    if not isinstance(outlines, (bool, np.bool_)):
+        raise ValueError("outlines must be True or False")
     if {"disk", "flux_ratio"} & set(methods) and nominal_cd is None and psf_fwhm is None:
         raise ValueError("methods 'disk' and 'flux_ratio' need nominal_cd or psf_fwhm (the imaging blur)")
     for name, value, lower in (("area_min", area_min, 1), ("area_max", area_max, area_min),
@@ -278,7 +287,7 @@ def measure_cds(
             cell_backend=cell_backend, device=device, nominal_cd=nominal_cd, psf_fwhm=psf_fwhm,
             dark_level=float(dark_level), flux_ratio_scale=flux_ratio_scale,
             half_area_level=float(half_area_level), half_area_peak_pixels=float(half_area_peak_pixels),
-            tail_area_level=float(tail_area_level), tail_window=float(tail_window),
+            tail_area_level=float(tail_area_level), tail_window=float(tail_window), outlines=bool(outlines),
         )
 
 
@@ -315,7 +324,7 @@ def _measure_cds(
     smooth_sigma, fit_fraction, peak_min_distance, background_level, background_tile, deblend_iterations,
     pixel_size, unit, backend, cell_backend, device, nominal_cd=None, psf_fwhm=None, dark_level=0.0,
     flux_ratio_scale=None, half_area_level=0.5, half_area_peak_pixels=4.0, tail_area_level=0.2,
-    tail_window=1.2,
+    tail_window=1.2, outlines=True,
 ) -> CDResult:
     from ._cpu.centers import _segment_binary
     from ._cpu.components import connected_components_stats_cpu
@@ -337,6 +346,8 @@ def _measure_cds(
         def release_memory():
             pass
 
+    started = time.perf_counter()
+    seconds = {}  # per stage, in meta["seconds"]
     height, width = img.shape
     # Negation preserves contrast and permits the same bright-feature methods
     # for dark holes, including a background estimate in the correct polarity.
@@ -398,24 +409,27 @@ def _measure_cds(
         return seeds_xy, labels, rois, masks, np.asarray(origins, dtype=np.int32).reshape(-1, 2)
 
     all_seeds, cell_labels, rois, masks, origins = build_cells(rows)
+    seconds["segmentation"] = time.perf_counter() - started
     meta = {
         "background": background, "seeds": seeds, "threshold": threshold, "invert": bool(invert),
         "area_min": int(area_min), "area_max": int(area_max), "pad": int(pad), "n_angles": int(n_angles),
         "radial_step": float(radial_step), "smooth_sigma": float(smooth_sigma),
         "fit_fraction": float(fit_fraction), "half_area_level": float(half_area_level),
         "half_area_peak_pixels": float(half_area_peak_pixels), "tail_area_level": float(tail_area_level),
-        "tail_window": float(tail_window), "cell_backend": cell_backend,
+        "tail_window": float(tail_window), "outlines": bool(outlines), "cell_backend": cell_backend,
         "measurement_backend": backend, "device": int(device),
         "segmentation_rescaled": rescaled, "components_before_filter": components_before_filter,
         "coordinates": "global [x, y] pixels; images indexed [y, x]",
-        "nominal_cd": nominal_cd, "psf_fwhm": psf_fwhm, "dark_level": float(dark_level),
+        "nominal_cd": nominal_cd, "psf_fwhm": psf_fwhm, "dark_level": float(dark_level), "seconds": seconds,
     }
     background_map = deblend_model = None
+    start = time.perf_counter()
     if background == "border":
         measurements = measure_cells(
             rois, masks, origins, all_seeds, methods=methods, n_angles=int(n_angles),
             radial_step=radial_step, smooth_sigma=smooth_sigma, fit_fraction=fit_fraction,
         )
+        seconds["radial"], start = time.perf_counter() - start, time.perf_counter()
         meta["background_definition"] = "10th percentile of the polarity-normalized cell border"
         report = np.arange(len(rows))
     else:
@@ -478,16 +492,20 @@ def _measure_cds(
                                   & (centers[:, 1] - reach > 0) & (centers[:, 1] + reach < height - 1))
         report = np.flatnonzero(interior)
         cleaned = state.cleaned[report]
+        seconds["deblend"], start = time.perf_counter() - start, time.perf_counter()
         measured = [m for m in methods if m != "gaussian" and m not in INVARIANT_METHODS]
         found = measure_cells(
             cleaned, masks[report], origins[report], all_seeds[report], methods=tuple(measured),
             n_angles=int(n_angles), radial_step=radial_step, smooth_sigma=smooth_sigma,
             fit_fraction=fit_fraction, backgrounds=np.zeros(len(report)),
         ) if measured else {}
+        if measured:
+            seconds["radial"], start = time.perf_counter() - start, time.perf_counter()
         if "gaussian" in methods:
             found["gaussian"] = gaussian_method(
                 state.params[report], state.status[report], cleaned, masks[report], origins[report], int(n_angles),
             )
+            seconds["gaussian"], start = time.perf_counter() - start, time.perf_counter()
         invariant = tuple(m for m in methods if m in INVARIANT_METHODS)
         if invariant:
             from ._cpu.invariant_cd import measure_invariant
@@ -498,10 +516,13 @@ def _measure_cds(
                 dark_level=sign * float(dark_level), flux_ratio_scale=flux_ratio_scale,
                 half_area_level=half_area_level, half_area_peak_pixels=half_area_peak_pixels,
                 tail_area_level=tail_area_level, tail_window=tail_window,
-                pitch_px=float(pitch) if np.isfinite(pitch) else None, xp=_array_module(backend),
+                pitch_px=float(pitch) if np.isfinite(pitch) else None, outlines=outlines,
+                xp=_array_module(backend),
             )
             found.update(extra)
+            seconds.update(info.pop("seconds", {}))
             meta.update(info)
+            start = time.perf_counter()
         release_memory()
         local_background = sign * map_coordinates(
             state.background_map, all_seeds[report].T[::-1], order=1, mode="nearest",
@@ -538,7 +559,7 @@ def _measure_cds(
             deblend_model["tile_medians"] = state.background_info["tile_medians"]
         masks, origins = masks[report], origins[report]
     row_array = np.asarray(rows, dtype=float).reshape(-1, 6)
-    return CDResult(
+    result = CDResult(
         image=img.copy(), binary=binary > 0, component_labels=component_labels,
         component_ids=np.asarray(component_ids, dtype=np.int32)[report],
         boxes_xywh=row_array[report, :4].astype(np.int32), seeds_xy=all_seeds[report],
@@ -548,6 +569,9 @@ def _measure_cds(
         pixel_size=float(pixel_size), unit=unit, background_map=background_map,
         deblend_model=deblend_model, meta=meta,
     )
+    seconds["result"] = time.perf_counter() - start
+    seconds["total"] = time.perf_counter() - started
+    return result
 
 
 def plot_cd_map(

@@ -70,6 +70,7 @@ along x and y), so cd_x * cd_y = cd_equivalent ** 2.
 from __future__ import annotations
 
 from functools import lru_cache
+import time
 
 import numpy as np
 
@@ -405,6 +406,19 @@ def _zoom_operators(size: int, factor: int):
             np.stack([zoom(e, factor, order=0) for e in eye], axis=1))
 
 
+@lru_cache(maxsize=16)
+def _nearest_pixels(size: int, factor: int) -> np.ndarray:
+    """For each pixel of the order-0 enlargement along one axis, the original pixel it copies.
+
+    The order-0 zoom matrix has exactly one 1 per row, so ``mask[:, iy][:, :, ix]`` equals the matrix product
+    ``(Zy @ mask @ Zx.T) > 0.5`` exactly.
+    """
+    nearest = _zoom_operators(size, factor)[1]
+    if not (((nearest == 0) | (nearest == 1)).all() and (nearest.sum(axis=1) == 1).all()):
+        raise AssertionError("order-0 zoom is not a pixel copy")
+    return nearest.argmax(axis=1)
+
+
 def _grow(region):
     """A batch of 2D boolean images dilated by one pixel in all 8 directions."""
     out = region.copy()
@@ -416,10 +430,39 @@ def _grow(region):
     return grown
 
 
+def _connected_to_top(above, top, xp=np):
+    """Per image of the batch, the pixels of ``above`` connected through 8-neighbours to its ``top`` pixel (flat
+    index), grown from it for at most H + W steps. On CuPy one kernel does it (same result, bit for bit)."""
+    k, H, W = above.shape
+    if xp is not np:
+        from .._gpu.regions import grow_regions
+        region = grow_regions(above, top, H + W)
+        if region is not None:
+            return region
+    region = xp.zeros((k, H * W), dtype=bool)
+    region[xp.arange(k), top] = True
+    region = region.reshape(k, H, W) & above
+    for step in range(H + W):  # grow from the peak inside the above-threshold pixels until nothing changes
+        grown = _grow(region) & above
+        if step % 8 == 7 and bool((grown == region).all()):
+            break
+        region = grown
+    return region
+
+
+def _top_mean(flat, n: int, xp=np):
+    """Mean of each row's ``n`` largest values: ``partition(flat, -n)[:, -n:].mean(axis=1)``; on CuPy a selection
+    kernel replaces sorting whole rows (same result, bit for bit)."""
+    if xp is not np:
+        from .._gpu.regions import top_mean
+        return top_mean(flat, n)
+    return xp.partition(flat, -n, axis=1)[:, -n:].mean(axis=1)
+
+
 def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_angles: int,
                level: float = 0.5, factor: int = 4, background: str = "median", peak_pixels: float | None = None,
                name: str | None = None, level_masks: np.ndarray | None = None, zone_masks: np.ndarray | None = None,
-               cuts: np.ndarray | None = None, xp=np) -> CDMethodResult:
+               cuts: np.ndarray | None = None, outlines: bool = True, xp=np) -> CDMethodResult:
     """Area above the cell's local level + ``level`` x the peak height, on a ``factor``x cubic enlargement.
 
     Local level b: ``background`` ('median' or 'min') of the cell's outermost pixels, or 'zero' (none: the
@@ -433,7 +476,8 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
     The region is the connected part around the highest pixel above the threshold; CD = 2 sqrt(area / pi);
     cd_x / cd_y = widths of the equal-area ellipse with the region's x / y second moments; ``mean_signal`` = mean
     of the enlarged cell above b over the region. ``level_masks``: per cell, the pixels b is the median of
-    (instead of the outermost pixels).
+    (instead of the outermost pixels). ``outlines=False`` skips the display outline (contours, ``edge_px`` and
+    ``perimeter_px`` stay NaN); every other value is unchanged.
     """
     n, h, w = masks.shape
     if name is None:
@@ -442,12 +486,12 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
                     + (("steepest_level",) if background == "foot" else ()))
     if not n:
         return result
-    zy, ny = _zoom_operators(h, factor)
-    zx, nx = _zoom_operators(w, factor)
+    zy, zx = _zoom_operators(h, factor)[0], _zoom_operators(w, factor)[0]
     H, W = zy.shape[0], zx.shape[0]
     # Original px per enlarged px: zoom maps the first and last pixel centres onto each other.
     sy, sx = (h - 1) / (H - 1), (w - 1) / (W - 1)
-    zy, zx, ny, nx = (xp.asarray(a) for a in (zy, zx, ny, nx))
+    zy, zx = xp.asarray(zy), xp.asarray(zx)
+    iy, ix = xp.asarray(_nearest_pixels(h, factor))[:, None], xp.asarray(_nearest_pixels(w, factor))[None, :]
     angles = np.arange(n_angles) * (2 * np.pi / n_angles)
     radii = np.arange(0.0, float(np.hypot(h, w)), 0.125)  # original px
     cos_a, sin_a, radii_d = xp.asarray(np.cos(angles)), xp.asarray(np.sin(angles)), xp.asarray(radii)
@@ -476,13 +520,13 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
         else:
             b = xp.where(ring, cell, xp.inf).reshape(k, -1).min(axis=1)
         big = zy[None] @ xp.where(mask, cell - b[:, None, None], 0.0) @ zx.T[None]
-        big_mask = (ny[None] @ mask.astype(float) @ nx.T[None]) > 0.5
+        big_mask = mask[:, iy, ix]  # order-0 enlargement of the mask
         flat = xp.where(big_mask, big, -xp.inf).reshape(k, -1)
         top = xp.argmax(flat, axis=1)
         peak = flat[xp.arange(k), top]
         if peak_pixels is not None:
             n_top = min(max(1, int(round(peak_pixels * factor * factor))), H * W)
-            peak = xp.partition(flat, -n_top, axis=1)[:, -n_top:].mean(axis=1)  # -inf (outside the cell): no_signal
+            peak = _top_mean(flat, n_top, xp)  # -inf (outside the cell): no_signal
             peak = xp.where(xp.isfinite(peak), peak, -1.0)
         if background == "edge":
             # Threshold = the mean brightness on the slope, each pixel weighted by its steepness (central difference,
@@ -518,7 +562,7 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
             core[:, :d] = core[:, -d:] = False
             core[:, :, :d] = core[:, :, -d:] = False
             if zone_masks is not None:  # the hole's own territory: not the dip where its share of the light ends
-                core &= (ny[None] @ xp.asarray(zone_masks[rows]).astype(float) @ nx.T[None]) > 0.5
+                core &= xp.asarray(zone_masks[rows])[:, iy, ix]
             wgt = xp.where(core, steep, 0.0)
             total = wgt.sum(axis=(1, 2))
             steepest = (wgt * big).sum(axis=(1, 2)) / xp.where(total > 0, total, 1.0)
@@ -531,14 +575,7 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
         else:
             cut = level * peak
         above = big_mask & (big > cut[:, None, None])
-        region = xp.zeros((k, H * W), dtype=bool)
-        region[xp.arange(k), top] = True
-        region = region.reshape(k, H, W) & above
-        for step in range(H + W):  # grow from the peak inside the above-threshold pixels until nothing changes
-            grown = _grow(region) & above
-            if step % 8 == 7 and bool((grown == region).all()):
-                break
-            region = grown
+        region = _connected_to_top(above, top, xp)
         count = region.sum(axis=(1, 2))
         touches = ((_grow(region) & ~big_mask).any(axis=(1, 2)) | region[:, [0, -1]].any(axis=(1, 2))
                    | region[:, :, [0, -1]].any(axis=(1, 2)))
@@ -553,21 +590,22 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
         cd_eq = 2 * xp.sqrt(count * (sx * sy) / np.pi)
         ratio = xp.sqrt(xp.sqrt(xp.maximum(var_x, 1e-12) / xp.maximum(var_y, 1e-12)))
         extent_x, extent_y = cd_eq * ratio, cd_eq / ratio
-        # Contour for display: the region's last pixel along each ray from its centroid. Rays stop just beyond
-        # the farthest region pixel of the chunk (a few px), not at the cell diagonal.
-        far = ((gx[None, None] - cx[:, None, None]) * sx) ** 2 + ((gy[None, :, None] - cy[:, None, None]) * sy) ** 2
-        reach_max = float(xp.sqrt(xp.where(region, far, 0.0).max())) if k else 0.0
-        steps = radii_d[:min(len(radii), int(reach_max / 0.125) + 3)]
-        px = xp.rint(cx[:, None, None] + cos_a[None, :, None] * steps[None, None] / sx).astype(xp.int64)
-        py = xp.rint(cy[:, None, None] + sin_a[None, :, None] * steps[None, None] / sy).astype(xp.int64)
-        inside = (px >= 0) & (px < W) & (py >= 0) & (py < H)
-        index = (xp.clip(py, 0, H - 1) * W + xp.clip(px, 0, W - 1)).reshape(k, -1)
-        hit = xp.take_along_axis(region.reshape(k, -1), index, axis=1).reshape(px.shape) & inside
-        first_out = xp.where(hit.all(axis=2), len(steps), xp.argmin(hit, axis=2))
-        reach = steps[xp.maximum(first_out - 1, 0)] + 0.0625
-        out = {name: _to_numpy(v) for name, v in (
-            ("b", b), ("peak", peak), ("cut", cut), ("mean_signal", mean_signal), ("area", count * (sx * sy)), ("ex", extent_x), ("ey", extent_y),
-            ("touches", touches), ("cx", cx * sx), ("cy", cy * sy), ("edge", reach))}
+        values = [("b", b), ("peak", peak), ("cut", cut), ("mean_signal", mean_signal), ("area", count * (sx * sy)),
+                  ("ex", extent_x), ("ey", extent_y), ("touches", touches), ("cx", cx * sx), ("cy", cy * sy)]
+        if outlines:
+            # Contour for display: the region's last pixel along each ray from its centroid. Rays stop just beyond
+            # the farthest region pixel of the chunk (a few px), not at the cell diagonal.
+            far = ((gx[None, None] - cx[:, None, None]) * sx) ** 2 + ((gy[None, :, None] - cy[:, None, None]) * sy) ** 2
+            reach_max = float(xp.sqrt(xp.where(region, far, 0.0).max())) if k else 0.0
+            steps = radii_d[:min(len(radii), int(reach_max / 0.125) + 3)]
+            px = xp.rint(cx[:, None, None] + cos_a[None, :, None] * steps[None, None] / sx).astype(xp.int64)
+            py = xp.rint(cy[:, None, None] + sin_a[None, :, None] * steps[None, None] / sy).astype(xp.int64)
+            inside = (px >= 0) & (px < W) & (py >= 0) & (py < H)
+            index = (xp.clip(py, 0, H - 1) * W + xp.clip(px, 0, W - 1)).reshape(k, -1)
+            hit = xp.take_along_axis(region.reshape(k, -1), index, axis=1).reshape(px.shape) & inside
+            first_out = xp.where(hit.all(axis=2), len(steps), xp.argmin(hit, axis=2))
+            values.append(("edge", steps[xp.maximum(first_out - 1, 0)] + 0.0625))
+        out = {key: _to_numpy(v) for key, v in values}
         signal = (out["peak"] > 0) & np.isfinite(out["cut"]) & (out["cut"] < out["peak"])
         m["local_level"][rows] = out["b"]
         m["peak_signal"][rows] = np.where(signal, out["peak"], np.nan)
@@ -580,14 +618,16 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
         m["cd_y_px"][rows] = np.where(signal, out["ey"], np.nan)
         status[rows] = np.where(~signal, "no_signal", np.where(out["touches"], "region_at_cell_border", "ok"))
         centers[rows] = np.column_stack((out["cx"], out["cy"]))
-        edges[rows] = out["edge"]
+        if outlines:
+            edges[rows] = out["edge"]
     m["cd_equivalent_px"][:] = 2 * np.sqrt(m["area_px2"] / np.pi)
     rows = np.flatnonzero(status != "no_signal")
     result.geometry["center_local"][rows] = centers[rows]
-    result.geometry["edge_px"][rows] = edges[rows]
     result.centers_xy[rows] = centers[rows] + origins[rows]
-    result.contours_xy[rows] = radial_contours(centers[rows], edges[rows], origins[rows], n_angles)
-    m["perimeter_px"][rows] = np.linalg.norm(np.diff(result.contours_xy[rows], axis=1), axis=2).sum(axis=1)
+    if outlines:
+        result.geometry["edge_px"][rows] = edges[rows]
+        result.contours_xy[rows] = radial_contours(centers[rows], edges[rows], origins[rows], n_angles)
+        m["perimeter_px"][rows] = np.linalg.norm(np.diff(result.contours_xy[rows], axis=1), axis=2).sum(axis=1)
     result.status[:] = status
     ok = status == "ok"
     for name in ("area_px2", "cd_equivalent_px", "cd_x_px", "cd_y_px", "perimeter_px"):
@@ -677,7 +717,7 @@ def measure_invariant(
     methods: tuple[str, ...], n_angles: int, psf_fwhm_px: float | None = None,
     nominal_cd_px: float | None = None, dark_level: float = 0.0, flux_ratio_scale: float | None = None,
     rounds: int = 2, half_area_level: float = 0.5, half_area_peak_pixels: float = 4.0, tail_area_level: float = 0.2,
-    tail_window: float = 1.2, pitch_px: float | None = None, xp=np,
+    tail_window: float = 1.2, pitch_px: float | None = None, outlines: bool = True, xp=np,
 ) -> tuple[dict[str, CDMethodResult], dict]:
     """Pulse-invariant methods for the reported cells of a converged ``deblend`` state.
 
@@ -688,15 +728,21 @@ def measure_invariant(
     else so that its median equals ``nominal_cd_px``. ``projection`` and
     the ``half_area`` family need neither and run on ``xp`` (NumPy or CuPy). ``tail_area``'s window half-width is
     ``tail_window`` x ``pitch_px`` (the median nearest-neighbour distance of the holes when not given).
+    ``outlines=False``: no display outlines for the ``half_area`` family (see ``_half_area``).
     """
     found, info = {}, {}
+    seconds = info["seconds"] = {}  # per method (results are on the host when each call returns)
+    start = time.perf_counter()
     if "projection" in methods:
         found["projection"] = _projection(state.cleaned[report], masks[report], origins[report], n_angles, xp=xp)
+        seconds["projection"], start = time.perf_counter() - start, time.perf_counter()
     for name, (background, averaged) in _HALF_AREA.items():
         if name in methods:
             found[name] = _half_area(state.cleaned[report], masks[report], origins[report], n_angles,
                                      level=half_area_level, background=background, name=name,
-                                     peak_pixels=half_area_peak_pixels if averaged else None, xp=xp)
+                                     peak_pixels=half_area_peak_pixels if averaged else None, outlines=outlines,
+                                     xp=xp)
+            seconds[name], start = time.perf_counter() - start, time.perf_counter()
     tails = [name for name in ("tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
              if name in methods]
     if tails:
@@ -712,13 +758,15 @@ def measure_invariant(
         middle = cells.shape[1] // 2
         cut = slice(middle - keep, middle + keep + 1)
         shown = dict(cells=cells[:, cut, cut], inside=inside[:, cut, cut], origins=win_origins + (middle - keep))
+        seconds["tail_window"], start = time.perf_counter() - start, time.perf_counter()
         foot = None
         for name in tails:
             cuts = None
             if name == "foot_area_ratio":
                 if foot is None:
                     foot = _half_area(cells, inside, win_origins, n_angles, background="foot",
-                                      peak_pixels=half_area_peak_pixels, name="foot_area", zone_masks=territory, xp=xp)
+                                      peak_pixels=half_area_peak_pixels, name="foot_area", zone_masks=territory,
+                                      outlines=outlines, xp=xp)
                 steepest = foot.metrics["steepest_level"]
                 ratio = foot.metrics["threshold"] / steepest
                 ratio = float(np.nanmedian(ratio[foot.valid])) if foot.valid.any() else np.nan
@@ -728,13 +776,14 @@ def measure_invariant(
                                      background={"tail_area": "median", "tail_area_norm": "zero", "edge_area": "edge",
                                                  "foot_area": "foot", "foot_area_ratio": "given"}[name],
                                      peak_pixels=half_area_peak_pixels, name=name, level_masks=level_masks,
-                                     zone_masks=territory, cuts=cuts, xp=xp)
+                                     zone_masks=territory, cuts=cuts, outlines=outlines, xp=xp)
             if name == "foot_area":
                 foot = found[name]
             found[name].inputs.update(shown)
             # Positions relative to the hole's own cell, as the other methods (saved results rebuild contours from them).
             local = found[name].centers_xy - origins[report]
             found[name].geometry["center_local"][:] = np.where(np.isfinite(local), local, np.nan)
+            seconds[name], start = time.perf_counter() - start, time.perf_counter()
         info["tail_window_px"] = int(cells.shape[1])
     if "disk" not in methods and "flux_ratio" not in methods:
         return found, info

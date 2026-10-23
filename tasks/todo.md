@@ -291,3 +291,43 @@ Pre-existing failures (10, unchanged): GPU tiling/radial-symmetry/isophote/voron
       the HTML, not in the console); both now in a "Between images: brightness" table, the console and
       between_images.csv; image intensity also per image in summary.csv and the image tab
 - Check: 3 copies of synthetic_ch scaled x1.00 / 1.05 / 0.97 -> image intensity 12.2 %, gains alone 12.0 %.
+
+# Batch CD over a whole dataset: hundreds of TIFFs x up to 1500 pages, 4 GPUs (2026-10-23)
+
+Plan: `scripts/cd_batch.py` runs the report's 10 methods on every page of every TIFF of one dataset and writes the
+average CD per page and method (no statistics: repeatability is computed later by the user, between 3 datasets).
+Pages without holes (other patterns) are skipped by phase cross-correlation against a reference hole image, error as
+scikit-image's (`normalization=None`) < 0.3; the user can plug in their own function. Workers: 2 per GPU (spawn,
+`CUDA_VISIBLE_DEVICES`), one page at a time each, all holes of a page batched on the GPU; resume from `pages.csv`.
+Speed-ups in `_half_area` that leave every result unchanged.
+
+- [x] `subpx/_gpu/regions.py`: region-growing kernel (bit-packed, same steps and limit), top-n selection kernel
+- [x] `_half_area`: kernels on CuPy, mask/territory enlargement by index gather; exactness tests
+- [x] `measure_cds`: stage times in `meta["seconds"]`; opt-in `outlines=False`
+- [x] `scripts/cd_batch.py`: inputs, run.json, frame reader (incl. ImageJ > 4 GB), PCC check, workers, watchdog,
+      pages.csv / timings.csv / failed.csv, resume, progress
+- [x] `tests/test_cd_batch.py`, `tests/test_half_area_speedups.py`; full suite
+- [x] Timing before/after (29k-hole page); 2-worker run; Ctrl+C + resume
+- [x] `docs/remote_server.md`: how to run it
+
+## Review
+
+Deviations from the approved plan:
+- Added `measure_cds(outlines=False)` (opt-in): skips the half_area family's display outlines, the last 11 % of a
+  batch page. The report keeps outlines.
+- `--pages` is not part of the resume check (it only selects pages): a trial run and the full run share a folder.
+- Found by the Ctrl+C test: on Windows a signal during the wait on the worker pipes raises InterruptedError; handled.
+
+Results (synthetic page 1730 x 1730 px, 28,900 holes, RTX 4060 Ti):
+- Per page: 16.2 s (HEAD) -> 8.4 s (report, 128 outline directions) -> 4.7 s (batch: 16 directions, no outlines).
+  Every per-hole value (CDs, x/y, centres, statuses, all metrics but the outline perimeter) bit-identical to HEAD.
+  Per 1,284-cell chunk: flood fill 24 -> 0.2 ms, averaged peak 42 -> 1.2 ms (cupy.partition sorts whole rows).
+- 1 vs 2 workers on this one GPU: same throughput (GPU-bound), identical pages.csv.
+- Hole check, scikit-image error with normalization=None: hole pages 0.16-0.26, noise / flat / gradient 0.47-0.50,
+  lines / pads 0.58-0.61, other pitch 0.63. The default normalization="phase" gives 1.000 for every pair.
+- Found, not changed (it would change the report's numbers; user to decide): the cell stack is the page's largest
+  component box. One 48 px diagonal streak grew it 13 -> 19 px: page time +40 %, and holes far from the streak
+  changed in the 3 cell-based half_area methods and projection (half_area_min_avg page mean +0.21 nm, single holes up
+  to 2.6 nm), because their 4x enlargement grid and averaged-peak area follow the stack size. gaussian and the
+  tail-window methods did not change.
+- Suite: 212 passed, 1 skipped, same 9 pre-existing failures.
