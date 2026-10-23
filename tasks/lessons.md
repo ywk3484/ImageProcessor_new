@@ -78,3 +78,11 @@
 - **For a batch tool, give the whole-dataset time up front.** Explaining the per-page design did not answer "is
   this realistic on my dataset?". Give pages x seconds per page / GPUs, the assumptions behind it, and what the
   trial run measures.
+- **Measure I/O under the user's conditions.** "Opening a 1500-page TIFF takes 0.03 s" came from a 64x64-px file
+  already in RAM; the user's TIFFs are ~2 GB on an HDD (~1 min to load). Cold on this PC's HDD (evict the file:
+  open it unbuffered), counting the pages alone took 14 s and the batch's 8-worker reads 56 s vs 19 s sequential.
+  Use the real file size, the real disk and a cold cache, or say the number is unknown.
+- **"The GPU is busy" is not "the GPU is used well".** Two workers on one GPU giving no speed-up only showed
+  contention (without MPS, processes take turns and evict each other's cache). Before claiming a limit, compare
+  the work with the hardware: bytes moved vs data size (one page created 157 GB of temporaries for 2.7 MB of
+  pixels), double-precision use (1/64 rate on Ada), GPU idle time (29 %), number of launches (~16,000 per page).
