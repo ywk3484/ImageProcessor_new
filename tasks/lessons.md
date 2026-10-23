@@ -71,3 +71,10 @@
   before grouping anything.
 - **Ask questions in the user's terms.** "Which pages should the between-image 3 sigma compare?" was not understood.
   Say what the choice changes in their output, with their own objects (dataset, TIFF, page), not my internal plan.
+- **When raising a defect, answer what the user will ask next.** "Do you want me to fix it?" about the cell-size
+  coupling made the user ask whether it is a bug and how exactly I would fix it. Say: bug or not, the measured cause
+  (isolated by a test that changes only that one thing), how often it triggers on their data, the exact fix with a
+  prototype result, and how the fix changes their numbers.
+- **For a batch tool, give the whole-dataset time up front.** Explaining the per-page design did not answer "is
+  this realistic on my dataset?". Give pages x seconds per page / GPUs, the assumptions behind it, and what the
+  trial run measures.
