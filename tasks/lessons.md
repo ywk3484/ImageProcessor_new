@@ -82,6 +82,10 @@
   already in RAM; the user's TIFFs are ~2 GB on an HDD (~1 min to load). Cold on this PC's HDD (evict the file:
   open it unbuffered), counting the pages alone took 14 s and the batch's 8-worker reads 56 s vs 19 s sequential.
   Use the real file size, the real disk and a cold cache, or say the number is unknown.
+- **Ask for the direct quantity; do not derive it from two rough totals.** From "~2 GB, up to 1500 pages" I derived
+  1.4 MB per page and guessed the page size; the real page is 2048x1378 8-bit (2.8 MB), so a 2 GB file holds ~700
+  pages. Before estimating a run, ask page size (px), bit depth, compression, pages per file, files per dataset and how
+  many pages hold holes, then measure one page of that size.
 - **"The GPU is busy" is not "the GPU is used well".** Two workers on one GPU giving no speed-up only showed
   contention (without MPS, processes take turns and evict each other's cache). Before claiming a limit, compare
   the work with the hardware: bytes moved vs data size (one page created 157 GB of temporaries for 2.7 MB of
