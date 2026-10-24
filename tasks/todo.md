@@ -351,7 +351,9 @@ in place (user's decision): the 9 methods' numbers change once.
       relative, CDs by <= 3.5e-8 px, no status changes on the 6 pages
 - [x] A4: CPU steps: isin lookup + OpenCV dilation (identical mask), GPU seed-revision filters
       (user page 5.13 -> 2.05 s, blob page 14.5 -> 4.1 s)
-- [ ] A5: batch: one sequential reader, no page counting, light resume; workers per GPU re-measured; docs
+- [x] A5: batch: one sequential reader, no page counting, light resume; workers per GPU re-measured; docs
+      (2 GB file cold on the HDD: 21 s, as a plain read; tifffile.imread 57 s; 48-page user-size run: rows equal
+      direct measure_cds, 1 and 2 workers identical; 2 workers 0.81 vs 0.70 pages/s here)
 - [ ] Phase A done: <= 1 s per page on this 4060 Ti on both test pages, numbers unchanged; tests
 - [ ] B: grid fix in place (fixed 1/4-px grid, zero-extended spline), square-size independence test, before/after
       table, docs

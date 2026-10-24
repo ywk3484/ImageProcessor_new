@@ -188,6 +188,30 @@ def test_frame_reader_reads_every_frame_of_large_imagej_stacks_and_compressed_fi
             reader.close()
 
 
+def test_sequential_frames_equal_the_frame_reader_without_counting_pages(tmp_path):
+    import tifffile
+
+    from scripts.cd_batch import iter_frames
+
+    stack = np.stack([_holes(seed) for seed in range(6)])
+    for name, options in (("plain.tif", {"photometric": "minisblack", "metadata": None}),
+                          ("bigtiff.tif", {"photometric": "minisblack", "bigtiff": True}),
+                          ("imagej_over_4gb_layout.tif", {"imagej": True, "truncate": True}),
+                          ("imagej.tif", {"imagej": True}),
+                          ("compressed.tif", {"compression": "zlib", "photometric": "minisblack"})):
+        tifffile.imwrite(tmp_path / name, stack, **options)
+        frames = list(iter_frames(tmp_path / name))
+        assert [index for index, _ in frames] == list(range(6)), name
+        for index, image in frames:
+            np.testing.assert_array_equal(image, stack[index], err_msg=name)
+        picked = [index for index, _ in iter_frames(tmp_path / name, parse_pages("1:5"), skip={2})]
+        assert picked == [1, 3, 4], name
+    tifffile.imwrite(tmp_path / "rgb.tif", np.zeros((2, 8, 8, 3), np.uint8), photometric="rgb")
+    assert all(isinstance(image, ValueError) for _, image in iter_frames(tmp_path / "rgb.tif"))
+    with pytest.raises(SystemExit):
+        parse_pages("-5:")
+
+
 def test_outlines_off_and_fewer_angles_leave_every_number_unchanged():
     image = _holes(3)
     full = measure_cds(image, methods=ALL_METHODS, **OPTIONS)

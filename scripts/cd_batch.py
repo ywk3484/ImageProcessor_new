@@ -27,10 +27,13 @@ Outputs in --output:
     run.json     the settings. Running again into the same --output resumes (pages already in pages.csv are
                  skipped); other settings are refused.
 
-Every GPU runs --workers-per-gpu workers (default 2). Each worker measures one page at a time with all of that
-page's holes batched on its GPU, so several pages are measured at once and one worker's CPU work overlaps another's
-GPU work. A page over --page-timeout, or a worker that dies, is listed in failed.csv and the worker is restarted.
-Ctrl+C stops after the pages being measured; run the same command again to continue.
+One reader thread reads the files one after another, each front to back, the way a disk reads fastest: no page is
+read twice and the pages are not counted beforehand (on an HDD that alone walks the whole file). Pages already done,
+or outside --pages, are skipped without reading their pixels. The reader hands each page to a free worker; every GPU
+runs --workers-per-gpu workers (default 2), each measuring one page at a time with all of that page's holes batched
+on its GPU, so one worker's CPU work overlaps another's GPU work. A page over --page-timeout, or a worker that dies,
+is listed in failed.csv and the worker is restarted. Ctrl+C stops after the pages being measured; run the same command
+again to continue.
 """
 
 from __future__ import annotations
@@ -44,9 +47,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -58,7 +63,7 @@ if str(ROOT) not in sys.path:
 from scripts.cd_report import ALL_METHODS, _spread, cd_statistics, cell_intensity  # the report's numbers
 
 SCHEMA = 1
-TASK_PAGES = 8          # consecutive pages of one file per task
+PREFETCH = 2            # pages sent to a worker before its earlier ones are done
 PROGRESS_SECONDS = 30
 MAX_FAILURES_IN_A_ROW = 20
 STAGES = ("segmentation", "deblend", "gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg",
@@ -110,9 +115,12 @@ def parse_pages(text: str | None) -> slice:
             page = int(text)
             return slice(page, page + 1)
         start, stop = text.split(":", 1)
-        return slice(int(start) if start.strip() else None, int(stop) if stop.strip() else None)
+        pages = slice(int(start) if start.strip() else None, int(stop) if stop.strip() else None)
     except ValueError:
         raise SystemExit(f"--pages must look like 0:20, 100: or 7, not {text!r}") from None
+    if (pages.start or 0) < 0 or (pages.stop or 0) < 0:
+        raise SystemExit(f"--pages counts from the first page (0): no negative numbers, not {text!r}")
+    return pages
 
 
 class FrameReader:
@@ -143,6 +151,37 @@ class FrameReader:
     def close(self) -> None:
         self._stack = None
         self._tif.close()
+
+
+def iter_frames(path, pages: slice = slice(None), skip=()):
+    """The 2-D frames of one TIFF in file order, as (index, image), without counting them first: the pages of a
+    multi-page file read one after another, or the frames of an ImageJ stack (one contiguous block of data, as
+    FrameReader reads it). Frames outside ``pages`` (non-negative start / stop) or in ``skip`` are passed over
+    without reading their pixels. A frame that is not a 2-D grayscale image yields (index, ValueError)."""
+    import tifffile
+
+    start, stop = pages.start or 0, pages.stop
+    with tifffile.TiffFile(str(path)) as tif:
+        series = tif.series[0] if tif.is_imagej and tif.series else None
+        stack = None
+        if series is not None and series.axes.endswith("YX") and len(series.shape) > 2:
+            try:
+                stack = tifffile.memmap(str(path), mode="r").reshape(-1, *series.shape[-2:])
+            except ValueError:  # not one contiguous block: read its pages
+                stack = None
+        if stack is not None:
+            for index in range(len(stack))[pages]:
+                if index not in skip:
+                    yield index, np.array(stack[index])
+            return
+        for index, page in enumerate(tif.pages):
+            if stop is not None and index >= stop:
+                return
+            if index < start or index in skip:
+                continue
+            image = page.asarray()
+            yield index, (image if image.ndim == 2 else
+                          ValueError(f"page {index} is not a 2-D grayscale image (shape {image.shape})"))
 
 
 def read_image(path: Path, page: int = 0) -> np.ndarray:
@@ -237,16 +276,14 @@ def page_values(result, image, methods) -> dict:
     return values
 
 
-def measure_page(reader: FrameReader, file_key: str, page: int, settings: dict, check, device: int = 0,
-                 ) -> tuple[dict, dict]:
-    """Read, check and measure one page: (pages.csv row, timings.csv row)."""
+def measure_page(image: np.ndarray, file_key: str, page: int, settings: dict, check, device: int = 0,
+                 read_s: float = float("nan")) -> tuple[dict, dict]:
+    """Check and measure one page: (pages.csv row, timings.csv row)."""
     from subpx import measure_cds
 
     start = time.perf_counter()
-    image = reader.read(page)
-    read_s = time.perf_counter() - start
     error = check(image) if check is not None else float("nan")
-    check_s = time.perf_counter() - start - read_s
+    check_s = time.perf_counter() - start
     row = {"file": file_key, "page": page, "status": "no_holes", "pcc_error": error,
            "image_intensity": float(np.mean(image, dtype=np.float64))}
     timing = {"file": file_key, "page": page, "status": "no_holes", "height": image.shape[0],
@@ -286,8 +323,9 @@ def _describe(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}".replace("\n", " ")[:2000]
 
 
-def _worker(conn, stop, settings: dict, wid: int, gpu: str) -> None:
-    """Worker process: measure the pages it is sent, one at a time, and send back their rows."""
+def _worker(conn, pages, stop, settings: dict, wid: int, gpu: str) -> None:
+    """Worker process: measure the pages it is sent on ``pages`` (a queue: the sender never waits for this process to
+    read), one at a time, and send back their rows on ``conn``."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl+C is the main process's: it lets running pages finish
     try:
         import cv2
@@ -298,48 +336,39 @@ def _worker(conn, stop, settings: dict, wid: int, gpu: str) -> None:
         xp = np
         if settings["backend"] == "gpu":
             import cupy
+            from subpx._gpu import _cuda
             cupy.cuda.Device(0).use()  # CUDA_VISIBLE_DEVICES shows this worker one GPU
             int(cupy.arange(4).sum())
+            _cuda.KEEP_MEMORY = True  # the next page reuses this page's GPU memory
             xp = cupy
         check = make_check(settings, xp)
     except BaseException as error:
         conn.send(("fatal", f"worker on GPU {gpu} could not start: {_describe(error)}"))
         return
     conn.send(("ready",))
-    reader = None
     try:
         while True:
-            task = conn.recv()
+            task = pages.get()
             if task is None:
                 return
-            file_key, path, pages = task
-            for page in pages:
-                if stop.is_set():
-                    break
-                conn.send(("start", file_key, page))
-                try:
-                    if reader is None or reader.path != path:
-                        if reader is not None:
-                            reader.close()
-                        reader = None
-                        reader = FrameReader(path)
-                    row, timing = measure_page(reader, file_key, page, settings, check)
-                except Exception as error:
-                    conn.send(("failed", file_key, page, _describe(error)))
-                    if _is_cuda_failure(error):
-                        return  # the main process starts a fresh worker
-                    if settings["backend"] == "gpu":
-                        import cupy
-                        cupy.get_default_memory_pool().free_all_blocks()
-                    continue
-                timing.update(gpu=gpu, worker=wid, peak_rss_mb=round(_peak_rss_mb(), 1))
-                conn.send(("row", row, timing))
-            conn.send(("done",))
+            file_key, page, image, read_s = task
+            if stop.is_set():
+                continue  # stopping: pages not started go back unmeasured
+            conn.send(("start", file_key, page))
+            try:
+                row, timing = measure_page(image, file_key, page, settings, check, read_s=read_s)
+            except Exception as error:
+                conn.send(("failed", file_key, page, _describe(error)))
+                if _is_cuda_failure(error):
+                    return  # the main process starts a fresh worker
+                if settings["backend"] == "gpu":
+                    import cupy
+                    cupy.get_default_memory_pool().free_all_blocks()
+                continue
+            timing.update(gpu=gpu, worker=wid, peak_rss_mb=round(_peak_rss_mb(), 1))
+            conn.send(("row", row, timing))
     except (EOFError, BrokenPipeError, KeyboardInterrupt):
         return
-    finally:
-        if reader is not None:
-            reader.close()
 
 
 # ------------------------------------------------------------------------------------------------------- bookkeeping
@@ -370,6 +399,14 @@ class CsvRows:
         with self.path.open(encoding="utf-8", newline="") as handle:
             return [row for row in csv.DictReader(handle) if None not in row.values()]
 
+    def keys(self) -> set[tuple[str, int]]:
+        """(file, page) of every complete row (resume): the first two columns only."""
+        self.handle.flush()
+        with self.path.open(encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            return {(row[0], int(row[1])) for row in reader if len(row) == len(self.fields)}
+
     def close(self) -> None:
         self.handle.close()
 
@@ -396,14 +433,16 @@ def _drop_partial_line(path: Path) -> None:
 
 
 def _sorted_rewrite(path: Path, fields: list[str], order) -> None:
-    """Rewrite a finished CSV sorted by (file, page) (temporary file, then replace)."""
+    """Rewrite a finished CSV sorted by (file, page) (temporary file, then replace); rows held as lists."""
     with path.open(encoding="utf-8", newline="") as handle:
-        rows = [row for row in csv.DictReader(handle) if None not in row.values()]
+        reader = csv.reader(handle)
+        header = next(reader, None)
+        rows = [row for row in reader if len(row) == len(fields)]
     rows.sort(key=order)
     temporary = path.with_name(path.name + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
+        writer = csv.writer(handle)
+        writer.writerow(header or fields)
         writer.writerows(rows)
     os.replace(temporary, path)
 
@@ -451,9 +490,60 @@ class Worker:
     gpu: str
     process: object
     conn: object
-    tasks: deque = field(default_factory=deque)  # sent, not finished: [file_key, path, pages not yet started]
-    current: tuple | None = None                 # (file_key, page, start time) of the page being measured
+    pages: object                                   # multiprocessing queue of the pages sent to it
+    inflight: deque = field(default_factory=deque)  # pages sent, not finished: (file_key, page, image, read_s)
+    current: tuple | None = None                    # (file_key, page, start time) of the page being measured
     ready: bool = False
+
+
+class Reader(threading.Thread):
+    """Reads the dataset's pages in file order, each file front to back, into ``pages`` (bounded: the reader runs a
+    few pages ahead of the workers): (file_key, page, image, read seconds), ("error", file_key, message) for a file
+    that cannot be read, and None at the end."""
+
+    def __init__(self, files, keys, selection: slice, done: dict, size: int):
+        super().__init__(daemon=True, name="cd_batch-reader")
+        self.files, self.keys, self.selection, self.done = files, keys, selection, done  # done: file -> pages
+        self.pages = queue.Queue(maxsize=max(1, size))
+        self.stop = threading.Event()
+        self.total_bytes = sum(p.stat().st_size for p in files)
+        self.files_started = 0
+        self.bytes_behind = 0     # of the files already finished
+        self.page_bytes = 0       # pixels of the current file read so far
+        self.pages_read = 0
+
+    def _put(self, item) -> bool:
+        while not self.stop.is_set():
+            try:
+                self.pages.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def run(self) -> None:
+        for key, path in zip(self.keys, self.files):
+            self.files_started += 1
+            self.page_bytes = 0
+            try:
+                started = time.perf_counter()
+                for page, image in iter_frames(path, self.selection, self.done.get(key, ())):
+                    seconds = time.perf_counter() - started
+                    self.pages_read += 1
+                    if isinstance(image, np.ndarray):
+                        self.page_bytes += image.nbytes
+                    if not self._put((key, page, image, seconds)):
+                        return
+                    started = time.perf_counter()
+            except Exception as error:
+                if not self._put(("error", key, f"cannot read the file: {_describe(error)}")):
+                    return
+            self.bytes_behind += path.stat().st_size
+        self._put(None)
+
+    def read_bytes(self) -> int:
+        """Bytes of the dataset behind the reader (finished files, plus the current file's pixels read)."""
+        return self.bytes_behind + self.page_bytes
 
 
 class Run:
@@ -462,39 +552,23 @@ class Run:
     def __init__(self, args, settings: dict, files: list[Path], keys: list[str]):
         self.args, self.settings = args, settings
         self.output = args.output
+        self.files, self.keys = files, keys
         self.methods = settings["measure"]["methods"]
         self.fields = page_fields(self.methods)
         self.pages = CsvRows(self.output / "pages.csv", self.fields)
         self.timings = CsvRows(self.output / "timings.csv", TIMING_FIELDS)
         self.failed = CsvRows(self.output / "failed.csv", FAILED_FIELDS)
-        self.done = {(row["file"], int(row["page"])) for row in self.pages.rows()}
-        self.uncounted = deque(zip(keys, files))
-        self.counted_files = 0
-        self.total_pages = 0          # in counted files, within --pages
-        self.queue: deque = deque()   # tasks not yet sent
+        self.done = self.pages.keys()
+        self.retry: deque = deque()   # pages taken back from a worker that was lost, measured again first
+        self.reader_done = False
         self.counts = {"ok": 0, "no_holes": 0, "failed": 0}
         self.in_a_row = 0
         self.started = time.perf_counter()
         self.stopping = 0             # 1: finish running pages, 2: stop now
         self.fatal = None
+        self.workers: list[Worker] = []
 
     # pages ------------------------------------------------------------------------------------------------------
-    def count_next_file(self) -> None:
-        key, path = self.uncounted.popleft()
-        try:
-            reader = FrameReader(path)
-            count = reader.count
-            reader.close()
-        except Exception as error:
-            self.fail(key, -1, f"cannot read the file: {_describe(error)}")
-            return
-        pages = range(count)[self.settings["pages"]]
-        self.counted_files += 1
-        self.total_pages += len(pages)
-        todo = [p for p in pages if (key, p) not in self.done]
-        for start in range(0, len(todo), TASK_PAGES):
-            self.queue.append([key, str(path), todo[start:start + TASK_PAGES]])
-
     def write(self, row: dict, timing: dict) -> None:
         self.pages.write(row)
         self.timings.write(timing)
@@ -511,23 +585,43 @@ class Run:
             print(f"Stopping: {self.in_a_row} pages failed in a row (see failed.csv)", flush=True)
             self.stopping = 1
 
+    def done_by_file(self) -> dict[str, set[int]]:
+        done = {}
+        for key, page in self.done:
+            done.setdefault(key, set()).add(page)
+        return done
+
+    def next_page(self):
+        """The next page to measure, or None when none is ready (or all are read)."""
+        if self.retry:
+            return self.retry.popleft()
+        while not self.reader_done:
+            try:
+                item = self.reader.pages.get_nowait()
+            except queue.Empty:
+                return None
+            if item is None:
+                self.reader_done = True
+            elif item[0] == "error":
+                self.fail(item[1], -1, item[2])
+            elif isinstance(item[2], Exception):
+                self.fail(item[0], item[1], _describe(item[2]))
+            else:
+                return item
+        return None
+
     def progress(self) -> None:
         done = sum(self.counts.values())
         elapsed = time.perf_counter() - self.started
         rate = done / elapsed if elapsed > 0 else 0.0
-        if self.uncounted:  # estimate the rest from the files counted so far
-            per_file = self.total_pages / max(self.counted_files, 1)
-            total = f"~{int(self.total_pages + per_file * len(self.uncounted))}"
-        else:
-            total = str(self.total_pages)
-        remaining = len(self.queue_pages()) + sum(len(t[2]) for w in self.workers for t in w.tasks)
-        eta = time.strftime("%H:%M:%S", time.gmtime(remaining / rate)) if rate > 0 and not self.uncounted else "-"
+        reader = self.reader
+        read, total = reader.read_bytes(), reader.total_bytes
+        speed = read / elapsed if elapsed > 0 else 0.0
+        eta = time.strftime("%H:%M:%S", time.gmtime((total - read) / speed)) if speed > 0 and total > read else "-"
         print(f"[{time.strftime('%H:%M:%S')}] this run: {done} pages ({self.counts['ok']} ok, "
               f"{self.counts['no_holes']} no holes, {self.counts['failed']} failed) | {rate:.2f} pages/s | "
-              f"all pages: {len(self.done)} of {total} done | ETA {eta}", flush=True)
-
-    def queue_pages(self) -> list:
-        return [p for task in self.queue for p in task[2]]
+              f"file {reader.files_started} of {len(self.files)}, {read / 1e9:.1f} of {total / 1e9:.1f} GB read "
+              f"({speed / 1e6:.0f} MB/s) | ETA {eta}", flush=True)
 
     # workers ----------------------------------------------------------------------------------------------------
     def start_worker(self, wid: int, gpu: str) -> Worker:
@@ -535,6 +629,7 @@ class Run:
 
         context = mp.get_context("spawn")  # never fork a process that may hold a CUDA context
         parent, child = context.Pipe()
+        pages = context.Queue()
         threads = str(self.settings["threads"])
         env = {"OMP_NUM_THREADS": threads, "OPENBLAS_NUM_THREADS": threads, "MKL_NUM_THREADS": threads}
         if self.settings["backend"] == "gpu":  # the worker sees one GPU; ids as nvidia-smi numbers them
@@ -542,7 +637,7 @@ class Run:
         saved = {name: os.environ.get(name) for name in env}
         os.environ.update(env)  # a spawned process starts with the parent's environment at that moment
         try:
-            process = context.Process(target=_worker, args=(child, self.stop_event, self.settings, wid, gpu),
+            process = context.Process(target=_worker, args=(child, pages, self.stop_event, self.settings, wid, gpu),
                                       daemon=True, name=f"cd_batch-{wid}")
             process.start()
         finally:
@@ -552,17 +647,17 @@ class Run:
                 else:
                     os.environ[name] = value
         child.close()
-        return Worker(wid, gpu, process, parent)
+        return Worker(wid, gpu, process, parent, pages)
 
     def lost(self, worker: Worker, reason: str) -> None:
-        """A worker died or hung: its page failed, its other pages go back to the queue, a new worker starts."""
+        """A worker died or hung: its page failed, its other pages are measured again, a new worker starts."""
         if worker.current is not None:
             key, page, _ = worker.current
             self.fail(key, page, reason)
-        for task in reversed(worker.tasks):
-            if task[2]:
-                self.queue.appendleft(task)
-        worker.tasks.clear()
+        for item in reversed(worker.inflight):
+            if worker.current is None or item[:2] != worker.current[:2]:
+                self.retry.appendleft(item)
+        worker.inflight.clear()
         worker.current = None
         try:
             worker.process.kill()
@@ -570,6 +665,8 @@ class Run:
             pass
         worker.process.join(10)
         worker.conn.close()
+        worker.pages.cancel_join_thread()  # pages it never read are dropped, not waited for
+        worker.pages.close()
         index = self.workers.index(worker)
         if self.stopping or self.fatal:
             self.workers.pop(index)
@@ -585,17 +682,17 @@ class Run:
         elif kind == "start":
             _, key, page = message
             worker.current = (key, page, time.perf_counter())
-            pages = worker.tasks[0][2]
-            if page in pages:
-                pages.remove(page)
-        elif kind == "row":
+        elif kind in ("row", "failed"):
+            key, page = (message[1]["file"], message[1]["page"]) if kind == "row" else (message[1], message[2])
             worker.current = None
-            self.write(message[1], message[2])
-        elif kind == "failed":
-            worker.current = None
-            self.fail(message[1], message[2], message[3])
-        elif kind == "done":
-            worker.tasks.popleft()
+            for i, item in enumerate(worker.inflight):
+                if item[0] == key and item[1] == page:
+                    del worker.inflight[i]
+                    break
+            if kind == "row":
+                self.write(message[1], message[2])
+            else:
+                self.fail(key, page, message[3])
 
     def run(self) -> int:
         import multiprocessing as mp
@@ -614,6 +711,8 @@ class Run:
         print(f"Backend: {backend}; {len(slots)} workers" + (f" on GPUs {', '.join(gpus)}" if gpus else "")
               + f", {self.settings['threads']} CPU threads each", flush=True)
         self.stop_event = mp.get_context("spawn").Event()
+        self.reader = Reader(self.files, self.keys, self.settings["pages"], self.done_by_file(), PREFETCH * len(slots))
+        self.reader.start()
         self.workers = [self.start_worker(wid, gpu) for wid, gpu in enumerate(slots)]
 
         def interrupt(signum, frame):
@@ -621,6 +720,7 @@ class Run:
             if self.stopping == 1:
                 print("Stopping after the pages being measured (Ctrl+C again: stop now)...", flush=True)
             self.stop_event.set()
+            self.reader.stop.set()
 
         previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
         last_progress = time.perf_counter()
@@ -629,19 +729,19 @@ class Run:
                 if self.fatal:
                     break
                 if not self.stopping:
-                    while self.uncounted and len(self.queue) < 4 * len(self.workers):
-                        self.count_next_file()
                     for worker in self.workers:
-                        while worker.ready and len(worker.tasks) < 2 and self.queue:
-                            task = self.queue.popleft()
-                            worker.tasks.append(task)
-                            worker.conn.send((task[0], task[1], list(task[2])))
-                    if not self.queue and not self.uncounted and all(not w.tasks for w in self.workers):
+                        while worker.ready and len(worker.inflight) < PREFETCH:
+                            item = self.next_page()
+                            if item is None:
+                                break
+                            worker.inflight.append(item)
+                            worker.pages.put(item)
+                    if self.reader_done and not self.retry and all(not w.inflight for w in self.workers):
                         break
-                elif all(not w.tasks and w.current is None for w in self.workers) or self.stopping > 1:
+                elif all(w.current is None for w in self.workers) or self.stopping > 1:
                     break
                 try:
-                    ready = wait([w.conn for w in self.workers], timeout=1.0)
+                    ready = wait([w.conn for w in self.workers], timeout=0.2)
                 except InterruptedError:  # Ctrl+C during the wait (Windows does not retry it)
                     ready = []
                 for worker in list(self.workers):
@@ -663,20 +763,20 @@ class Run:
                                 self.handle(worker, worker.conn.recv())
                         except (EOFError, OSError):
                             pass
-                        if worker.tasks or worker.current is not None or not self.stopping:
+                        if worker.inflight or worker.current is not None or not self.stopping:
                             self.lost(worker, f"worker stopped (exit code {worker.process.exitcode})")
                 if now - last_progress >= PROGRESS_SECONDS:
                     self.progress()
                     last_progress = now
-                if self.uncounted and not ready and not self.stopping:
-                    self.count_next_file()  # use quiet moments to count the next file's pages
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
             self.stop_event.set()
+            self.reader.stop.set()
             for worker in self.workers:
                 try:
-                    worker.conn.send(None)
+                    worker.pages.put(None)
+                    worker.pages.cancel_join_thread()
                 except Exception:
                     pass
             for worker in self.workers:
@@ -688,7 +788,8 @@ class Run:
             self.failed.close()
         if self.fatal:
             raise SystemExit(self.fatal)
-        return self.finish(complete=not self.stopping)
+        complete = not self.stopping and self.reader_done and not self.retry
+        return self.finish(complete=complete)
 
     def run_here(self) -> int:
         """Everything in this process, one page after another (debugging and tests)."""
@@ -702,24 +803,25 @@ class Run:
         else:
             device = 0
         check = make_check(self.settings, xp)
+        done = self.done_by_file()
         try:
-            while self.uncounted or self.queue:
-                if not self.queue:
-                    self.count_next_file()
-                    continue
-                key, path, pages = self.queue.popleft()
-                reader = FrameReader(path)
+            for key, path in zip(self.keys, self.files):
                 try:
-                    for page in pages:
+                    started = time.perf_counter()
+                    for page, image in iter_frames(path, self.settings["pages"], done.get(key, ())):
+                        read_s = time.perf_counter() - started
                         try:
-                            row, timing = measure_page(reader, key, page, self.settings, check, device)
+                            if isinstance(image, Exception):
+                                raise image
+                            row, timing = measure_page(image, key, page, self.settings, check, device, read_s)
                         except Exception as error:
                             self.fail(key, page, _describe(error))
-                            continue
-                        timing.update(gpu="", worker=0, peak_rss_mb=round(_peak_rss_mb(), 1))
-                        self.write(row, timing)
-                finally:
-                    reader.close()
+                        else:
+                            timing.update(gpu="", worker=0, peak_rss_mb=round(_peak_rss_mb(), 1))
+                            self.write(row, timing)
+                        started = time.perf_counter()
+                except Exception as error:
+                    self.fail(key, -1, f"cannot read the file: {_describe(error)}")
         finally:
             self.pages.close()
             self.timings.close()
@@ -731,8 +833,8 @@ class Run:
         done = sum(self.counts.values())
         print(f"This run: {done} pages in {elapsed:.0f} s ({self.counts['ok']} ok, {self.counts['no_holes']} no "
               f"holes, {self.counts['failed']} failed); results: {self.output / 'pages.csv'}", flush=True)
-        if complete and not self.uncounted and not self.queue:
-            order = lambda row: (row["file"], int(row["page"]))  # noqa: E731
+        if complete:
+            order = lambda row: (row[0], int(row[1]))  # noqa: E731
             _sorted_rewrite(self.output / "pages.csv", self.fields, order)
             _sorted_rewrite(self.output / "timings.csv", TIMING_FIELDS, order)
         else:
