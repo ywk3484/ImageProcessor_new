@@ -331,3 +331,24 @@ Results (synthetic page 1730 x 1730 px, 28,900 holes, RTX 4060 Ti):
   to 2.6 nm), because their 4x enlargement grid and averaged-peak area follow the stack size. gaussian and the
   tail-window methods did not change.
 - Suite: 212 passed, 1 skipped, same 9 pre-existing failures.
+
+# Batch CD at disk speed: same numbers, at most 1 s per page (2026-10-24)
+
+Plan: the remote's data (pages 2048 x 1378 8-bit, ~400 TIFFs of ~2 GB on one HDD, 4x RTX 6000 Ada) need <= 0.34 s
+per page per GPU to be limited by the disk (~7 h per 400 files); the current code takes 5.2 s per page here (15.2 s
+with one 42-px blob, which grows every hole's square to 51 x 49). Phase A keeps every number (to 1e-6 px, same
+statuses), checked against golden outputs of 6 test pages saved before any change; Phase B fixes the square-size bug
+in place (user's decision): the 9 methods' numbers change once.
+
+- [x] Golden outputs of the current code (user-size page, blob page, synthetic_ch, border/merged page, outlines,
+      peak seeds); reproducible run to run
+- [x] A1: wide-window methods: `_wide_cells` kernel, fused `_half_area` post-processing, one enlargement for the
+      4 methods without a local level, arrays kept on the GPU (user page 5.13 -> 2.55 s, all 6 pages same)
+- [ ] A2: projection + cell-stack half_area family computed in each hole's own box (page-max operators' sub-blocks)
+- [ ] A3: deblend: warp-per-cell LM over own boxes, GPU distance map, radii once per iteration, GPU fit status,
+      exact tile-median selection
+- [ ] A4: CPU steps: isin lookup, GPU dilation, GPU seed-revision filters
+- [ ] A5: batch: one sequential reader, no page counting, light resume; workers per GPU re-measured; docs
+- [ ] Phase A done: <= 1 s per page on this 4060 Ti on both test pages, numbers unchanged; tests
+- [ ] B: grid fix in place (fixed 1/4-px grid, zero-extended spline), square-size independence test, before/after
+      table, docs
