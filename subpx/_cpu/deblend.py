@@ -259,10 +259,12 @@ def sigma_caps(masks: np.ndarray) -> np.ndarray:
     return np.maximum(1.0, np.sqrt(masks.reshape(len(masks), -1).sum(axis=1) / np.pi))
 
 
-def fit_status(p: np.ndarray, masks: np.ndarray, cap: np.ndarray, status: np.ndarray) -> None:
-    """Mark diverged, non-Gaussian and off-cell fits in ``status`` (in place, from "ok")."""
+def fit_status(p: np.ndarray, masks: np.ndarray, cap: np.ndarray, status: np.ndarray,
+               sigma: np.ndarray | None = None) -> None:
+    """Mark diverged, non-Gaussian and off-cell fits in ``status`` (in place, from "ok"); ``sigma``: their
+    ``sigma_major`` when already known."""
     h, w = masks.shape[1:]
-    sig = sigma_major(p)
+    sig = sigma_major(p) if sigma is None else sigma
     bad = ~np.isfinite(p).all(axis=1)
     status[bad] = "fit_diverged"
     status[~bad & ((p[:, 0] <= 0) | (sig >= 0.999 * cap))] = "non_gaussian_fit"
@@ -335,6 +337,9 @@ def estimate_background_map(
     return _upsample_tiles(medians, tile, residual.shape), info
 
 
+_INTERPOLATORS: dict = {}  # measured-tile pattern -> (Delaunay triangulation or None, cKDTree) of its tile centres
+
+
 def background_tiles(tile_medians, free, usable, tile: int, shape: tuple[int, int]):
     """Tile medians of the background map, or None when no tile has a usable pixel; and info.
 
@@ -349,21 +354,31 @@ def background_tiles(tile_medians, free, usable, tile: int, shape: tuple[int, in
     if measured.all():
         medians, info["source"] = free_med, "measured"
     elif measured.any():
-        from scipy.interpolate import griddata
+        from scipy.interpolate import LinearNDInterpolator
+        from scipy.spatial import Delaunay, cKDTree
 
         yc, xc = _tile_centers(tile, shape)
         grid = np.stack(np.meshgrid(yc, xc, indexing="ij"), axis=-1)
         known, values = grid[measured], free_med[measured]
+        # griddata's linear and nearest interpolation, with the triangulation and tree of a measured-tile pattern
+        # kept: the deblending iterations meet the same pattern again and again.
+        key = (tuple(shape), tile, measured.tobytes())
+        if key not in _INTERPOLATORS:
+            try:
+                triangles = Delaunay(known) if len(values) >= 3 else None
+            except Exception:  # collinear measured tiles (e.g. one strip)
+                triangles = None
+            if len(_INTERPOLATORS) >= 32:
+                _INTERPOLATORS.clear()
+            _INTERPOLATORS[key] = (triangles, cKDTree(known))
+        triangles, tree = _INTERPOLATORS[key]
         medians = free_med.copy()
         missing = ~measured
         medians[missing] = np.nan
-        if len(values) >= 3:
-            try:
-                medians[missing] = griddata(known, values, grid[missing], method="linear")
-            except Exception:  # collinear measured tiles (e.g. one strip)
-                pass
+        if triangles is not None:
+            medians[missing] = LinearNDInterpolator(triangles, values)(grid[missing])
         still = missing & np.isnan(medians)
-        medians[still] = griddata(known, values, grid[still], method="nearest")
+        medians[still] = values[tree.query(grid[still])[1]]
         info["source"] = "interpolated"
     else:
         medians, _ = tile_medians(usable)

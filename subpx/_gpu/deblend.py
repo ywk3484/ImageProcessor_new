@@ -200,6 +200,18 @@ def _cell_chunks(n: int, roi_shape) -> list[slice]:
     return [slice(start, start + size) for start in range(0, n, size)]
 
 
+def _sigma_major(params: np.ndarray) -> np.ndarray:
+    """``cpu.sigma_major`` in closed form, equal to rounding: the precision L L^T has determinant (e^u1 e^u3)^2, so
+    its smaller eigenvalue is that divided by the larger one (no cancellation)."""
+    e1, u2, e3 = np.exp(params[:, 3]), params[:, 4], np.exp(params[:, 5])
+    a, b, c = e1 * e1, e1 * u2, u2 * u2 + e3 * e3
+    half = (a - c) / 2
+    larger = (a + c) / 2 + np.sqrt(half * half + b * b)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        smaller = np.where(larger > 0, (e1 * e3) ** 2 / larger, 0.0)
+    return 1 / np.sqrt(np.maximum(smaller, 1e-300))
+
+
 def _cell_parts(masks) -> list[tuple[np.ndarray, int, int]]:
     """The cells grouped by the top-left sub-block of the stack that holds their mask (rows, height, width), split
     so that one part's cleaned cells take at most _CHUNK_BYTES: everything outside a mask is zero or False, so a
@@ -460,7 +472,7 @@ def deblend(
 
     def sigmas(p):
         if known.get("params") is not p:
-            known.update(params=p, sigma=cpu.sigma_major(p))
+            known.update(params=p, sigma=_sigma_major(p))
         return known["sigma"]
 
     def radii(p):  # cpu._render_radius(p, radius_cap)
@@ -497,7 +509,7 @@ def deblend(
         for part, (rows, _, _) in enumerate(parts):
             fitted[rows] = _fit_device(data_of(part), part_masks[part], p[rows], max_iter=max_iter)
         status = np.full(n, "ok", dtype="U32")
-        cpu.fit_status(fitted, masks, caps, status)
+        cpu.fit_status(fitted, masks, caps, status, sigma=_sigma_major(fitted))
         return fitted, status
 
     if init is None:
@@ -514,7 +526,7 @@ def deblend(
             start = cp.asnumpy(_initial_params(data, cells, cp.asarray(seeds_xy[rows] - origins[rows])))
             params[rows] = _fit_device(data, part_masks[part], start, max_iter=max_iter)
         status = np.full(n, "ok", dtype="U32")
-        cpu.fit_status(params, masks, caps, status)
+        cpu.fit_status(params, masks, caps, status, sigma=_sigma_major(params))
     else:
         params, status = np.asarray(init, dtype=np.float64).copy(), np.full(n, "ok", dtype="U32")
 

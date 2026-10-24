@@ -382,20 +382,16 @@ def _measure_cds(
         comp = connected_components_stats_cpu(binary, connectivity=8)
         component_labels = comp.labels
         components_before_filter = comp.num_labels - 1
-        rows, component_ids, interior = [], [], []
-        for label in range(1, comp.num_labels):
-            x, y, w, h, area = comp.stats[label]
-            if area < area_min or area > area_max:
-                continue
-            inside = not (x <= 0 or y <= 0 or x + w >= width or y + h >= height)
-            # Border mode drops edge holes entirely; model mode still models
-            # them so their tails are subtracted from interior neighbours.
-            if not inside and background == "border":
-                continue
-            rows.append([x, y, w, h, *comp.centroids[label]])
-            component_ids.append(label)
-            interior.append(inside)
-        component_ids = np.asarray(component_ids, dtype=np.int32)
+        x, y, w, h, area = (np.asarray(comp.stats[1:comp.num_labels], dtype=np.int64).reshape(-1, 5).T)
+        keep = (area >= area_min) & (area <= area_max)
+        inside = ~((x <= 0) | (y <= 0) | (x + w >= width) | (y + h >= height))
+        # Border mode drops edge holes entirely; model mode still models
+        # them so their tails are subtracted from interior neighbours.
+        if background == "border":
+            keep &= inside
+        rows = np.column_stack((x, y, w, h, np.asarray(comp.centroids[1:comp.num_labels]).reshape(-1, 2)))[keep].tolist()
+        component_ids = (np.flatnonzero(keep) + 1).astype(np.int32)
+        interior = inside[keep].tolist()
     else:
         from ._cpu.deblend import detect_peaks
 
@@ -454,8 +450,16 @@ def _measure_cds(
         # Peak seeds and seeds added from the residual have no component box;
         # their edge test uses the fitted width instead.
         by_reach = np.full(len(rows), seeds == "peaks")
+        tile_px = tiled_seeds = None
         if seeds == "threshold":
-            pitch = auto_tile(all_seeds, img.shape)[1]
+            tile_px, pitch = auto_tile(all_seeds, img.shape)
+            tiled_seeds = all_seeds  # deblend's own auto_tile of these seeds gives tile_px
+
+        def tile_for(seeds_xy):
+            if background_tile is not None or seeds_xy is not tiled_seeds:
+                return background_tile
+            return tile_px
+
         added = dropped = 0
         for revision in range(3):
             exclude = None
@@ -468,7 +472,7 @@ def _measure_cds(
             state = deblend(
                 signal_image, all_seeds, masks, origins,
                 iterations=int(deblend_iterations) if final else min(10, int(deblend_iterations)),
-                tile=background_tile, exclude=exclude,
+                tile=tile_for(all_seeds), exclude=exclude,
                 background_level=None if background_level is None else sign * float(background_level),
             )
             if final:
@@ -483,7 +487,7 @@ def _measure_cds(
                 state = deblend(
                     signal_image, all_seeds, masks, origins,
                     iterations=int(deblend_iterations) - state.iterations, init=state.params,
-                    tile=background_tile, exclude=exclude,
+                    tile=tile_for(all_seeds), exclude=exclude,
                     background_level=None if background_level is None else sign * float(background_level),
                 )
                 break

@@ -84,6 +84,7 @@ INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area
 _HALF_AREA = {"half_area": ("median", False), "half_area_min": ("min", False), "half_area_min_avg": ("min", True)}
 AIRY_K = 1.0290  # FWHM of the incoherent Airy pattern = AIRY_K / cutoff frequency
 _CHUNK = 4096    # holes per batched fit step: (chunk, K) arrays stay ~10 MB each
+_GPU_CHUNK_BYTES = 256 * 2**20  # one chunk's enlarged cells on the GPU
 _CALIBRATION_HOLES = 2000
 
 
@@ -499,25 +500,34 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
                        zone_masks=zone_masks, outlines=outlines, xp=xp)[name]
 
 
+_BUCKETS: list = []  # the last _size_buckets call: (masks, step, result); the same stack is grouped several times
+
+
 def _size_buckets(masks, step: int = 4) -> list[tuple[np.ndarray, int, int]]:
     """The cells grouped by the extent of their mask (masks sit at the top left of the stack), rounded up to
     ``step`` px and at most the stack size: (rows, height, width) of each group's top-left sub-block."""
+    if _BUCKETS and _BUCKETS[0][0] is masks and _BUCKETS[0][1] == step:
+        return _BUCKETS[0][2]
     n, h, w = masks.shape
     rows_any, cols_any = _to_numpy(masks.any(axis=2)), _to_numpy(masks.any(axis=1))
     hb = np.where(rows_any.any(axis=1), h - np.argmax(rows_any[:, ::-1], axis=1), 1)
     wb = np.where(cols_any.any(axis=1), w - np.argmax(cols_any[:, ::-1], axis=1), 1)
     key = np.minimum(-(-hb // step) * step, h) * (w + 1) + np.minimum(-(-wb // step) * step, w)
-    return [(np.flatnonzero(key == value), int(value // (w + 1)), int(value % (w + 1))) for value in np.unique(key)]
+    buckets = [(np.flatnonzero(key == value), int(value // (w + 1)), int(value % (w + 1))) for value in np.unique(key)]
+    _BUCKETS[:] = [(masks, step, buckets)]
+    return buckets
 
 
 def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, factor: int = 4, level_masks=None,
                 zone_masks=None, outlines: bool = True, xp=np, enlarged: dict | None = None,
-                seconds: dict | None = None) -> dict[str, CDMethodResult]:
+                seconds: dict | None = None, rectangles: np.ndarray | None = None) -> dict[str, CDMethodResult]:
     """``_half_area`` for several methods on the same cells (``specs``: dicts of name, level, background,
     peak_pixels, cuts), the same numbers as one call each: each chunk of cells is enlarged once per local level
     (the methods without one share it) and its averaged peak taken once per enlargement. ``enlarged`` (CuPy): a dict
     keeping those shared enlargements for a later call on the same cells, while they fit in GPU memory.
     ``seconds``: per method, the time of its own work; a shared step counts for the first method that needs it.
+    ``rectangles``: (n, 4) rows r0, r1 and columns c0, c1 when every mask is that rectangle of ones (CuPy then
+    enlarges a cell with a local level from the shared enlargement, to rounding).
 
     On CuPy each cell is computed in the top-left sub-block of the stack that holds its mask (cells grouped by that
     size), with the operators and constants of the whole stack: everything outside a mask is zero or False there,
@@ -556,7 +566,11 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
         zy_b, zx_b, iy_b, ix_b, gy_b, gx_b = zy[:Yb, :hb], zx[:Xb, :wb], iy[:Yb], ix[:, :Xb], gy[:Yb], gx[:Xb]
         if gpu:
             iy1_b, ix1_b = iy1[:Yb], ix1[:Xb]
-        chunk = max(256, _CHUNK * 196 // (hb * wb))  # ~the memory of 4096 cells of 14 x 14 px
+            # Running sums of the operators' columns: a rectangle of ones enlarges to an outer product of their sums.
+            sum_y = xp.concatenate((xp.zeros((Yb, 1)), xp.cumsum(zy_b, axis=1)), axis=1)
+            sum_x = xp.concatenate((xp.zeros((Xb, 1)), xp.cumsum(zx_b, axis=1)), axis=1)
+        # ~the memory of 4096 cells of 14 x 14 px; on the GPU ~256 MB per enlarged chunk (fewer, larger steps)
+        chunk = max(256, int(_GPU_CHUNK_BYTES // (8 * Yb * Xb)) if gpu else _CHUNK * 196 // (hb * wb))
         for start in range(0, len(members), chunk):
             rows = members[start:start + chunk]
             k = len(rows)
@@ -594,6 +608,13 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
                 if ("big", kind) not in shared:
                     if enlarged is not None and kind == "zero" and (bucket, start) in enlarged:
                         shared["big", kind] = enlarged[bucket, start]
+                    elif gpu and kind != "zero" and rectangles is not None:
+                        # Zy (X0 - b M) Zx^T = (the enlargement without a level) - b (Zy M Zx^T), M a rectangle of
+                        # ones: equal to rounding, without a second matrix product.
+                        r0, r1, c0, c1 = xp.asarray(rectangles[rows]).T
+                        ry = (sum_y[:, r1] - sum_y[:, r0]).T * b[:, None]
+                        rx = (sum_x[:, c1] - sum_x[:, c0]).T
+                        shared["big", kind] = enlargement("zero", xp.zeros(k)) - ry[:, :, None] * rx[:, None, :]
                     else:
                         mask, cell = cells()
                         shared["big", kind] = zy_b[None] @ xp.where(mask, cell - b[:, None, None], 0.0) @ zx_b.T[None]
@@ -664,7 +685,15 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
                     hit = xp.take_along_axis(region.reshape(k, -1), index, axis=1).reshape(px.shape) & inside
                     first_out = xp.where(hit.all(axis=2), len(steps), xp.argmin(hit, axis=2))
                     values.append(("edge", steps[xp.maximum(first_out - 1, 0)] + 0.0625))
-                out = {key: _to_numpy(v) for key, v in values}
+                if gpu:  # one transfer for all per-cell numbers
+                    numbers = [(key, v) for key, v in values if key != "edge"]
+                    host = _to_numpy(xp.stack([xp.asarray(v, dtype=float) for _, v in numbers]))
+                    out = {key: host[i] for i, (key, _) in enumerate(numbers)}
+                    out["touches"] = out["touches"] != 0
+                    if outlines:
+                        out["edge"] = _to_numpy(values[-1][1])
+                else:
+                    out = {key: _to_numpy(v) for key, v in values}
                 signal = (out["peak"] > 0) & np.isfinite(out["cut"]) & (out["cut"] < out["peak"])
                 m = results[name].metrics
                 m["local_level"][rows] = out["b"]
@@ -883,16 +912,18 @@ def measure_invariant(
     found, info = {}, {}
     seconds = info["seconds"] = {}  # per method (results are on the host when each call returns)
     start = time.perf_counter()
-    if "projection" in methods:
-        found["projection"] = _projection(state.cleaned[report], masks[report], origins[report], n_angles, xp=xp)
-        seconds["projection"], start = time.perf_counter() - start, time.perf_counter()
     half = [name for name in _HALF_AREA if name in methods]
+    if "projection" in methods or half:
+        cleaned_r, masks_r, origins_r = state.cleaned[report], masks[report], origins[report]
+    if "projection" in methods:
+        found["projection"] = _projection(cleaned_r, masks_r, origins_r, n_angles, xp=xp)
+        seconds["projection"], start = time.perf_counter() - start, time.perf_counter()
     if half:  # one call: half_area_min and half_area_min_avg share their enlargement
         specs = [{"name": name, "level": half_area_level, "background": _HALF_AREA[name][0],
                   "peak_pixels": half_area_peak_pixels if _HALF_AREA[name][1] else None, "cuts": None}
                  for name in half]
-        found.update(_half_areas(state.cleaned[report], masks[report], origins[report], n_angles, specs,
-                                 outlines=outlines, xp=xp, seconds=seconds))
+        found.update(_half_areas(cleaned_r, masks_r, origins_r, n_angles, specs, outlines=outlines, xp=xp,
+                                 seconds=seconds))
         start = time.perf_counter()
     tails = [name for name in ("tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
              if name in methods]
@@ -919,7 +950,13 @@ def measure_invariant(
         if "foot_area_ratio" in tails and "foot_area" not in first:
             first.append("foot_area")
         enlarged = {} if xp is not np else None
-        common = dict(level_masks=level_masks, zone_masks=territory, outlines=outlines, xp=xp, enlarged=enlarged)
+        # Each window's mask is the rectangle of it inside the image: rows r0:r1, columns c0:c1.
+        size, (height, width) = cells.shape[1], signal.shape
+        ox, oy = win_origins[:, 0].astype(np.int64), win_origins[:, 1].astype(np.int64)
+        r0, c0 = np.clip(-oy, 0, size), np.clip(-ox, 0, size)
+        rects = np.column_stack((r0, np.clip(height - oy, r0, size), c0, np.clip(width - ox, c0, size)))
+        common = dict(level_masks=level_masks, zone_masks=territory, outlines=outlines, xp=xp, enlarged=enlarged,
+                      rectangles=rects)
         tail_found = _half_areas(cells, inside, win_origins, n_angles,
                                  [{"name": name, "level": tail_area_level, "background": backgrounds[name],
                                    "peak_pixels": half_area_peak_pixels, "cuts": None} for name in first],
