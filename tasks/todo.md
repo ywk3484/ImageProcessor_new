@@ -354,6 +354,40 @@ in place (user's decision): the 9 methods' numbers change once.
 - [x] A5: batch: one sequential reader, no page counting, light resume; workers per GPU re-measured; docs
       (2 GB file cold on the HDD: 21 s, as a plain read; tifffile.imread 57 s; 48-page user-size run: rows equal
       direct measure_cds, 1 and 2 workers identical; 2 workers 0.81 vs 0.70 pages/s here)
-- [ ] Phase A done: <= 1 s per page on this 4060 Ti on both test pages, numbers unchanged; tests
-- [ ] B: grid fix in place (fixed 1/4-px grid, zero-extended spline), square-size independence test, before/after
+- [x] Phase A done, numbers unchanged (statuses identical, CDs within 3.5e-8 px); the <= 1 s target was not
+      reached: 1.6 s (user page), 3.0 s (blob page), about half GPU (FP64), half CPU
+- [x] B: grid fix in place (fixed 1/4-px grid, zero-extended spline), square-size independence test, before/after
       table, docs
+
+## Review
+
+Deviations from the approved plan:
+- Phase A is "unchanged to rounding", not bit for bit: the warp-per-cell LM fit adds its sums in another order (fits
+  move by <= 1.6e-7 relative, CDs by <= 3.5e-8 px, no status change on the 6 golden pages); the golden tolerance for
+  values other than lengths was relaxed from 1e-9 to 1e-6 relative for this.
+- Extra host-side work beyond the plan, found by profiling: closed-form sigma_major in the GPU deblend, tail_area's
+  enlargement from the shared one (its window masks are rectangles), cached size groups, tile size and background
+  triangulation, vectorized component filter, KEEP_MEMORY for the batch workers.
+- The batch sends pages through a multiprocessing queue per worker: on Windows, large sends on the result pipe
+  blocked the main loop and broke Ctrl+C.
+- Phase B changed some unit-test expectations (each checked against the old code first): the old values depended on
+  the size of the array holding a cell (edge_area's bright-top shift: 1.8 % in a 31-px cell, 4.2 % in a 41-px cell;
+  now 3.7 % for both); edge/foot pedestal invariance held only for cells filling their whole array (any mask ending
+  inside the array moved them in the old code too); a spot cut 1 px from the cell edge is now measured (truncated)
+  instead of flagged region_at_cell_border; projection's pulse sensitivity on the synthetic test 0.495 -> 0.52
+  (its scatter 0.742 -> 0.695 px).
+
+Results (RTX 4060 Ti, Windows, this PC also loaded by other programs):
+- User-size page (2048 x 1378, 30,175 holes): 5.13 -> 1.6 s; the same page with one 42-px blob: 14.5 -> 3.0 s.
+  GPU busy ~50 % (~0.8 s GPU, ~0.8 s CPU per page). A second worker on this GPU: no more pages per second (GPU
+  busy 75 %: processes take turns on Windows); on the remote's Linux (with MPS) to be measured by the trial run.
+- Reading: a 2 GB, 1500-page TIFF cold from the HDD in 21 s (plain read 22-26 s, tifffile.imread 57 s, the old
+  batch's 8 workers 56 s).
+- Batch end to end (48 user-size pages from the HDD, 38 with holes): rows equal direct measure_cds calls; 1 and 2
+  workers give identical rows.
+- Phase B one-time change (user page, page means): half_area_min_avg +0.77 nm, tail_area +0.25, tail_area_norm +0.26,
+  projection +0.21 (valid 29983 -> 30175), foot_area -1.20 (valid 27625 -> 28023), foot_area_ratio -1.12, half_area
+  +0.02, half_area_min +0.02, edge_area +0.06, gaussian 0. Squares 6-7 px larger with the same deblend result: 0.000
+  change (was up to 2.6 nm per hole); wide window 25 -> 27 px: tail_area_norm 0, others sd <= 0.007 nm per hole (was
+  up to 2.55 nm sd for foot_area).
+- Suite: 221 passed, 1 skipped, the same 9 pre-existing failures.

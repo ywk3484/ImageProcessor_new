@@ -93,7 +93,8 @@ def measure_cds(
         ``half_area`` takes the cell's local level b (median of its outermost
         pixels) and the region around the peak brighter than b plus
         ``half_area_level`` x the peak height above b, on a 4x cubic-spline
-        enlargement of the cell (CD = 2 sqrt(area / pi), the equal-area circle;
+        enlargement of the cell (1/4-px sub-pixels; the cell zero outside its
+        mask) (CD = 2 sqrt(area / pi), the equal-area circle;
         cd_x / cd_y = the x / y diameters of the ellipse with the region's
         area and x / y second moments). It assumes no shape.
         ``half_area_min`` is the same with b = the minimum of the outermost

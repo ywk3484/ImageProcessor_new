@@ -90,3 +90,14 @@
   contention (without MPS, processes take turns and evict each other's cache). Before claiming a limit, compare
   the work with the hardware: bytes moved vs data size (one page created 157 GB of temporaries for 2.7 MB of
   pixels), double-precision use (1/64 rate on Ada), GPU idle time (29 %), number of launches (~16,000 per page).
+- **A test threshold tuned on a buggy implementation encodes the bug.** After the grid fix, unit tests failed whose
+  limits had been met by the old code only at the one cell size the test used (edge_area's bright-top shift: 1.8 % in
+  a 31-px cell, 4.2 % in a 41-px cell, old code). Before changing a test, recompute its quantity with the old code at
+  another array size or mask shape; report the change, do not just relax the limit.
+- **Profile before trusting a "the GPU is the limit" picture, and measure the worker counts the target will run.**
+  After the kernel work, half of each page was CPU-side (many small steps), and a second worker gave no gain on this
+  Windows GPU. Give the remote estimate as a range with the deciding unknown named (workers per GPU on Linux, MPS),
+  and the trial run that measures it.
+- **The library call is not the disk.** tifffile.imread read a 2 GB HDD file in 57 s; reading its pages in file
+  order took 21 s, the disk's own speed. Time a plain sequential read before blaming the disk.
+

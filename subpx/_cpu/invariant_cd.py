@@ -19,7 +19,9 @@ cannot change, or cancel it:
 ``half_area``
     Area of the region around the peak brighter than the cell's local level
     plus half the peak height above it, on a 4x cubic-spline enlargement of
-    the cell; CD = equal-area circle diameter. Assumes no shape.
+    the cell (every pixel split into 4 x 4 sub-pixels of 1/4 px; the cell is
+    zero outside its mask, so its CD does not depend on the array holding
+    it); CD = equal-area circle diameter. Assumes no shape.
 ``half_area_min``
     ``half_area`` with the local level taken as the minimum of the cell's
     outermost pixels instead of their median.
@@ -330,17 +332,26 @@ def _set_ellipses(result: CDMethodResult, rows, centers_local, cd_x, cd_y, origi
     m["perimeter_px"][rows] = np.pi * (a + b) * (1 + 3 * h / (10 + np.sqrt(4 - 3 * h)))  # Ramanujan
 
 
+_ZERO_PAD = 32  # zeros either side of a cell or profile before its spline: the far end's effect, 0.27^32, is rounding
+
+
 @lru_cache(maxsize=16)
 def _spline_operators(size: int, step: float):
-    """Grid and the (grid, size) matrices giving scipy's not-a-knot ``CubicSpline`` and its slope on that grid.
+    """Grid and the (grid, size) matrices giving scipy's not-a-knot ``CubicSpline`` of a profile extended with zeros
+    on both sides (the cell's light outside it is zero), and its slope, on that grid over the profile.
 
-    The spline through ``size`` samples is linear in them, so the curve of every profile is one matrix product.
+    The spline is linear in the samples, so the curve of every profile is one matrix product; with the zeros, a
+    profile's curve does not depend on how long the array holding it is (the operator of a size is the top-left
+    corner of any larger one, to rounding).
     """
     from scipy.interpolate import CubicSpline
 
     grid = np.arange(0.0, size - 1 + step / 2, step)
-    spline = CubicSpline(np.arange(size), np.eye(size), axis=0)
-    return grid, spline(grid), spline(grid, 1)
+    n = size + 2 * _ZERO_PAD
+    samples = np.zeros((n, size))
+    samples[_ZERO_PAD + np.arange(size), np.arange(size)] = 1.0
+    spline = CubicSpline(np.arange(n), samples, axis=0)
+    return grid, spline(grid + _ZERO_PAD), spline(grid + _ZERO_PAD, 1)
 
 
 def _to_numpy(a):
@@ -407,15 +418,25 @@ def _projection(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_a
 
 @lru_cache(maxsize=16)
 def _zoom_operators(size: int, factor: int):
-    """(size * factor, size) matrices of ``scipy.ndimage.zoom`` along one axis: order 3, and order 0 for masks.
+    """(size * factor, size) matrices of the enlargement along one axis: every pixel split into ``factor``
+    sub-pixels of 1/factor px, valued at their centres by the cubic spline of the cell extended with zeros
+    (``scipy.ndimage.zoom`` order 3, grid mode, constant 0 outside), and order 0 for masks (each sub-pixel copies
+    its pixel).
 
-    Zoom is separable and linear, so a cell enlarges as ``Zy @ cell @ Zx.T``.
+    Zoom is separable and linear, so a cell enlarges as ``Zy @ cell @ Zx.T``. With the zeros, a pixel's sub-pixels
+    do not depend on the size of the array holding the cell: the operator of a size is the top-left corner of any
+    larger one (to rounding).
     """
     from scipy.ndimage import zoom
 
-    eye = np.eye(size)
-    return (np.stack([zoom(e, factor, order=3) for e in eye], axis=1),
-            np.stack([zoom(e, factor, order=0) for e in eye], axis=1))
+    pad = _ZERO_PAD
+    eye = np.zeros((size, size + 2 * pad))
+    eye[np.arange(size), pad + np.arange(size)] = 1.0
+    cubic = np.stack([zoom(e, factor, order=3, mode="grid-constant", grid_mode=True)[pad * factor:(pad + size) * factor]
+                      for e in eye], axis=1)
+    nearest = np.zeros((size * factor, size))
+    nearest[np.arange(size * factor), np.arange(size).repeat(factor)] = 1.0
+    return cubic, nearest
 
 
 @lru_cache(maxsize=16)
@@ -541,8 +562,9 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
         return results
     zy, zx = _zoom_operators(h, factor)[0], _zoom_operators(w, factor)[0]
     H, W = zy.shape[0], zx.shape[0]
-    # Original px per enlarged px: zoom maps the first and last pixel centres onto each other.
-    sy, sx = (h - 1) / (H - 1), (w - 1) / (W - 1)
+    # Original px per enlarged px; enlarged pixel j's centre lies at j / factor - shift original px.
+    sy = sx = 1.0 / factor
+    shift = (factor - 1) / (2 * factor)
     zy, zx = xp.asarray(zy), xp.asarray(zx)
     near_y, near_x = _nearest_pixels(h, factor), _nearest_pixels(w, factor)
     iy, ix = xp.asarray(near_y)[:, None], xp.asarray(near_x)[None, :]
@@ -669,7 +691,7 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
                 extent_x, extent_y = cd_eq * ratio, cd_eq / ratio
                 values = [("b", b), ("peak", peak), ("cut", cut), ("mean_signal", mean_signal),
                           ("area", count * (sx * sy)), ("ex", extent_x), ("ey", extent_y), ("touches", touches),
-                          ("cx", cx * sx), ("cy", cy * sy)]
+                          ("cx", cx * sx - shift), ("cy", cy * sy - shift)]
                 if outlines:
                     # Contour for display: the region's last pixel along each ray from its centroid. Rays stop just
                     # beyond the farthest region pixel of the chunk (a few px), not at the cell diagonal; pixels past

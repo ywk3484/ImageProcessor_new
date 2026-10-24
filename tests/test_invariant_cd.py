@@ -79,7 +79,7 @@ def test_lit_background_ratio_and_projection_ignore_the_pulse_while_the_gaussian
         _, _, sensitivity[name] = _fit_against_truth(measured.metrics["cd_equivalent_px"], truth, pulse,
                                                      use & measured.valid)
     assert abs(sensitivity["flux_ratio"]) < 0.2  # plain flux would be 0.5: CD ~ sqrt(flux)
-    assert abs(sensitivity["projection"]) < 0.5
+    assert abs(sensitivity["projection"]) < 0.55  # 0.52 since the spline runs through the zero-extended profile
     # The smooth background map cannot follow each cell's own pulse-lit background.
     assert sensitivity["gaussian"] > 0.3
     projection = result.measurements["projection"]
@@ -163,9 +163,14 @@ def test_projection_spline_operators_reproduce_scipy():
 
     profiles = np.random.default_rng(0).normal(size=(6, 11))
     grid, values, slopes = _spline_operators(11, 0.02)
-    spline = CubicSpline(np.arange(11), profiles, axis=1)
+    # The spline of the profile extended with zeros (the cell's light outside it is zero).
+    padded = np.pad(profiles, ((0, 0), (32, 32)))
+    spline = CubicSpline(np.arange(-32, 11 + 32), padded, axis=1)
     np.testing.assert_allclose(profiles @ values.T, spline(grid), atol=1e-9)
     np.testing.assert_allclose(profiles @ slopes.T, spline(grid, 1), atol=1e-9)
+    # So a profile's curve does not depend on the length of the array holding it.
+    longer, wide_values, _ = _spline_operators(19, 0.02)
+    np.testing.assert_array_equal(wide_values[:len(grid), :11], values)
 
 
 def _gaussian_cells(centers, sigma=1.5, size=15):
@@ -176,7 +181,7 @@ def _gaussian_cells(centers, sigma=1.5, size=15):
 def test_half_area_of_a_gaussian_spot_is_its_fwhm_and_ignores_scale_and_pedestal():
     from subpx._cpu.invariant_cd import _half_area
 
-    cells = _gaussian_cells([(7.0, 7.0), (7.3, 6.6), (1.0, 7.0)])  # the third spot runs over the cell edge
+    cells = _gaussian_cells([(7.0, 7.0), (7.3, 6.6), (0.5, 7.0)])  # the third spot runs over the cell edge
     masks = np.ones(cells.shape, bool)
     origins = np.zeros((3, 2))
     plain = _half_area(cells, masks, origins, 64)
@@ -184,7 +189,11 @@ def test_half_area_of_a_gaussian_spot_is_its_fwhm_and_ignores_scale_and_pedestal
     lit = _half_area(3.0 * (cells + 0.2), masks, origins, 64)
     fwhm = 2 * np.sqrt(2 * np.log(2)) * 1.5
     assert list(plain.status) == ["ok", "ok", "region_at_cell_border"]
-    np.testing.assert_allclose(plain.metrics["cd_equivalent_px"][:2], fwhm, rtol=0.02)
+    # One spot on the 1/4-px grid: within the grid's discreteness; spots at random sub-pixel positions: on average.
+    np.testing.assert_allclose(plain.metrics["cd_equivalent_px"][:2], fwhm, rtol=0.03)
+    spread = _gaussian_cells(np.random.default_rng(0).uniform(6.5, 7.5, (25, 2)))
+    many = _half_area(spread, np.ones(spread.shape, bool), np.zeros((25, 2)), 64)
+    assert abs(many.metrics["cd_equivalent_px"].mean() / fwhm - 1) < 0.01
     np.testing.assert_allclose(lit.metrics["cd_equivalent_px"][:2], plain.metrics["cd_equivalent_px"][:2], rtol=1e-9)
     np.testing.assert_allclose(plain.centers_xy[:2], [[7.0, 7.0], [7.3, 6.6]], atol=0.15)
     assert np.isnan(plain.metrics["cd_equivalent_px"][2]) and not plain.valid[2]
@@ -257,6 +266,34 @@ def test_half_area_separates_the_pulse_from_size_for_unknown_shapes(shaped):
     assert np.nanmean(grown.measurements["half_area"].metrics["cd_equivalent_px"][use_g]) / mean - 1 > 0.015
 
 
+@pytest.mark.parametrize("backend", ["cpu", "gpu"])
+def test_a_cells_cd_does_not_depend_on_the_size_of_the_square_holding_it(shaped, backend):
+    """The cells of the page measured again in squares 7 px larger (what one large component elsewhere on a page
+    does to every hole): the same numbers, since a cell is zero outside its mask wherever the array ends."""
+    from subpx._cpu.invariant_cd import _HALF_AREA, _half_areas, _projection
+    from subpx.backends import cp
+
+    if backend == "gpu" and cp is None:
+        pytest.skip("CuPy not available")
+    xp = cp if backend == "gpu" else np
+    result, _ = shaped[0]
+    cleaned, masks, origins = result.rois, result.masks, result.origins_xy.astype(float)
+    specs = [{"name": name, "level": 0.5, "background": background, "peak_pixels": 4.0 if averaged else None,
+              "cuts": None} for name, (background, averaged) in _HALF_AREA.items()]
+
+    def measure(c, m):
+        found = _half_areas(c, m, origins, 32, specs, outlines=False, xp=xp)
+        found["projection"] = _projection(c, m, origins, 32, xp=xp)
+        return found
+
+    pad = ((0, 0), (0, 7), (0, 7))
+    small, large = measure(cleaned, masks), measure(np.pad(cleaned, pad), np.pad(masks, pad))
+    for name in small:
+        np.testing.assert_array_equal(small[name].status, large[name].status, err_msg=name)
+        np.testing.assert_allclose(small[name].metrics["cd_equivalent_px"], large[name].metrics["cd_equivalent_px"],
+                                   rtol=1e-12, atol=1e-12, err_msg=name)
+
+
 def test_half_area_and_projection_agree_between_cpu_and_gpu(shaped):
     from subpx.backends import cp
 
@@ -286,8 +323,10 @@ def test_half_area_min_takes_the_lowest_cell_edge_pixel_and_ignores_scale_and_pe
     ring = np.concatenate([cells[:, 0], cells[:, -1], cells[:, 1:-1, 0], cells[:, 1:-1, -1]], axis=1)
     np.testing.assert_allclose(low.metrics["local_level"], ring.min(axis=1))
     assert np.all(low.metrics["local_level"] < median.metrics["local_level"])
-    # A lower level puts the half-height threshold lower: a larger region.
-    assert np.all(low.metrics["cd_equivalent_px"] > median.metrics["cd_equivalent_px"])
+    # A lower level puts the half-height threshold lower: a region at least as large (equal when no enlarged pixel
+    # lies between the two thresholds, as for the spot centred on the grid).
+    assert np.all(low.metrics["cd_equivalent_px"] >= median.metrics["cd_equivalent_px"])
+    assert np.any(low.metrics["cd_equivalent_px"] > median.metrics["cd_equivalent_px"])
     np.testing.assert_allclose(lit.metrics["cd_equivalent_px"], low.metrics["cd_equivalent_px"], rtol=1e-9)
 
 
@@ -475,11 +514,11 @@ def test_edge_area_threshold_ignores_the_peak_scale_and_offset():
     assert abs(found.metrics["cd_equivalent_px"][0] - 2 * 10 / np.sqrt(np.pi)) < 0.3
     norm = _half_area(cells, masks, origins, 64, level=0.5, background="zero", peak_pixels=4.0, name="tail_area_norm")
     moved = lambda r: abs(r.metrics["cd_equivalent_px"][1] / r.metrics["cd_equivalent_px"][0] - 1)
-    assert moved(found) < 0.4 * moved(norm)
-    # A pulse (scale) and a pedestal (offset) move the threshold with the light: the same area.
-    for changed in (2.5 * cells, cells + 0.2):
-        again = _half_area(changed, masks, origins, 64, **edge_kw)
-        np.testing.assert_allclose(again.metrics["cd_equivalent_px"], found.metrics["cd_equivalent_px"], rtol=1e-9)
+    assert moved(found) < 0.7 * moved(norm)  # 3.7 % vs 6.0 %, whatever the size of the cell holding the spot
+    # A pulse (scale) moves the threshold with the light: the same area. (A pedestal running to the cell's edge is
+    # a step to the zeros outside the cell, which the steepness weights see.)
+    again = _half_area(2.5 * cells, masks, origins, 64, **edge_kw)
+    np.testing.assert_allclose(again.metrics["cd_equivalent_px"], found.metrics["cd_equivalent_px"], rtol=1e-9)
 
 
 def test_edge_area_measures_the_shaped_lattice(shaped):
@@ -516,9 +555,10 @@ def test_foot_area_threshold_is_the_foot_of_the_edge_without_the_peak():
     norm = _half_area(cells, masks, origins, 64, level=fraction, background="zero", peak_pixels=4.0, name="x")
     moved = lambda r: abs(r.metrics["cd_equivalent_px"][1] / r.metrics["cd_equivalent_px"][0] - 1)
     assert moved(foot) < 0.5 * moved(norm)
-    for changed in (2.5 * cells, cells + 0.2):
-        again = _half_area(changed, masks, origins, 64, **kw)
-        np.testing.assert_allclose(again.metrics["cd_equivalent_px"], foot.metrics["cd_equivalent_px"], rtol=1e-9)
+    # A pulse (scale) leaves the foot in place (a pedestal running to the cell's edge is a step to the zeros outside
+    # the cell, which the curvature weights see).
+    again = _half_area(2.5 * cells, masks, origins, 64, **kw)
+    np.testing.assert_allclose(again.metrics["cd_equivalent_px"], foot.metrics["cd_equivalent_px"], rtol=1e-9)
 
 
 def test_foot_area_ratio_uses_one_image_ratio_times_each_steepest_level(shaped):
