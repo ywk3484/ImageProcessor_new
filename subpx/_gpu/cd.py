@@ -478,19 +478,24 @@ def gaussian_method(
     )
     if n == 0:
         return result
-    h, w = cleaned.shape[1:]
-    yy, xx = cp.indices((h, w), dtype=cp.float64)
+    from .._cpu.invariant_cd import _size_buckets
+
     rmse = np.empty(n)
-    for sl in _chunks(n, 8 * h * w * 4):
-        p = cp.asarray(params[sl], dtype=cp.float64)
-        data, mask = cp.asarray(cleaned[sl], dtype=cp.float64), cp.asarray(masks[sl])
-        dx = xx.ravel()[None] - p[:, 1, None]
-        dy = yy.ravel()[None] - p[:, 2, None]
-        e1, u2, e3 = cp.exp(p[:, 3])[:, None], p[:, 4][:, None], cp.exp(p[:, 5])[:, None]
-        a, b = e1 * dx + u2 * dy, e3 * dy
-        model = (p[:, 0][:, None] * cp.exp(-0.5 * (a * a + b * b))).reshape(data.shape)
-        residual = cp.where(mask, data - model, 0.0)
-        rmse[sl] = cp.asnumpy(cp.sqrt((residual**2).sum(axis=(1, 2)) / cp.maximum(mask.sum(axis=(1, 2)), 1)))
+    # Each cell within the top-left sub-block of the stack that holds its mask: the residual is zero beyond it.
+    for members, h, w in _size_buckets(masks):
+        yy, xx = cp.indices((h, w), dtype=cp.float64)
+        for sl in _chunks(len(members), 8 * h * w * 4):
+            rows = members[sl]
+            p = cp.asarray(params[rows], dtype=cp.float64)
+            data = cp.asarray(cleaned[:, :h, :w][rows], dtype=cp.float64)
+            mask = cp.asarray(masks[:, :h, :w][rows])
+            dx = xx.ravel()[None] - p[:, 1, None]
+            dy = yy.ravel()[None] - p[:, 2, None]
+            e1, u2, e3 = cp.exp(p[:, 3])[:, None], p[:, 4][:, None], cp.exp(p[:, 5])[:, None]
+            a, b = e1 * dx + u2 * dy, e3 * dy
+            model = (p[:, 0][:, None] * cp.exp(-0.5 * (a * a + b * b))).reshape(data.shape)
+            residual = cp.where(mask, data - model, 0.0)
+            rmse[rows] = cp.asnumpy(cp.sqrt((residual**2).sum(axis=(1, 2)) / cp.maximum(mask.sum(axis=(1, 2)), 1)))
     result.metrics["peak_signal"][:] = params[:, 0]
     result.metrics["fit_rmse"][:] = rmse
     finite = np.flatnonzero(np.isfinite(params).all(axis=1))

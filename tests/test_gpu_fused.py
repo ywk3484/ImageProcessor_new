@@ -95,6 +95,27 @@ def test_masked_top_mean_equals_top_mean_of_the_masked_array():
             np.testing.assert_array_equal(got, expected)
 
 
+def test_cells_computed_in_their_own_box_match_the_whole_stack(monkeypatch):
+    """One long thin blob makes the stack (every hole's square) large; each hole computed in the sub-block that holds
+    its mask gives the numbers of the whole-stack computation."""
+    from scripts.benchmark_cd import lattice
+    from subpx import measure_cds
+    from subpx._cpu import invariant_cd
+
+    image, _ = lattice((300, 400), 9.5, 4.2, 20.0, seed=5)
+    i = np.arange(30)
+    image[100 + i, 150 + i] = 190
+    image[100 + i, 151 + i] = 190
+    kw = dict(methods=("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area",
+                       "foot_area"), area_min=3, area_max=200, backend="gpu", n_angles=16, outlines=True)
+    result = measure_cds(image, **kw)
+    assert result.masks.shape[1] > 30 and len(invariant_cd._size_buckets(result.masks)) > 1
+    with monkeypatch.context() as m:
+        m.setattr(invariant_cd, "_size_buckets", lambda masks, step=4: [(np.arange(len(masks)), *masks.shape[1:])])
+        whole = measure_cds(image, **kw)
+    _compare(result.measurements, whole.measurements)
+
+
 def test_measure_cds_with_kernels_matches_the_array_code(monkeypatch):
     from scripts.benchmark_cd import lattice
     from subpx import measure_cds

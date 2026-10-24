@@ -348,39 +348,50 @@ def _to_numpy(a):
 
 def _projection(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_angles: int,
                 step: float = 0.02, xp=np) -> CDMethodResult:
-    """Summed x/y profiles of each neighbour-removed cell; width between the steepest rise and fall."""
+    """Summed x/y profiles of each neighbour-removed cell; width between the steepest rise and fall.
+
+    On CuPy each cell is computed in the top-left sub-block of the stack that holds its mask (see ``_half_areas``):
+    its profile is zero beyond it, so the spline of the whole stack's width gives the same values there."""
     n, h, w = masks.shape
     result = _empty("projection", n, n_angles, ())
     widths, centers, statuses = np.full((n, 2), np.nan), np.full((n, 2), np.nan), np.full((n, 2), "", dtype="U32")
-    for axis, (size, sum_axis) in enumerate(((w, 1), (h, 2))):
-        counts = masks.sum(axis=sum_axis)
-        # Sum, not mean: the cell outline is ragged by a pixel, and dividing one column by 10 pixels and the next
-        # by 11 steps the profile and moves its steepest point (the cleaned cell holds only this hole's light).
-        profiles = np.where(masks, cleaned, 0.0).sum(axis=sum_axis)
-        inside = counts > 0
-        first = np.argmax(inside, axis=1)
-        last = size - 1 - np.argmax(inside[:, ::-1], axis=1)
-        grid, value_op, slope_op = _spline_operators(size, step)
-        value_op, slope_op, grid_d = xp.asarray(value_op.T), xp.asarray(slope_op.T), xp.asarray(grid)
-        index = xp.arange(len(grid))[None]
-        for start in range(0, n, _CHUNK):
-            rows = np.arange(start, min(start + _CHUNK, n))
-            profile = xp.asarray(profiles[rows])
-            values, slope = profile @ value_op, profile @ slope_op
-            lo, hi = xp.asarray(first[rows])[:, None], xp.asarray(last[rows])[:, None]
-            span = (grid_d[None] >= lo) & (grid_d[None] <= hi)
-            peak = xp.argmax(xp.where(span, values, -xp.inf), axis=1)
-            left = xp.argmax(xp.where(span & (index <= peak[:, None]), slope, -xp.inf), axis=1)
-            right = xp.argmin(xp.where(span & (index >= peak[:, None]), slope, xp.inf), axis=1)
-            picked = xp.arange(len(rows))
-            rising, falling = slope[picked, left] > 0, slope[picked, right] < 0
-            left, right, rising, falling = (_to_numpy(a) for a in (left, right, rising, falling))
-            x_left, x_right = grid[left], grid[right]
-            widths[rows, axis] = x_right - x_left
-            centers[rows, axis] = (x_left + x_right) / 2
-            bad = (x_left <= first[rows]) | (x_right >= last[rows]) | ~rising | ~falling
-            statuses[rows, axis] = np.where(bad, "edge_at_cell_border", "ok")
-    result.metrics["peak_signal"][:] = np.where(masks, cleaned, -np.inf).reshape(n, -1).max(axis=1) if n else 0
+    peak_signal = result.metrics["peak_signal"]
+    buckets = _size_buckets(masks) if xp is not np else [(np.arange(n), h, w)]
+    for members, hb, wb in buckets:
+        sub = (slice(None), slice(0, hb), slice(0, wb))
+        for start in range(0, len(members), _CHUNK):
+            rows = members[start:start + _CHUNK]
+            mask = xp.asarray(masks[sub][rows])
+            cell = xp.asarray(cleaned[sub][rows], dtype=float)
+            peak_signal[rows] = _to_numpy(xp.where(mask, cell, -xp.inf).reshape(len(rows), -1).max(axis=1))
+            for axis, (size, size_b, sum_axis) in enumerate(((w, wb, 1), (h, hb, 2))):
+                counts = _to_numpy(mask.sum(axis=sum_axis))
+                # Sum, not mean: the cell outline is ragged by a pixel, and dividing one column by 10 pixels and the
+                # next by 11 steps the profile and moves its steepest point (the cleaned cell holds only this hole's
+                # light).
+                profile = xp.where(mask, cell, 0.0).sum(axis=sum_axis)
+                inside = counts > 0
+                first = np.argmax(inside, axis=1)
+                last = size_b - 1 - np.argmax(inside[:, ::-1], axis=1)
+                grid, value_op, slope_op = _spline_operators(size, step)
+                used = int(np.searchsorted(grid, size_b - 1 + step / 2))  # grid points up to the sub-block's end
+                grid = grid[:used]
+                value_op, slope_op = xp.asarray(value_op.T[:size_b, :used]), xp.asarray(slope_op.T[:size_b, :used])
+                grid_d, index = xp.asarray(grid), xp.arange(used)[None]
+                values, slope = profile @ value_op, profile @ slope_op
+                lo, hi = xp.asarray(first)[:, None], xp.asarray(last)[:, None]
+                span = (grid_d[None] >= lo) & (grid_d[None] <= hi)
+                peak = xp.argmax(xp.where(span, values, -xp.inf), axis=1)
+                left = xp.argmax(xp.where(span & (index <= peak[:, None]), slope, -xp.inf), axis=1)
+                right = xp.argmin(xp.where(span & (index >= peak[:, None]), slope, xp.inf), axis=1)
+                picked = xp.arange(len(rows))
+                rising, falling = slope[picked, left] > 0, slope[picked, right] < 0
+                left, right, rising, falling = (_to_numpy(a) for a in (left, right, rising, falling))
+                x_left, x_right = grid[left], grid[right]
+                widths[rows, axis] = x_right - x_left
+                centers[rows, axis] = (x_left + x_right) / 2
+                bad = (x_left <= first) | (x_right >= last) | ~rising | ~falling
+                statuses[rows, axis] = np.where(bad, "edge_at_cell_border", "ok")
     signal = result.metrics["peak_signal"] > 0
     ok = signal & (statuses == "ok").all(axis=1)
     result.status[signal] = "edge_at_cell_border"
@@ -430,19 +441,21 @@ def _grow(region):
     return grown
 
 
-def _connected_to_top(above, top, xp=np):
+def _connected_to_top(above, top, xp=np, max_steps: int | None = None):
     """Per image of the batch, the pixels of ``above`` connected through 8-neighbours to its ``top`` pixel (flat
-    index), grown from it for at most H + W steps. On CuPy one kernel does it (same result, bit for bit)."""
+    index), grown from it for at most ``max_steps`` (default H + W) steps. On CuPy one kernel does it (same result,
+    bit for bit)."""
     k, H, W = above.shape
+    max_steps = H + W if max_steps is None else max_steps
     if xp is not np:
         from .._gpu.regions import grow_regions
-        region = grow_regions(above, top, H + W)
+        region = grow_regions(above, top, max_steps)
         if region is not None:
             return region
     region = xp.zeros((k, H * W), dtype=bool)
     region[xp.arange(k), top] = True
     region = region.reshape(k, H, W) & above
-    for step in range(H + W):  # grow from the peak inside the above-threshold pixels until nothing changes
+    for step in range(max_steps):  # grow from the peak inside the above-threshold pixels until nothing changes
         grown = _grow(region) & above
         if step % 8 == 7 and bool((grown == region).all()):
             break
@@ -486,6 +499,17 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
                        zone_masks=zone_masks, outlines=outlines, xp=xp)[name]
 
 
+def _size_buckets(masks, step: int = 4) -> list[tuple[np.ndarray, int, int]]:
+    """The cells grouped by the extent of their mask (masks sit at the top left of the stack), rounded up to
+    ``step`` px and at most the stack size: (rows, height, width) of each group's top-left sub-block."""
+    n, h, w = masks.shape
+    rows_any, cols_any = _to_numpy(masks.any(axis=2)), _to_numpy(masks.any(axis=1))
+    hb = np.where(rows_any.any(axis=1), h - np.argmax(rows_any[:, ::-1], axis=1), 1)
+    wb = np.where(cols_any.any(axis=1), w - np.argmax(cols_any[:, ::-1], axis=1), 1)
+    key = np.minimum(-(-hb // step) * step, h) * (w + 1) + np.minimum(-(-wb // step) * step, w)
+    return [(np.flatnonzero(key == value), int(value // (w + 1)), int(value % (w + 1))) for value in np.unique(key)]
+
+
 def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, factor: int = 4, level_masks=None,
                 zone_masks=None, outlines: bool = True, xp=np, enlarged: dict | None = None,
                 seconds: dict | None = None) -> dict[str, CDMethodResult]:
@@ -493,7 +517,11 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
     peak_pixels, cuts), the same numbers as one call each: each chunk of cells is enlarged once per local level
     (the methods without one share it) and its averaged peak taken once per enlargement. ``enlarged`` (CuPy): a dict
     keeping those shared enlargements for a later call on the same cells, while they fit in GPU memory.
-    ``seconds``: per method, the time of its own work; a shared step counts for the first method that needs it."""
+    ``seconds``: per method, the time of its own work; a shared step counts for the first method that needs it.
+
+    On CuPy each cell is computed in the top-left sub-block of the stack that holds its mask (cells grouped by that
+    size), with the operators and constants of the whole stack: everything outside a mask is zero or False there,
+    so a cell's values do not change, but a large cell elsewhere no longer makes every cell's work larger."""
     n, h, w = masks.shape
     results = {}
     for spec in specs:
@@ -506,7 +534,8 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
     # Original px per enlarged px: zoom maps the first and last pixel centres onto each other.
     sy, sx = (h - 1) / (H - 1), (w - 1) / (W - 1)
     zy, zx = xp.asarray(zy), xp.asarray(zx)
-    iy, ix = xp.asarray(_nearest_pixels(h, factor))[:, None], xp.asarray(_nearest_pixels(w, factor))[None, :]
+    near_y, near_x = _nearest_pixels(h, factor), _nearest_pixels(w, factor)
+    iy, ix = xp.asarray(near_y)[:, None], xp.asarray(near_x)[None, :]
     gpu = xp is not np
     if gpu:  # one kernel per chunk after the enlargement (subpx._gpu.regions.measure_regions)
         from .._gpu.regions import measure_regions, top_mean_masked
@@ -520,127 +549,140 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
     status = {name: np.full(n, "no_signal", dtype="U32") for name in results}
     centers = {name: np.full((n, 2), np.nan) for name in results}
     edges = {name: np.full((n, n_angles), np.nan) for name in results}
-    chunk = max(256, _CHUNK * 196 // (h * w))  # ~the memory of 4096 cells of 14 x 14 px
-    for start in range(0, n, chunk):
-        rows = np.arange(start, min(start + chunk, n))
-        k = len(rows)
-        shared = {}  # this chunk's cells, local levels, enlargements and averaged peaks, made when first needed
+    buckets = _size_buckets(masks) if gpu else [(np.arange(n), h, w)]
+    for bucket, (members, hb, wb) in enumerate(buckets):
+        Yb, Xb = int(np.searchsorted(near_y, hb)), int(np.searchsorted(near_x, wb))  # enlarged rows / columns
+        sub = (slice(None), slice(0, hb), slice(0, wb))
+        zy_b, zx_b, iy_b, ix_b, gy_b, gx_b = zy[:Yb, :hb], zx[:Xb, :wb], iy[:Yb], ix[:, :Xb], gy[:Yb], gx[:Xb]
+        if gpu:
+            iy1_b, ix1_b = iy1[:Yb], ix1[:Xb]
+        chunk = max(256, _CHUNK * 196 // (hb * wb))  # ~the memory of 4096 cells of 14 x 14 px
+        for start in range(0, len(members), chunk):
+            rows = members[start:start + chunk]
+            k = len(rows)
+            shared = {}  # this chunk's cells, local levels, enlargements and averaged peaks, made when first needed
 
-        def cells():
-            if "cell" not in shared:
-                shared["mask"] = mask = xp.asarray(masks[rows])
-                shared["cell"] = xp.where(mask, xp.asarray(cleaned[rows], dtype=float), 0.0)
-            return shared["mask"], shared["cell"]
+            def cells():
+                if "cell" not in shared:
+                    shared["mask"] = mask = xp.asarray(masks[sub][rows])
+                    shared["cell"] = xp.where(mask, xp.asarray(cleaned[sub][rows], dtype=float), 0.0)
+                return shared["mask"], shared["cell"]
 
-        def local_level(background):
-            kind = background if background in ("median", "min") else "zero"
-            if ("b", kind) not in shared:
-                mask, cell = cells()
-                if kind == "zero":  # no local level
-                    b = xp.zeros(k)
-                else:
-                    inner = mask.copy()
-                    inner[:, 1:] &= mask[:, :-1]
-                    inner[:, :-1] &= mask[:, 1:]
-                    inner[:, :, 1:] &= mask[:, :, :-1]
-                    inner[:, :, :-1] &= mask[:, :, 1:]
-                    inner[:, [0, -1]] = False
-                    inner[:, :, [0, -1]] = False
-                    ring = mask & ~inner if level_masks is None else xp.asarray(level_masks[rows]) & mask
-                    if kind == "median":
-                        b = xp.nanmedian(xp.where(ring, cell, xp.nan).reshape(k, -1), axis=1)
-                    else:
-                        b = xp.where(ring, cell, xp.inf).reshape(k, -1).min(axis=1)
-                shared["b", kind] = b
-            return kind, shared["b", kind]
-
-        def enlargement(kind, b):
-            if ("big", kind) not in shared:
-                if enlarged is not None and kind == "zero" and start in enlarged:
-                    shared["big", kind] = enlarged[start]
-                else:
+            def local_level(background):
+                kind = background if background in ("median", "min") else "zero"
+                if ("b", kind) not in shared:
                     mask, cell = cells()
-                    shared["big", kind] = zy[None] @ xp.where(mask, cell - b[:, None, None], 0.0) @ zx.T[None]
-                    if enlarged is not None and kind == "zero":
-                        enlarged[start] = shared["big", kind]
-            return shared["big", kind]
+                    if kind == "zero":  # no local level
+                        b = xp.zeros(k)
+                    else:
+                        inner = mask.copy()
+                        inner[:, 1:] &= mask[:, :-1]
+                        inner[:, :-1] &= mask[:, 1:]
+                        inner[:, :, 1:] &= mask[:, :, :-1]
+                        inner[:, :, :-1] &= mask[:, :, 1:]
+                        inner[:, [0, -1]] = False
+                        inner[:, :, [0, -1]] = False
+                        ring = mask & ~inner if level_masks is None else xp.asarray(level_masks[sub][rows]) & mask
+                        if kind == "median":
+                            b = xp.nanmedian(xp.where(ring, cell, xp.nan).reshape(k, -1), axis=1)
+                        else:
+                            b = xp.where(ring, cell, xp.inf).reshape(k, -1).min(axis=1)
+                    shared["b", kind] = b
+                return kind, shared["b", kind]
 
-        def averaged_peak(kind, big, n_top):
-            if ("peak", kind, n_top) not in shared:
-                if enlarged is not None and kind == "zero" and (start, n_top) in enlarged:
-                    shared["peak", kind, n_top] = enlarged[start, n_top]
+            def enlargement(kind, b):
+                if ("big", kind) not in shared:
+                    if enlarged is not None and kind == "zero" and (bucket, start) in enlarged:
+                        shared["big", kind] = enlarged[bucket, start]
+                    else:
+                        mask, cell = cells()
+                        shared["big", kind] = zy_b[None] @ xp.where(mask, cell - b[:, None, None], 0.0) @ zx_b.T[None]
+                        if enlarged is not None and kind == "zero":
+                            enlarged[bucket, start] = shared["big", kind]
+                return shared["big", kind]
+
+            def averaged_peak(kind, big, n_top):
+                if ("peak", kind, n_top) not in shared:
+                    if enlarged is not None and kind == "zero" and (bucket, start, n_top) in enlarged:
+                        shared["peak", kind, n_top] = enlarged[bucket, start, n_top]
+                    else:
+                        if n_top > Yb * Xb:  # more pixels than the sub-block: -inf (outside the cell) among them
+                            peak = xp.full(k, -xp.inf)
+                        else:  # -inf (outside the cell): no_signal
+                            peak = top_mean_masked(big, cells()[0], iy1_b, ix1_b, n_top, length=H * W)
+                        shared["peak", kind, n_top] = xp.where(xp.isfinite(peak), peak, -1.0)
+                        if enlarged is not None and kind == "zero":
+                            enlarged[bucket, start, n_top] = shared["peak", kind, n_top]
+                return shared["peak", kind, n_top]
+
+            for spec in specs:
+                started = time.perf_counter()
+                name, level, background = spec["name"], spec["level"], spec["background"]
+                peak_pixels, cuts = spec["peak_pixels"], spec["cuts"]
+                n_top = None if peak_pixels is None else min(max(1, int(round(peak_pixels * factor * factor))), H * W)
+                kind, b = local_level(background)
+                big = enlargement(kind, b)
+                mask = cells()[0]
+                zone = xp.asarray(zone_masks[sub][rows]) if background == "foot" and zone_masks is not None else None
+                given = xp.asarray(cuts[rows], dtype=float) if background == "given" else None
+                fused = None
+                if gpu:
+                    fused = measure_regions(
+                        big, mask, iy1_b, ix1_b, mode={"edge": "edge", "foot": "foot", "given": "given"}.get(background, "level"),
+                        level=level, peak=None if n_top is None else averaged_peak(kind, big, n_top), cuts=given,
+                        zone=zone, d=factor, sy=sy, sx=sx, max_steps=H + W, regions=outlines)
+                if fused is not None:
+                    peak, cut, steepest, count, touches = (fused[key] for key in ("peak", "cut", "steepest", "count", "touches"))
+                    region, cy, cx = fused.get("region"), fused["cy"], fused["cx"]
+                    weight = xp.maximum(count, 1)
+                    mean_signal = fused["sum"] / weight
+                    var_x = fused["sxx"] / weight * sx * sx
+                    var_y = fused["syy"] / weight * sy * sy
                 else:
-                    peak = top_mean_masked(big, cells()[0], iy1, ix1, n_top)  # -inf (outside the cell): no_signal
-                    shared["peak", kind, n_top] = xp.where(xp.isfinite(peak), peak, -1.0)
-                    if enlarged is not None and kind == "zero":
-                        enlarged[start, n_top] = shared["peak", kind, n_top]
-            return shared["peak", kind, n_top]
-
-        for spec in specs:
-            started = time.perf_counter()
-            name, level, background = spec["name"], spec["level"], spec["background"]
-            peak_pixels, cuts = spec["peak_pixels"], spec["cuts"]
-            kind, b = local_level(background)
-            big = enlargement(kind, b)
-            mask = cells()[0]
-            fused = None
-            if gpu:
-                averaged = None
-                if peak_pixels is not None:
-                    averaged = averaged_peak(kind, big, min(max(1, int(round(peak_pixels * factor * factor))), H * W))
-                fused = measure_regions(
-                    big, mask, iy1, ix1, mode={"edge": "edge", "foot": "foot", "given": "given"}.get(background, "level"),
-                    level=level, peak=averaged, cuts=xp.asarray(cuts[rows], dtype=float) if background == "given" else None,
-                    zone=xp.asarray(zone_masks[rows]) if background == "foot" and zone_masks is not None else None,
-                    d=factor, sy=sy, sx=sx, max_steps=H + W, regions=outlines)
-            if fused is not None:
-                peak, cut, steepest, count, touches = (fused[key] for key in ("peak", "cut", "steepest", "count", "touches"))
-                region, cy, cx = fused.get("region"), fused["cy"], fused["cx"]
-                weight = xp.maximum(count, 1)
-                mean_signal = fused["sum"] / weight
-                var_x = fused["sxx"] / weight * sx * sx
-                var_y = fused["syy"] / weight * sy * sy
-            else:
-                peak, cut, steepest, region, count, touches, mean_signal, cy, cx, var_x, var_y = _regions_by_arrays(
-                    big, mask, iy, ix, gy, gx, sy, sx, factor, level, background, peak_pixels, zone_masks, cuts, rows, xp)
-            # Equal-area ellipse with the region's x/y spread: its diameters along x and y (exact for an axis-aligned
-            # ellipse; cd_x * cd_y = cd_equivalent^2).
-            cd_eq = 2 * xp.sqrt(count * (sx * sy) / np.pi)
-            ratio = xp.sqrt(xp.sqrt(xp.maximum(var_x, 1e-12) / xp.maximum(var_y, 1e-12)))
-            extent_x, extent_y = cd_eq * ratio, cd_eq / ratio
-            values = [("b", b), ("peak", peak), ("cut", cut), ("mean_signal", mean_signal), ("area", count * (sx * sy)),
-                      ("ex", extent_x), ("ey", extent_y), ("touches", touches), ("cx", cx * sx), ("cy", cy * sy)]
-            if outlines:
-                # Contour for display: the region's last pixel along each ray from its centroid. Rays stop just beyond
-                # the farthest region pixel of the chunk (a few px), not at the cell diagonal.
-                far = ((gx[None, None] - cx[:, None, None]) * sx) ** 2 + ((gy[None, :, None] - cy[:, None, None]) * sy) ** 2
-                reach_max = float(xp.sqrt(xp.where(region, far, 0.0).max())) if k else 0.0
-                steps = radii_d[:min(len(radii), int(reach_max / 0.125) + 3)]
-                px = xp.rint(cx[:, None, None] + cos_a[None, :, None] * steps[None, None] / sx).astype(xp.int64)
-                py = xp.rint(cy[:, None, None] + sin_a[None, :, None] * steps[None, None] / sy).astype(xp.int64)
-                inside = (px >= 0) & (px < W) & (py >= 0) & (py < H)
-                index = (xp.clip(py, 0, H - 1) * W + xp.clip(px, 0, W - 1)).reshape(k, -1)
-                hit = xp.take_along_axis(region.reshape(k, -1), index, axis=1).reshape(px.shape) & inside
-                first_out = xp.where(hit.all(axis=2), len(steps), xp.argmin(hit, axis=2))
-                values.append(("edge", steps[xp.maximum(first_out - 1, 0)] + 0.0625))
-            out = {key: _to_numpy(v) for key, v in values}
-            signal = (out["peak"] > 0) & np.isfinite(out["cut"]) & (out["cut"] < out["peak"])
-            m = results[name].metrics
-            m["local_level"][rows] = out["b"]
-            m["peak_signal"][rows] = np.where(signal, out["peak"], np.nan)
-            m["threshold"][rows] = np.where(signal, out["b"] + out["cut"], np.nan)
-            m["mean_signal"][rows] = np.where(signal, out["mean_signal"], np.nan)
-            if background == "foot":
-                m["steepest_level"][rows] = np.where(signal, _to_numpy(steepest), np.nan)
-            m["area_px2"][rows] = np.where(signal, out["area"], np.nan)
-            m["cd_x_px"][rows] = np.where(signal, out["ex"], np.nan)
-            m["cd_y_px"][rows] = np.where(signal, out["ey"], np.nan)
-            status[name][rows] = np.where(~signal, "no_signal", np.where(out["touches"], "region_at_cell_border", "ok"))
-            centers[name][rows] = np.column_stack((out["cx"], out["cy"]))
-            if outlines:
-                edges[name][rows] = out["edge"]
-            if seconds is not None:
-                seconds[name] = seconds.get(name, 0.0) + time.perf_counter() - started  # results are on the host
+                    peak, cut, steepest, region, count, touches, mean_signal, cy, cx, var_x, var_y = _regions_by_arrays(
+                        big, mask, iy_b, ix_b, gy_b, gx_b, sy, sx, factor, level, background, n_top, zone, given, H + W, xp)
+                # Equal-area ellipse with the region's x/y spread: its diameters along x and y (exact for an
+                # axis-aligned ellipse; cd_x * cd_y = cd_equivalent^2).
+                cd_eq = 2 * xp.sqrt(count * (sx * sy) / np.pi)
+                ratio = xp.sqrt(xp.sqrt(xp.maximum(var_x, 1e-12) / xp.maximum(var_y, 1e-12)))
+                extent_x, extent_y = cd_eq * ratio, cd_eq / ratio
+                values = [("b", b), ("peak", peak), ("cut", cut), ("mean_signal", mean_signal),
+                          ("area", count * (sx * sy)), ("ex", extent_x), ("ey", extent_y), ("touches", touches),
+                          ("cx", cx * sx), ("cy", cy * sy)]
+                if outlines:
+                    # Contour for display: the region's last pixel along each ray from its centroid. Rays stop just
+                    # beyond the farthest region pixel of the chunk (a few px), not at the cell diagonal; pixels past
+                    # the sub-block are outside every region.
+                    far = (((gx_b[None, None] - cx[:, None, None]) * sx) ** 2
+                           + ((gy_b[None, :, None] - cy[:, None, None]) * sy) ** 2)
+                    reach_max = float(xp.sqrt(xp.where(region, far, 0.0).max())) if k else 0.0
+                    steps = radii_d[:min(len(radii), int(reach_max / 0.125) + 3)]
+                    px = xp.rint(cx[:, None, None] + cos_a[None, :, None] * steps[None, None] / sx).astype(xp.int64)
+                    py = xp.rint(cy[:, None, None] + sin_a[None, :, None] * steps[None, None] / sy).astype(xp.int64)
+                    inside = (px >= 0) & (px < Xb) & (py >= 0) & (py < Yb)
+                    index = (xp.clip(py, 0, Yb - 1) * Xb + xp.clip(px, 0, Xb - 1)).reshape(k, -1)
+                    hit = xp.take_along_axis(region.reshape(k, -1), index, axis=1).reshape(px.shape) & inside
+                    first_out = xp.where(hit.all(axis=2), len(steps), xp.argmin(hit, axis=2))
+                    values.append(("edge", steps[xp.maximum(first_out - 1, 0)] + 0.0625))
+                out = {key: _to_numpy(v) for key, v in values}
+                signal = (out["peak"] > 0) & np.isfinite(out["cut"]) & (out["cut"] < out["peak"])
+                m = results[name].metrics
+                m["local_level"][rows] = out["b"]
+                m["peak_signal"][rows] = np.where(signal, out["peak"], np.nan)
+                m["threshold"][rows] = np.where(signal, out["b"] + out["cut"], np.nan)
+                m["mean_signal"][rows] = np.where(signal, out["mean_signal"], np.nan)
+                if background == "foot":
+                    m["steepest_level"][rows] = np.where(signal, _to_numpy(steepest), np.nan)
+                m["area_px2"][rows] = np.where(signal, out["area"], np.nan)
+                m["cd_x_px"][rows] = np.where(signal, out["ex"], np.nan)
+                m["cd_y_px"][rows] = np.where(signal, out["ey"], np.nan)
+                status[name][rows] = np.where(~signal, "no_signal",
+                                              np.where(out["touches"], "region_at_cell_border", "ok"))
+                centers[name][rows] = np.column_stack((out["cx"], out["cy"]))
+                if outlines:
+                    edges[name][rows] = out["edge"]
+                if seconds is not None:
+                    seconds[name] = seconds.get(name, 0.0) + time.perf_counter() - started  # results are on the host
     for name, result in results.items():
         m = result.metrics
         m["cd_equivalent_px"][:] = 2 * np.sqrt(m["area_px2"] / np.pi)
@@ -659,20 +701,21 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
     return results
 
 
-def _regions_by_arrays(big, mask, iy, ix, gy, gx, sy, sx, factor, level, background, peak_pixels, zone_masks, cuts,
-                       rows, xp):
+def _regions_by_arrays(big, mask, iy, ix, gy, gx, sy, sx, factor, level, background, n_top, zone, cuts, max_steps,
+                       xp):
     """``_half_area``'s per-cell values from the enlarged cells ``big`` with array operations (NumPy, or CuPy when
     a cell is too large for ``measure_regions``): peak, threshold, steepest level (foot), region, pixel count,
-    touches, mean signal, centroid (enlarged px) and x / y variances (original px^2)."""
+    touches, mean signal, centroid (enlarged px) and x / y variances (original px^2). ``n_top``: pixels of the
+    averaged peak (None: the highest pixel); ``zone``: the foot's zone masks; ``cuts``: the given thresholds."""
     k, H, W = big.shape
     steepest = None
     big_mask = mask[:, iy, ix]  # order-0 enlargement of the mask
     flat = xp.where(big_mask, big, -xp.inf).reshape(k, -1)
     top = xp.argmax(flat, axis=1)
     peak = flat[xp.arange(k), top]
-    if peak_pixels is not None:
-        n_top = min(max(1, int(round(peak_pixels * factor * factor))), H * W)
-        peak = _top_mean(flat, n_top, xp)  # -inf (outside the cell): no_signal
+    if n_top is not None:
+        # -inf (outside the cell): no_signal; more pixels than the array: -inf (outside the cell) among them
+        peak = _top_mean(flat, n_top, xp) if n_top <= H * W else xp.full(k, -xp.inf)
         peak = xp.where(xp.isfinite(peak), peak, -1.0)
     if background == "edge":
         # Threshold = the mean brightness on the slope, each pixel weighted by its steepness (central difference,
@@ -707,8 +750,8 @@ def _regions_by_arrays(big, mask, iy, ix, gy, gx, sy, sx, factor, level, backgro
                 core &= xp.roll(big_mask, shift, axis=axis)
         core[:, :d] = core[:, -d:] = False
         core[:, :, :d] = core[:, :, -d:] = False
-        if zone_masks is not None:  # the hole's own territory: not the dip where its share of the light ends
-            core &= xp.asarray(zone_masks[rows])[:, iy, ix]
+        if zone is not None:  # the hole's own territory: not the dip where its share of the light ends
+            core &= zone[:, iy, ix]
         wgt = xp.where(core, steep, 0.0)
         total = wgt.sum(axis=(1, 2))
         steepest = (wgt * big).sum(axis=(1, 2)) / xp.where(total > 0, total, 1.0)
@@ -717,11 +760,11 @@ def _regions_by_arrays(big, mask, iy, ix, gy, gx, sy, sx, factor, level, backgro
         cut = xp.where((total > 0) & (bend > 0),
                        xp.where(outer, curve * big, 0.0).sum(axis=(1, 2)) / xp.where(bend > 0, bend, 1.0), xp.inf)
     elif background == "given":
-        cut = xp.asarray(cuts[rows], dtype=float)
+        cut = cuts
     else:
         cut = level * peak
     above = big_mask & (big > cut[:, None, None])
-    region = _connected_to_top(above, top, xp)
+    region = _connected_to_top(above, top, xp, max_steps)
     count = region.sum(axis=(1, 2))
     touches = ((_grow(region) & ~big_mask).any(axis=(1, 2)) | region[:, [0, -1]].any(axis=(1, 2))
                | region[:, :, [0, -1]].any(axis=(1, 2)))

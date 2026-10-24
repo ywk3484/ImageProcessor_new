@@ -405,9 +405,10 @@ def top_mean(flat, n: int):
     return _tail_mean(picked, k, length, n)
 
 
-def top_mean_masked(big, mask, iy, ix, n: int):
+def top_mean_masked(big, mask, iy, ix, n: int, length: int | None = None):
     """``top_mean(where(big_mask, big, -inf).reshape(k, -1), n)`` without building that array: ``big`` (k, H, W),
-    ``mask`` (k, h, w), big_mask[:, Y, X] = mask[:, iy[Y], ix[X]]."""
+    ``mask`` (k, h, w), big_mask[:, Y, X] = mask[:, iy[Y], ix[X]]. ``length``: the row length ``top_mean`` would
+    see (default H * W; larger when ``big`` is the top-left part of a larger enlargement, -inf beyond it)."""
     require_cupy()
     k, H, W = big.shape
     h, w = mask.shape[1:]
@@ -419,7 +420,7 @@ def top_mean_masked(big, mask, iy, ix, n: int):
             (k,), (_THREADS,), (cp.ascontiguousarray(big, dtype=cp.float64), cp.ascontiguousarray(mask, dtype=bool),
                                 cp.ascontiguousarray(iy, dtype=cp.int32), cp.ascontiguousarray(ix, dtype=cp.int32),
                                 np.int32(h), np.int32(w), np.int32(H), np.int32(W), np.int32(n), picked))
-    return _tail_mean(picked, k, H * W, n)
+    return _tail_mean(picked, k, H * W if length is None else length, n)
 
 
 def measure_regions(big, mask, iy, ix, *, mode: str, level: float = 0.0, peak=None, cuts=None, zone=None,
