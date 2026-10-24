@@ -483,7 +483,7 @@ def deblend(
 
 def revise_seeds(
     signal: np.ndarray, state: DeblendState, seeds_xy: np.ndarray, pitch: float, *,
-    drop_fraction: float = 0.3, add_fraction: float = 0.5,
+    drop_fraction: float = 0.3, add_fraction: float = 0.5, xp=np,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Seeds to drop and holes to add after one deblending pass.
 
@@ -491,10 +491,16 @@ def revise_seeds(
     of the median (noise maxima). Added: maxima of the smoothed residual
     ``signal - background - models`` above ``add_fraction`` of the median
     amplitude and more than half a pitch from every kept seed (holes that
-    thresholding merged or missed). Returns (drop mask, new seeds_xy).
+    thresholding merged or missed). Returns (drop mask, new seeds_xy). With
+    ``xp`` CuPy the residual is smoothed on the GPU (the same filters; the
+    smoothed values agree to rounding).
     """
-    from scipy.ndimage import gaussian_filter, maximum_filter
     from scipy.spatial import cKDTree
+
+    if xp is np:
+        from scipy.ndimage import gaussian_filter, maximum_filter
+    else:
+        from cupyx.scipy.ndimage import gaussian_filter, maximum_filter
 
     p = state.params
     finite = np.isfinite(p).all(axis=1)
@@ -503,11 +509,11 @@ def revise_seeds(
         return np.zeros(len(p), bool), np.zeros((0, 2))
     reference = float(np.median(p[good, 0]))
     drop = ~finite | (p[:, 0] < drop_fraction * reference)
-    residual = signal - state.background_map - state.model_image
+    residual = xp.asarray(signal) - xp.asarray(state.background_map) - xp.asarray(state.model_image)
     smooth = gaussian_filter(residual, max(0.5, 0.1 * pitch), mode="nearest")
     radius = max(1, int(np.floor(0.5 * pitch)))
     peaks = (smooth == maximum_filter(smooth, size=2 * radius + 1, mode="nearest")) & (smooth > add_fraction * reference)
-    ys, xs = np.nonzero(peaks)
+    ys, xs = (a.get() if xp is not np else a for a in xp.nonzero(peaks))
     new = np.column_stack((xs, ys)).astype(float)
     kept = np.asarray(seeds_xy, float)[~drop]
     if len(new) and len(kept):

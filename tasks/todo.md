@@ -346,9 +346,11 @@ in place (user's decision): the 9 methods' numbers change once.
       4 methods without a local level, arrays kept on the GPU (user page 5.13 -> 2.55 s, all 6 pages same)
 - [x] A2: projection + cell-stack half_area family computed in each hole's own box (page-max operators' sub-blocks)
       (blob page: half_area family 4.3 -> 0.19 s, projection 0.94 -> 0.33 s; all 6 pages same)
-- [ ] A3: deblend: warp-per-cell LM over own boxes, GPU distance map, radii once per iteration, GPU fit status,
-      exact tile-median selection
-- [ ] A4: CPU steps: isin lookup, GPU dilation, GPU seed-revision filters
+- [x] A3: deblend: warp-per-cell LM over own boxes, GPU distance map, radii once per iteration, exact tile-median
+      kernel (fit status stays on the host). The LM adds its sums in another order: fits differ by <= 1.6e-7
+      relative, CDs by <= 3.5e-8 px, no status changes on the 6 pages
+- [x] A4: CPU steps: isin lookup + OpenCV dilation (identical mask), GPU seed-revision filters
+      (user page 5.13 -> 2.05 s, blob page 14.5 -> 4.1 s)
 - [ ] A5: batch: one sequential reader, no page counting, light resume; workers per GPU re-measured; docs
 - [ ] Phase A done: <= 1 s per page on this 4060 Ti on both test pages, numbers unchanged; tests
 - [ ] B: grid fix in place (fixed 1/4-px grid, zero-extended spline), square-size independence test, before/after

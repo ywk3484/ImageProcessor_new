@@ -319,6 +319,19 @@ def _array_module(backend: str):
     return np
 
 
+def _unmodelled_features(binary: np.ndarray, component_labels: np.ndarray, component_ids: np.ndarray) -> np.ndarray:
+    """Thresholded pixels of the components without a model, grown by 2 px: ``scipy.ndimage.binary_dilation(
+    (binary > 0) & ~np.isin(component_labels, component_ids), iterations=2)`` (cross-shaped steps, nothing outside
+    the image), the same pixels with a lookup table and OpenCV's dilation."""
+    import cv2
+
+    modelled = np.zeros(int(component_labels.max(initial=0)) + 1, bool)
+    modelled[component_ids[(component_ids >= 0) & (component_ids < len(modelled))]] = True
+    features = ((binary > 0) & ~modelled[component_labels]).astype(np.uint8)
+    cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    return cv2.dilate(features, cross, iterations=2, borderType=cv2.BORDER_CONSTANT, borderValue=0) > 0
+
+
 def _measure_cds(
     img, *, methods, background, seeds, threshold, invert, area_min, area_max, pad, n_angles, radial_step,
     smooth_sigma, fit_fraction, peak_min_distance, background_level, background_tile, deblend_iterations,
@@ -433,7 +446,7 @@ def _measure_cds(
         meta["background_definition"] = "10th percentile of the polarity-normalized cell border"
         report = np.arange(len(rows))
     else:
-        from scipy.ndimage import binary_dilation, map_coordinates
+        from scipy.ndimage import map_coordinates
         from ._cpu.deblend import FWHM_K, auto_tile, revise_seeds, sigma_major
 
         component_ids = np.asarray(component_ids, dtype=np.int32)
@@ -449,7 +462,7 @@ def _measure_cds(
             if seeds == "threshold":
                 # Thresholded features without a model (merged blobs, specks outside
                 # the area limits) must not be read as background.
-                exclude = binary_dilation((binary > 0) & ~np.isin(component_labels, component_ids), iterations=2)
+                exclude = _unmodelled_features(binary, component_labels, component_ids)
             final = revision == 2 or not np.isfinite(pitch)
             # Revision passes only need approximate fits to judge seeds.
             state = deblend(
@@ -462,7 +475,7 @@ def _measure_cds(
                 break
             # One missed or spurious hole corrupts its neighbours' fits; drop
             # insignificant seeds, add holes left in the residual, and refit.
-            drop, new = revise_seeds(signal_image, state, all_seeds, pitch)
+            drop, new = revise_seeds(signal_image, state, all_seeds, pitch, xp=_array_module(backend))
             if not drop.any() and not len(new):
                 if state.converged or state.iterations >= int(deblend_iterations):
                     break

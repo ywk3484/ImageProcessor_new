@@ -31,18 +31,20 @@ def _cells(rng, k, h, w):
     return cells, masks
 
 
-def _compare(a, b):
-    """Per-hole results of two runs: equal statuses, valid flags and areas; other values equal to rounding."""
+def _compare(a, b, tol=1e-11):
+    """Per-hole results of two runs: equal statuses and valid flags, equal pixel-count areas (half_area family);
+    other values equal to ``tol`` (relative, and px for positions)."""
     assert a.keys() == b.keys()
     for name in a:
         ra, rb = a[name], b[name]
         np.testing.assert_array_equal(ra.status, rb.status, err_msg=name)
         np.testing.assert_array_equal(ra.valid, rb.valid, err_msg=name)
-        np.testing.assert_array_equal(ra.metrics["area_px2"], rb.metrics["area_px2"], err_msg=name)
+        if "threshold" in ra.metrics:
+            np.testing.assert_array_equal(ra.metrics["area_px2"], rb.metrics["area_px2"], err_msg=name)
         for key, value in ra.metrics.items():
-            np.testing.assert_allclose(value, rb.metrics[key], rtol=1e-11, atol=1e-11, err_msg=f"{name} {key}")
-        np.testing.assert_allclose(ra.centers_xy, rb.centers_xy, rtol=0, atol=1e-11, err_msg=name)
-        np.testing.assert_allclose(ra.contours_xy, rb.contours_xy, rtol=0, atol=1e-11, err_msg=name)
+            np.testing.assert_allclose(value, rb.metrics[key], rtol=tol, atol=tol, err_msg=f"{name} {key}")
+        np.testing.assert_allclose(ra.centers_xy, rb.centers_xy, rtol=0, atol=tol, err_msg=name)
+        np.testing.assert_allclose(ra.contours_xy, rb.contours_xy, rtol=0, atol=tol, err_msg=name)
 
 
 def _without_kernels(monkeypatch):
@@ -95,25 +97,62 @@ def test_masked_top_mean_equals_top_mean_of_the_masked_array():
             np.testing.assert_array_equal(got, expected)
 
 
-def test_cells_computed_in_their_own_box_match_the_whole_stack(monkeypatch):
-    """One long thin blob makes the stack (every hole's square) large; each hole computed in the sub-block that holds
-    its mask gives the numbers of the whole-stack computation."""
+def _blob_page():
+    """One long thin blob (area under area_max) makes the stack, every hole's square, large."""
     from scripts.benchmark_cd import lattice
-    from subpx import measure_cds
-    from subpx._cpu import invariant_cd
 
     image, _ = lattice((300, 400), 9.5, 4.2, 20.0, seed=5)
     i = np.arange(30)
     image[100 + i, 150 + i] = 190
     image[100 + i, 151 + i] = 190
-    kw = dict(methods=("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area",
-                       "foot_area"), area_min=3, area_max=200, backend="gpu", n_angles=16, outlines=True)
-    result = measure_cds(image, **kw)
+    return image
+
+
+def _one_bucket(masks, step=4):
+    return [(np.arange(len(masks)), *masks.shape[1:])]
+
+
+def test_cells_measured_in_their_own_box_match_the_whole_stack(monkeypatch):
+    """projection, the half_area family and the gaussian residual of each hole, computed in the sub-block of the
+    stack that holds its mask, equal the whole-stack computation."""
+    from subpx import measure_cds
+    from subpx._cpu import invariant_cd
+    from subpx._gpu.cd import gaussian_method
+
+    result = measure_cds(_blob_page(), methods=("gaussian",), area_min=3, area_max=200, backend="gpu", n_angles=16)
     assert result.masks.shape[1] > 30 and len(invariant_cd._size_buckets(result.masks)) > 1
+    cleaned, masks, origins = result.rois, result.masks, result.origins_xy.astype(float)
+    params = result.deblend_model["params"][result.deblend_model["report"]].copy()
+    params[:, 1:3] -= origins
+    specs = [{"name": name, "level": 0.5, "background": background, "peak_pixels": peak, "cuts": None}
+             for name, (background, peak) in {"half_area": ("median", None), "half_area_min": ("min", None),
+                                               "half_area_min_avg": ("min", 4.0)}.items()]
+
+    def run():
+        found = invariant_cd._half_areas(cleaned, masks, origins, 32, specs, outlines=True, xp=cp)
+        found["projection"] = invariant_cd._projection(cleaned, masks, origins, 32, xp=cp)
+        found["gaussian"] = gaussian_method(params, result.measurements["gaussian"].status, cleaned, masks, origins, 32)
+        return found
+
+    own = run()
     with monkeypatch.context() as m:
-        m.setattr(invariant_cd, "_size_buckets", lambda masks, step=4: [(np.arange(len(masks)), *masks.shape[1:])])
-        whole = measure_cds(image, **kw)
-    _compare(result.measurements, whole.measurements)
+        m.setattr(invariant_cd, "_size_buckets", _one_bucket)
+        whole = run()
+    _compare(own, whole)
+
+
+def test_deblend_in_own_boxes_matches_the_whole_stack(monkeypatch):
+    """Fits in each hole's own box: the same fits up to the order of the sums (to 1e-6), the same statuses."""
+    from subpx import measure_cds
+    from subpx._cpu import invariant_cd
+
+    kw = dict(methods=("gaussian", "half_area", "tail_area"), area_min=3, area_max=200, backend="gpu", n_angles=16)
+    own = measure_cds(_blob_page(), **kw)
+    with monkeypatch.context() as m:
+        m.setattr(invariant_cd, "_size_buckets", _one_bucket)
+        whole = measure_cds(_blob_page(), **kw)
+    np.testing.assert_allclose(own.deblend_model["params"], whole.deblend_model["params"], rtol=1e-6, atol=1e-6)
+    _compare(own.measurements, whole.measurements, tol=1e-6)
 
 
 def test_measure_cds_with_kernels_matches_the_array_code(monkeypatch):
