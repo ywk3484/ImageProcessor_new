@@ -98,6 +98,9 @@
   After the kernel work, half of each page was CPU-side (many small steps), and a second worker gave no gain on this
   Windows GPU. Give the remote estimate as a range with the deciding unknown named (workers per GPU on Linux, MPS),
   and the trial run that measures it.
-- **The library call is not the disk.** tifffile.imread read a 2 GB HDD file in 57 s; reading its pages in file
-  order took 21 s, the disk's own speed. Time a plain sequential read before blaming the disk.
+- **The library call is not the disk, and read the library before naming why it is slow.** tifffile.imread read a
+  2 GB HDD file in 29-33 s against 16 s for a plain read. I told the user "it reads pages in parallel, so the head
+  jumps", unmeasured; tifffile reads uncompressed pages one at a time (so maxworkers changed nothing, as the user had
+  seen). Measured: it first walks every page header through the whole file (13 s cold, one seek per page), then reads
+  the pixels. Time a plain read, then each step of the library call, before giving a cause.
 

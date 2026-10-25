@@ -391,3 +391,22 @@ Results (RTX 4060 Ti, Windows, this PC also loaded by other programs):
   change (was up to 2.6 nm per hole); wide window 25 -> 27 px: tail_area_norm 0, others sd <= 0.007 nm per hole (was
   up to 2.55 nm sd for foot_area).
 - Suite: 221 passed, 1 skipped, the same 9 pre-existing failures.
+
+# Read speed on the remote; running a dataset with subfolders (2026-10-25)
+
+The user asked whether tifffile.imread is not optimal, how to test the reader on the remote, and how to run a
+dataset whose TIFFs sit in subfolders (cd_batch already searches folders recursively).
+
+- [x] Re-measure the cause: tifffile reads uncompressed pages one at a time (maxworkers changes nothing); imread first
+      walks every page header through the file (13 s cold for 1500 pages), then reads the pixels. "Parallel reads"
+      (my earlier reason) was wrong, and the earlier 57 s did not reproduce
+- [x] User-size file on the HDD (740 pages of 2048 x 1378, 2.09 GB, cold): plain read 13.4 / 14.4 s, batch reader
+      16.7 s, tifffile.imread 20.5 s (1500 pages of 1196 x 1196: 15.1 / 15.3, 17.7, 28.6 s)
+- [x] `scripts/read_speed.py`: the three reads of one TIFF, each after dropping the file from the OS cache
+      (Windows: unbuffered open; Linux: posix_fadvise, checked in a container with mincore: 100 % -> 0 % resident);
+      `tests/test_read_speed.py`
+- [x] First run with an empty CuPy kernel cache: 32.8 s before the first page (121 kernels), then 1.7 s per page;
+      the user's compose keeps the cache in the `cupy-cache` volume
+- [x] docs/remote_server.md: read check, warm-up, trials on one whole file each into its own --output (a file given
+      alone is keyed by its name, so the old "trial pages are kept" was wrong for subfolders), the whole dataset in
+      one command, correct reading explanation

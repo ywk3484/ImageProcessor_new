@@ -67,35 +67,50 @@ page with each method's average CD. Pages without holes are skipped by comparing
 that has holes.
 
 ```bash
-# Trial: the first 200 pages of one file (prints pages per second every 30 s; see timings.csv)
-python scripts/cd_batch.py /data/dataset1/scan_001.tif --reference /data/reference.tif \
-    --output /results/dataset1 --pixel-size 21 --unit nm --pages 0:200
+# 1. How fast your disk reads one TIFF (each read from the disk, not from RAM)
+python scripts/read_speed.py /data/dataset1/stripe_001/scan_001.tif
 
-# The whole dataset (folders are searched for .tif/.tiff); the trial's pages are kept and not measured again
+# 2. Once per machine (or new container): the first run compiles the GPU code, ~30 s before the first page
+python scripts/cd_batch.py /data/dataset1/stripe_001/scan_001.tif --reference /data/reference.tif \
+    --output /results/warmup --pixel-size 21 --unit nm --pages 0:10
+
+# 3. Trials: one whole TIFF (mostly pages with holes), 1, 2 and 3 workers per GPU, each into its own folder;
+#    compare the last lines ("This run: N pages in T s"). Step 1 left the file in RAM, so they time the GPUs.
+for n in 1 2 3; do
+  python scripts/cd_batch.py /data/dataset1/stripe_001/scan_001.tif --reference /data/reference.tif \
+      --output /results/trial_w$n --pixel-size 21 --unit nm --workers-per-gpu $n
+done
+
+# 4. The whole dataset: every .tif/.tiff in the folder and in all its subfolders, with the best worker count
 python scripts/cd_batch.py /data/dataset1 --reference /data/reference.tif --output /results/dataset1 \
-    --pixel-size 21 --unit nm
+    --pixel-size 21 --unit nm --workers-per-gpu 2
 ```
 
-Keep the reference outside the dataset folder, or it is measured as a page too.
+Keep the reference outside the dataset folder, or it is measured as a page too. The `file` column is each file's
+path below the dataset folder (`stripe_001/scan_001.tif`), and a resumed run skips the (file, page) pairs already in
+`pages.csv`. So run a dataset with one command and resume it with the same command; give trials their own
+`--output` (a file given alone is named without its folder). Running one subfolder at a time into the same
+`--output` would take same-named files of different subfolders as already measured. A run takes hours: start it in
+`tmux` or with `nohup` so that logging out does not stop it.
 
 ### Reading and run time
 
-One reader thread reads the files one after another, each front to back, and hands the pages to the workers: the
-disk reads sequentially and no page is read twice. Pages are not counted beforehand (on an HDD, counting a 1500-page
-file walks every page header, 14 s here). On this PC's 5400 rpm HDD a 2 GB, 1500-page file read cold in 21 s with
-this reader, 22-26 s with a plain file read and 57 s with `tifffile.imread` (it reads pages in parallel, so the disk
-head jumps). Check what your disk does, on a TIFF not read since the last boot:
+One reader thread reads the files one after another, each front to back, and hands the pages to the workers, which
+measure while the next pages are read. It reads each page's header together with its pixels: one pass through the
+file. `tifffile.imread` (also `len(tif.pages)` and `tif.series`) first reads every page's header, spread over the
+whole file, and only then the pixels; on an HDD that is one seek per page. Cold on this PC's HDD, a 2.09 GB file of
+740 pages of 2048 x 1378 px read in 13-14 s with a plain read, 16.7 s with this reader and 20.5 s with
+`tifffile.imread` (a file of 1500 smaller pages: 15 s, 17.7 s, 28.6 s). Uncompressed pages are read one at a time
+either way, so `maxworkers` makes no difference. If `scripts/read_speed.py`'s plain read takes as long as your usual
+load, the disk itself is the limit: no reader is faster than it.
 
-```bash
-dd if=/data/dataset1/scan_001.tif of=/dev/null bs=8M iflag=direct status=progress
-```
-
-Measuring is the slower part: on an RTX 4060 Ti a 2048 x 1378 page with 30,000 holes takes 1.7 s (about 0.8 s on
+Measuring is the slower part: on an RTX 4060 Ti a 2048 x 1378 page with 30,000 holes takes 1.6 s (about 0.8 s on
 the GPU, the rest on the CPU); a page without holes only takes the hole check, ~0.01 s. An RTX 6000 Ada does the GPU
 part several times faster, so there the CPU part decides: run more workers per GPU (`--workers-per-gpu 3` or `4`,
-one CPU core each) until the progress line's pages per second stops rising, or the disk's speed is reached. With
-several workers per GPU on Linux, NVIDIA's multi-process service lets them share a GPU without taking turns: run
-`nvidia-cuda-mps-control -d` on the host before the run (in Docker the container also needs `--ipc=host`).
+one CPU core each) until the pages per second stop rising, or the disk's speed is reached (its MB/s divided by
+2.8 MB per page). With several workers per GPU on Linux, NVIDIA's multi-process service lets them share a GPU without
+taking turns: run `nvidia-cuda-mps-control -d` on the host before the run (in Docker the container also needs
+`--ipc=host`).
 
 | Parameter | Default | Meaning |
 |---|---|---|
