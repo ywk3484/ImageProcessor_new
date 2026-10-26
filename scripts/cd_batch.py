@@ -883,7 +883,8 @@ def build_settings(args) -> dict:
     }
 
 
-def main(argv=None) -> int:
+def argument_parser() -> argparse.ArgumentParser:
+    """main's command line."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("inputs", nargs="+", help="TIFF files, folders (searched recursively) or wildcards")
     parser.add_argument("--output", type=Path, required=True)
@@ -912,7 +913,11 @@ def main(argv=None) -> int:
     parser.add_argument("--workers", type=int, default=1, help="Workers with --backend cpu")
     parser.add_argument("--page-timeout", type=float, default=600, help="Seconds before a page counts as hung")
     parser.add_argument("--in-process", action="store_true", help="No worker processes (debugging)")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv=None) -> int:
+    args = argument_parser().parse_args(argv)
     if args.workers_per_gpu < 1 or args.workers < 1:
         raise SystemExit("--workers-per-gpu and --workers must be at least 1")
     if args.pixel_size != 1 and args.unit == "px":

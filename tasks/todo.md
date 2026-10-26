@@ -1,109 +1,80 @@
-Finished tasks up to 2026-10-24 are in `tasks/archive/todo-2026-10.md`.
+Finished tasks up to 2026-10-26 (part 1 of the diagnostic) are in `tasks/archive/todo-2026-10.md`.
 
-# Read speed on the remote; running a dataset with subfolders (2026-10-25)
+# Part 2 of the diagnostic: find the cure on the remote's pages in one run (2026-10-26, approved plan)
 
-The user asked whether tifffile.imread is not optimal, how to test the reader on the remote, and how to run a
-dataset whose TIFFs sit in subfolders (cd_batch already searches folders recursively).
+Plan file: `C:\Users\USER\.claude\plans\streamed-exploring-cray.md`. The user's part-1 lines (remote, 4x RTX 6000 Ada,
+Windows Server 2022, commit e27d5):
 
-- [x] Re-measure the cause: tifffile reads uncompressed pages one at a time (maxworkers changes nothing); imread first
-      walks every page header through the file (13 s cold for 1500 pages), then reads the pixels. "Parallel reads"
-      (my earlier reason) was wrong, and the earlier 57 s did not reproduce
-- [x] User-size file on the HDD (740 pages of 2048 x 1378, 2.09 GB, cold): plain read 13.4 / 14.4 s, batch reader
-      16.7 s, tifffile.imread 20.5 s (1500 pages of 1196 x 1196: 15.1 / 15.3, 17.7, 28.6 s)
-- [x] `scripts/read_speed.py`: the three reads of one TIFF, each after dropping the file from the OS cache
-      (Windows: unbuffered open; Linux: posix_fadvise, checked in a container with mincore: 100 % -> 0 % resident);
-      `tests/test_read_speed.py`
-- [x] First run with an empty CuPy kernel cache: 32.8 s before the first page (121 kernels), then 1.7 s per page;
-      the user's compose keeps the cache in the `cupy-cache` volume
-- [x] docs/remote_server.md: read check, warm-up, trials on one whole file each into its own --output (a file given
-      alone is keyed by its name, so the old "trial pages are kept" was wrong for subfolders), the whole dataset in
-      one command, correct reading explanation
+```
+v8ea8/e27d5/fc874 n0 pnpty wa-n0 u4w/4/0 c80/77/64 a378/541
+x1.8/7/= f4.6 t4.1/3.9/4.2/3.5 m2.3/0.6/0.7/0.5 h20/52 d30/2/63/17/6 j4/12x11 y0/0/0/9
+r11.1/46/3/17/39x19/0 e0/0/0 k0.17/0.64
+```
 
-# The reference is one page of a TIFF (2026-10-26)
+Read: no CD bug (e0/0/0, x=); the PC waits (GPU busy 20 %, 378 us per GPU call vs 30 here, one core 1.6x slower,
+Balanced plan); deblend never settles (30 rounds, 2 passes, last step 1.5e-3 raw, no tile switch, no cycle: a slow
+monotone drift); the CDs depend on where it stops (1-3 more rounds: page mean up to 0.17 nm, hole p99 0.64 nm); the
+slowest page refits from scratch after two seed re-checks (46 rounds, 3 passes, 11 s). Open: workers per GPU (a 2nd
+worker did not slow the first here, the user's trials saw no gain) and which cure settles the drift.
 
-The user: the reference image is a single page in a TIFF, not a whole TIFF file. `--reference-page` already picks
-it, but the commands in the docs never showed it, and the reference was first read by the workers, after run.json
-was written: a wrong page number stopped the run, and the corrected command was then refused as "other settings".
+Build (code by Opus 5.5 subagents, reviewed here; library untouched, today's numbers unchanged):
 
-- [x] Main process reads the reference page once, before anything is written; a page that cannot be read stops with
-      a clear message; the workers get that image (no re-reading); the first line names the page used
-- [x] Test: the reference is a page of one of the dataset's own TIFFs; a page past the end is refused and leaves no
-      output; the corrected command then runs
-- [x] docs/remote_server.md: commands with `--reference-page`, the one-page rule, a reference inside the dataset
-- [x] Measure the read on the HDD: first read of the 740-page file's headers 4.9-5.2 s cold, then 0.1-0.3 s (the
-      disk's own cache), so the per-worker reads cost seconds once per run, not more
-- Result: a page past the end now stops with "--reference-page 740 of ...scan_user.tif: IndexError: page 740 is out
-  of range (740 pages)" and leaves no output folder; with page 5 of the same HDD file as the reference, GPU workers:
-  that page's error 0.0, the other pages measured as usual. Tests: 11 passed (test_cd_batch, test_read_speed).
+- [x] `scripts/deblend_variants.py`: the GPU deblend loop with switches (inner LM 100 steps, background frozen,
+      free pixels frozen, Anderson acceleration with safeguards, 2 % wider start, continue after the seed re-check,
+      and a 6th found on the way: the tile rule at 16 free pixels), a per-round trace, and `Patch` that puts it in
+      place of `subpx._gpu.deblend.deblend`; all switches off = the library bit for bit (`tests/test_deblend_variants.py`)
+- [x] `scripts/cd_diagnose.py --part 2` -> `scripts/cd_diagnose_part2.py`, sections 1-2: GPUs and Windows (round
+      trip on every GPU, processes per GPU, Remote Desktop GPU policy, PCIe power saving, the High-performance test
+      with the plan restored afterwards); workers per GPU (the earlier trial folders; the real cd_batch with 1-4
+      workers per GPU on 160 pages, rate from the 25-75 % row arrivals, GPU / shared / committed memory and CPU
+      sampled by one WMI loop, batch output to a file, leftover workers killed by process tree, a stall rule)
+- [x] Section 3, deblend drift on the median and the slowest page: the reference = today's loop run on to a tight
+      stop (step 1e-5, at most 200 rounds; also at most 100: still moving?), what moves in today's last rounds,
+      today vs the reference, five cures at a practical stop (1e-4), the slowest page with continuing after the
+      re-check alone and with Anderson, the page-to-page spread of pages.csv
+- [x] A test page here that drifts like the remote's: `scripts/drift_page.py` (dense 8.5-px pitch, blurred disks,
+      cut by the edges, noisy, 2-px margin). Cause there: no background tile ever has enough free pixels, so the map
+      is "inferred" from every residual pixel and walks away from the true level (37 -> 33 of 40 grey levels) while
+      the widths grow; the step shrinks 4 % per round and never reaches the stop rule. Background known (or any tile
+      measured): settles in 5-7 rounds
+- [x] Local test dataset again (the old 48-page file and speed_w1 run are gone): artifacts/cd_test, 48 pages of the
+      user's size, 24 drifting + 16 settling + 8 without holes; one-worker trial 48 pages in 115 s
+- [x] Tests: variants bit for bit (16), part-2 helpers (21 with part 1's and cd_batch's: 37); full suite = the same
+      9 old failures
+- [x] `--part 2` end to end here in PowerShell with the venv (one GPU, 1-4 workers on it), twice, 18 and 22 min;
+      power plan back to Balanced, no worker left, temp folders gone
+- [x] docs/remote_server.md: the part-2 command and what comes back; commit + push my files only
 
-# The remote is Windows Server 2022, not Docker (2026-10-26)
+## Review (2026-10-26)
 
-The user: the step-3 trials command gave a parse error; the remote runs Windows Server 2022 without Docker. The docs
-were written for Linux and bash (I had taken the repo's Dockerfile / compose.yaml for the remote).
+Built as planned, with three changes found on the way: (1) a reference that stops at today's rule (step 1e-3) is no
+reference: on the drifting test page the plain loop, Anderson and a 2 % wider start all end at ONE point when run to a
+tight stop (1e-5; the plain loop needs 242 rounds), while the 1e-3 run stops at round 36 still 1 nm from it; so the
+reference uses the tight stop and the cures a practical one (1e-4: within 0.05 nm of the end), both switches of
+`Variant`; (2) `deblend_iterations_used` counts the last pass only, so rounds are summed over the passes;
+(3) six lines instead of five (the drift line was 155 characters) and the holes moved as a percentage.
 
-- [x] Cause: PowerShell cannot parse the bash loop (its parser: "Missing opening '(' after keyword 'for'"); the `\`
-      line continuations and the lines starting with `--` fail too
-- [x] docs/remote_server.md for PowerShell: one line per command, Windows paths, the three trials as three lines;
-      Remote Desktop Disconnect instead of tmux / nohup; a click into the console pauses the run; no MPS or Docker
-- [x] cd_batch: a results file held open by another program when the run ends (Excel) raised WinError 5 and left a
-      .tmp file (reproduced); now it stays in the order measured, with a note
-- [x] Checked: the docs' PowerShell blocks parse (0 errors); the three trial lines ran one after another in
-      PowerShell on this PC (GPU workers, 1 / 2 / 3 per GPU); tests 12 passed (test_cd_batch, test_read_speed)
+What the local drifting page (39,042 holes, no background tile measured) says: today's 30 rounds stop 1.0 nm (cell
+methods) to 1.3 nm (wide methods) from the end point, 71 % of the holes move more than 1 nm, 946 valid flags flip;
+widths move 4x more than centres, the background falls 3.8 grey levels over the last pass. Cures at the 1e-4 stop:
+Anderson 32 rounds and 0.01 nm from the end; the plain loop 110 rounds; LM 100 steps and tiles-from-16-px identical
+to it (no tile reaches 16 free pixels here); the wider start 96 rounds to the same end; the frozen background 15
+rounds but 3.25 nm away (ruled out). Slowest page: continuing + Anderson 33 rounds, 4.5 s, 0.00 nm from the end
+(the re-check changed no seed here, so "continuing" alone is the plain loop: only the remote's 3-pass page tests it).
 
-# Why the remote is slow (2026-10-26, investigation only: no code changes, as the user asked)
+This PC's six lines (one RTX 4060 Ti 16 GB; 4 workers per GPU overflow its memory: 28 s per page, 2 pages failed,
+in an earlier run a stall stopped by the 10-minute rule; section 3 came out the same in both runs):
 
-Remote trial: 209 pages (133 with holes) in 146 s on 4 GPUs, 3.5 s per hole page (deblend 2.04, tail_area 0.17),
-cells 11 px wide; workers per GPU make no difference.
+```
+v2e59/75323+4/75323 a26 p26 u-c e1 h28/27/52/51/3.5/3.6 wa
+t1/0.35/3.4/96/1.5 n0
+k0.34/3.5/5/0.3/41/23/12.5+0.39/6.4/9.3/0.6/46/32/11.1+0.37/10.4/12.1/0.9/50/49/9.4+0.03/28/15.5/3.6/54/45/5.2
+y1/0 d200/2/1.3/0.07/0/-3.8 m31/125/143/127/123/0.17/96/100
+c0.99/1.27/1.26/71/946 x110/0.05/0.6+15/3.25/20.58+32/0.01/0.4+96/0.04/0.59+110/0.05/0.6/0
+r200/2/1.24/105/2/9.1/0.06/33/2/4.5/0 f2.3/3.05/40
+```
 
-- [x] Here, both synthetic pages (mine, and one like the user's example: pitch 8, 43,095 holes) settle deblend in one
-      pass of 6-7 rounds: 0.55 s. Forced to never settle (tolerance 0): 10 + 20 rounds, 1.6 s = the remote's 2.0 s
-- [x] One page of my own 48-page test file never settles either (page 7: 1.67 s deblend, 2.8 s page)
-- [x] GPU busy 59 % of a page here (nvidia-smi); a bigger GPU only speeds up the big kernels (tail_area 0.29 -> 0.17)
-- [x] Blob page: 3.3 s vs 1.7 s; deblend passes 0.65 vs 0.50 s, the rest from full-size (51 x 49) cell stacks
-- [x] User ran the rounds check: page 94 (29,638 holes, cells 12x11) 10 + 20 rounds, never settled, deblend 2.43 s
-      of 4.45 s; page 46 (38,386 holes, cells 39x19) hole list changed twice, so 10 + 10 + 30 rounds from scratch,
-      never settled, deblend 8.34 s of 11.09 s (each round 2.5x slower: bigger cells)
-- [x] Cause (page 7 here, wrappers only): the background map's rule "a tile is measured if >= 10 % of its pixels
-      are free, else interpolated from measured tiles". Only 13 % of tiles pass (median tile 7 % free). Tile
-      (13,25) sits at 135/136 free px of the 136 needed: it switches every 4 rounds; each switch moves the
-      background of 1,400 of 2,128 tiles (up to 1.6 grey levels), the fits follow, the tile switches back.
-      p99 change per round repeats 0.0079 0.0049 0.0022 0.0011 forever (stop needs < 0.0006)
-- [x] So the CDs depend on where the loop stops in the cycle: 10 and 30 rounds agree (20 rounds apart = 5
-      cycles), 20 rounds differs (page means up to 0.36 nm, single holes p99 up to 9.3 nm). A repeatability bug,
-      not only speed. Settling pages also switch tiles, but early (round 2), then settle in 7-8 rounds
-- [ ] User runs the tile-switch check (PowerShell paste) on the same 5 trial pages, to confirm this on real data
-- [ ] Then a plan for approval: a background map without the on/off switch (numbers change once, all methods),
-      no restart from scratch after the hole re-check, then the remaining ~1.5 s per page from the remote's stages
-
-# One diagnostic for the remote (2026-10-26, approved plan)
-
-The user types everything from the remote by hand: one command, three short lines back, no more pastes.
-
-- [x] scripts/cd_diagnose.py RUN_FOLDER TIFF [--pages A,B]: machine (code fingerprint, CUDA/CuPy settings, GPUs and
-      driver model, other load, latency, FP64, CPU), real pages (alone vs every GPU busy vs the trial, GPU busy,
-      stage groups, deblend rounds/passes/split, size groups, tile switches, slowest page), numbers (same page twice,
-      stop 1-3 rounds later, GPU vs CPU on a crop); diagnosis.txt with everything
-- [x] Run here under PowerShell as the user will; check against earlier separate measurements; robustness cases
-- [x] tests/test_cd_diagnose.py: page picking, fingerprint ignores CRLF, token line with missing values
-- [x] Commit + push; my own line recorded below as the reference
-
-## Review
-
-- Reference lines (this PC, RTX 4060 Ti, speed_w1 run of stripe1_board1.tif, pages 20 and 7, 56 s, `.venv` Python
-  3.11; the commit field reads `8526d+1` before the commit, the new commit after it):
-  `v8ea8/8526d+1/fc874 n0 p= wa-n0 u1w/1/1 c51/51/12 a30/401`
-  `x1.6/7/= f1.9 t1.6/2.7/1.6/1.6 m0.5/0.3/0.6/0.2 h61/87 d7/1/56/35/5 j1/12x13 y2/0/0/5`
-  `r2.9/30/2/2/13x13/1 e0/0/0 k0/0`
-- Agrees with the earlier separate checks: page 20 settles in 7 rounds (1.6 s); page 7 runs 10 + 20 rounds (2 passes),
-  2.9 s; GPU = CPU code on a crop (0); same page twice 0; a second worker on one GPU 1.6 -> 2.7 s (turns on WDDM).
-- `--pages 7,12`: tile switches 6, cycle length 4, last steps 79/49/22/11 x1e-4, k 0.38/9.58 nm (the stop-round
-  dependence found before). `--pages 2,12` (a page without holes forced in): 50 rounds in 3 passes, 36 size groups,
-  35x35 cells, 4.2 s; its fresh worker's first page 8.1 s. Kernels are cached per source and options, never per cell
-  size, so that is not per-size compiling; the f token and r's last field measure the first-page cost.
-- Robustness: missing run.json / timings.csv rows / TIFF, bad --pages, page out of range: one sentence, no traceback.
-- Letters inside values were changed so none looks like a digit (power plan b/s -> a/p, opencv o -> v, scipy s -> p,
-  synthetic i/r -> d/n, "holes" -> d); the n token now names the slow settings that are on, the commit field counts
-  the CD files that differ (+N). tests/test_cd_diagnose.py: 9 tests.
-- The interpreter matters here: PowerShell's `python` on this PC is C:\Python313 without tifffile; the runs above use
-  `.venv\Scripts\python.exe`. On the remote the user's own environment is the one the batch ran with.
-- Waiting for the user's 3 lines. No fix before they are back.
+Open until the remote's lines: whether their pages have measured tiles (then the drift may be another one), how far
+their stop is from the end, which cure wins there; the `f` spread here mixes two kinds of synthetic page and means
+nothing. Step 2 (the cure into the library, CPU + GPU, as default; a deblend version key in run.json; workers per
+GPU and power-plan advice) waits for those lines and its own approval.

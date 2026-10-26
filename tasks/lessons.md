@@ -129,3 +129,7 @@
   machine, build one script that measures every candidate at once (code version, environment, machine, GPU sharing,
   the real pages' stage split and deblend behaviour, the numbers), verify it here first, and make it print a few
   short lines of labelled tokens in which no letter looks like a digit. Ask for those lines only.
+- **A reference that uses the stop rule under test is no reference.** "Today's loop allowed 200 rounds" stopped at
+  round 36 by the same 1e-3 rule, 1 nm short of where the loop ends; cures compared with it looked like different
+  fixed points. Run the reference to a stop the drift cannot meet by chance (here 1e-5; the plain loop, Anderson and
+  a wider start then agree within 0.01 nm) and judge each cure by its distance from that end point.

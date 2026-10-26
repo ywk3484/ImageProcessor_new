@@ -185,3 +185,35 @@ r2.9/30/2/2/13x13/1 e0/0/0 k0/0
 Each token is a letter and its values, `-` where a value could not be measured; the top of the script says what each
 one is. Everything measured is also written to `diagnosis.txt` in the trial's folder. `--pages 94,46` uses those two
 pages instead of the trial's median and slowest.
+
+## What part 1 left open (`scripts/cd_diagnose.py --part 2`)
+
+After part 1's three lines, the same command with `--part 2`, again while nothing else uses the GPUs:
+
+```powershell
+python scripts\cd_diagnose.py D:\results\trial_w1 D:\data\dataset1\stripe_001\scan_001.tif --part 2
+```
+
+It takes about 20 minutes. First it looks at the GPUs and Windows: other programs on each GPU, Remote Desktop's GPU
+setting, PCIe power saving and each GPU's round trip. It then times the median page on the current power plan and on
+High performance. Switching the plan is the only change it makes, for less than a minute, and it then sets back the
+plan it found (also after Ctrl+C or an error). Next it runs the real `cd_batch.py` with 1, 2, 3 and 4 workers per GPU
+on the 160 pages of the TIFF that hold the most hole pages, each into a temporary folder that is removed afterwards;
+a worker count that gets no new page for 10 minutes is stopped. Last, it measures how the deblending drifts on the
+median and the slowest page and tries cures for it, five on the median page and two on the slowest (a few minutes).
+Do not click into its window while it runs (a click pauses it until you press Esc). It ends with a summary and six
+short lines; type only those six lines back. Everything measured is also written to `diagnosis2.txt` in the trial's
+folder. On this PC (one RTX 4060 Ti, the synthetic test file of 48 pages) it took 22 minutes, and the lines read:
+
+```
+v2e59/75323+4/75323 a26 p26 u-c e1 h28/27/52/51/3.5/3.6 wa
+t1/0.35/3.4/96/1.5 n0
+k0.34/3.5/5/0.3/41/23/12.5+0.39/6.4/9.3/0.6/46/32/11.1+0.37/10.4/12.1/0.9/50/49/9.4+0.03/28/15.5/3.6/54/45/5.2
+y1/0 d200/2/1.3/0.07/0/-3.8 m31/125/143/127/123/0.17/96/100
+c0.99/1.27/1.26/71/946 x110/0.05/0.6+15/3.25/20.58+32/0.01/0.4+96/0.04/0.59+110/0.05/0.6/0
+r200/2/1.24/105/2/9.1/0.06/33/2/4.5/0 f2.3/3.05/40
+```
+
+The last group of `k` is 4 workers per GPU on this 16 GB card: 15.5 GB of GPU memory in use, 3.6 GB of it moved to
+system RAM, 28 s per page instead of 3.5 and two pages failed (a PROBLEM line of the summary says so); in another
+run they finished no page in 10 minutes and were stopped, which the summary reports the same way.

@@ -1,5 +1,6 @@
 """Why CD batch pages take as long as they do on this machine, and whether its numbers are right: one command, a few
-minutes, then three short lines to type back.
+minutes, then three short lines to type back. With --part 2 it runs the follow-up instead (scripts/cd_diagnose_part2.py:
+the GPUs and Windows, workers per GPU, deblend drift): about 20 minutes, then six lines.
 
     python scripts/cd_diagnose.py D:\\results\\trial_w1 D:\\data\\dataset1\\stripe_001\\scan_001.tif
 
@@ -41,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import json
@@ -61,7 +63,8 @@ if str(ROOT) not in sys.path:
 from scripts.cd_batch import FrameReader, visible_gpus  # noqa: E402  the batch's own page reader and GPU list
 
 CODE = ("subpx/cd.py", "subpx/_cpu", "subpx/_gpu", "scripts/cd_batch.py", "scripts/cd_report.py",
-        "scripts/cd_diagnose.py")  # what a CD measurement runs (folders: their .py files)
+        "scripts/cd_diagnose.py", "scripts/cd_diagnose_part2.py",
+        "scripts/deblend_variants.py")  # what a CD measurement and this diagnosis run (folders: their .py files)
 CELL_STAGES = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg")
 WIDE_STAGES = ("tail_window", "tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
 HARMLESS = ("CUDA_PATH", "CUDA_HOME", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "CUPY_CACHE_DIR")
@@ -283,12 +286,13 @@ def gpu_table() -> list[dict] | None:
 
 
 class Sampler:
-    """nvidia-smi every 100 ms, with its timestamps: utilization (share of time a kernel runs) and SM clock."""
+    """nvidia-smi every 100 ms, with its timestamps: utilization (share of time a kernel runs), SM clock and its
+    maximum, memory used (MiB)."""
 
     def __init__(self, gpu: str | None = None):
-        command = ["nvidia-smi", "--query-gpu=timestamp,index,utilization.gpu,clocks.sm,clocks.max.sm",
+        command = ["nvidia-smi", "--query-gpu=timestamp,index,utilization.gpu,clocks.sm,clocks.max.sm,memory.used",
                    "--format=csv,noheader,nounits", "-lms", "100"] + (["-i", str(gpu)] if gpu is not None else [])
-        self.samples: list[tuple[float, str, float, float, float]] = []
+        self.samples: list[tuple[float, str, float, float, float, float]] = []
         self.thread = None
         try:
             self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -303,11 +307,12 @@ class Sampler:
             parts = [part.strip() for part in line.split(",")]
             try:
                 stamp = datetime.strptime(parts[0], "%Y/%m/%d %H:%M:%S.%f").timestamp()
-                self.samples.append((stamp, parts[1], float(parts[2]), float(parts[3]), float(parts[4])))
+                self.samples.append((stamp, parts[1], float(parts[2]), float(parts[3]), float(parts[4]),
+                                     float(parts[5])))
             except (ValueError, IndexError):
                 continue
 
-    def stop(self) -> list[tuple[float, str, float, float, float]]:
+    def stop(self) -> list[tuple[float, str, float, float, float, float]]:
         if self.process is not None:
             self.process.terminate()
             try:
@@ -433,6 +438,23 @@ class _Session:
                     largest_cell=tuple(int(v) for v in result.masks.shape[1:]),
                     stage_seconds=result.meta["seconds"], added=result.meta.get("seeds_added_from_residual"),
                     dropped=result.meta.get("seeds_dropped_as_insignificant"))
+
+    def variant(self, conn, key, name, variant, full_iterations, extra=None):
+        """measure() with scripts/deblend_variants' loop in place of the library's: the switches of ``variant`` (a
+        dict of Variant's fields), every pass and round recorded. Rounds are the total over the passes (measure_cds'
+        deblend_iterations_used counts the last pass only)."""
+        from scripts.cd_report import cd_statistics
+        from scripts.deblend_variants import Patch, Variant
+
+        start = time.perf_counter()
+        with Patch(Variant(**variant), full_iterations=full_iterations) as patch:
+            result = self.results[key] = self.measure_now(self.images[name], **(extra or {}))
+        meta = result.meta
+        return {"seconds": time.perf_counter() - start, "holes": len(result.seeds_xy),
+                "rounds": sum(p["used"] for p in patch.passes), "settled": bool(meta["deblend_converged"]),
+                "means": {name: s["mean"] for name, s in cd_statistics(result).items()},
+                "measured_tiles": meta.get("background_measured_tiles"), "tiles": meta.get("background_tiles"),
+                "source": meta.get("background_source"), "passes": patch.passes}
 
     def compare(self, conn, a, b):
         return compare(self.results[a], self.results[b])
@@ -692,15 +714,18 @@ def cycle_length(params: list[np.ndarray], longest: int = 8) -> int:
 
 
 def compare(a, b) -> dict:
-    """How far result b is from result a: the largest change of a page mean, and of a single hole's CD (largest and
-    99th percentile) where both hole lists are the same, in the results' unit; holes whose valid flag changed."""
+    """How far result b is from result a: the largest change of a page mean (over all methods, the cell methods, the
+    wide methods), and where both hole lists are the same, of a single hole's CD: the largest, the 99th percentile,
+    the median, and the holes that moved more than 1 (each the largest over the methods), in the results' unit;
+    holes whose valid flag changed."""
     from scripts.cd_report import cd_statistics
 
     same = len(a.seeds_xy) == len(b.seeds_xy) and bool(np.array_equal(a.seeds_xy, b.seeds_xy))
     stats_a, stats_b = cd_statistics(a), cd_statistics(b)
-    means = [abs(stats_a[n]["mean"] - stats_b[n]["mean"]) for n in a.measurements if n in b.measurements]
-    hole_max = hole_p99 = 0.0
-    flipped = 0
+    means = {n: abs(stats_a[n]["mean"] - stats_b[n]["mean"]) for n in a.measurements if n in b.measurements}
+    means = {n: m for n, m in means.items() if np.isfinite(m)}
+    hole_max = hole_p99 = hole_median = 0.0
+    flipped = above = 0
     for name in a.measurements if same else ():
         ma, mb = a.measurements[name], b.measurements[name]
         both = ma.valid & mb.valid
@@ -709,10 +734,15 @@ def compare(a, b) -> dict:
         d = d[np.isfinite(d)]
         if d.size:
             hole_max, hole_p99 = max(hole_max, float(d.max())), max(hole_p99, float(np.percentile(d, 99)))
-    means = [m for m in means if np.isfinite(m)]
+            hole_median, above = max(hole_median, float(np.median(d))), max(above, int((d > 1.0).sum()))
+
+    def largest(names):
+        return max((means[n] for n in names if n in means), default=None)
     return {"same_holes": same, "holes": (len(a.seeds_xy), len(b.seeds_xy)),
-            "page_mean": max(means) if means else None, "hole_max": hole_max if same else None,
-            "hole_p99": hole_p99 if same else None, "valid_changed": flipped}
+            "page_mean": largest(means), "page_mean_cell": largest(CELL_STAGES),
+            "page_mean_wide": largest(WIDE_STAGES), "hole_max": hole_max if same else None,
+            "hole_p99": hole_p99 if same else None, "hole_median": hole_median if same else None,
+            "holes_above": above if same else None, "valid_changed": flipped}
 
 
 # ---------------------------------------------------------------------------------------------------------- output
@@ -726,9 +756,9 @@ def num(value, digits: int = 1) -> str:
     return "0" if text in ("-0", "") else text
 
 
-def token_lines(tokens: dict) -> list[str]:
-    """The three lines to type: every token of LINES, "-" for one that is missing."""
-    return [" ".join(f"{key}{tokens.get(key) or '-'}" for key in line) for line in LINES]
+def token_lines(tokens: dict, lines=LINES) -> list[str]:
+    """The lines to type (part 1's three unless ``lines`` says otherwise): every token, "-" for one that is missing."""
+    return [" ".join(f"{key}{tokens.get(key) or '-'}" for key in line) for line in lines]
 
 
 def _plain(value):
@@ -740,28 +770,53 @@ def _plain(value):
 
 
 # ------------------------------------------------------------------------------------------------------------ main
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("run_folder", type=Path, help="The --output folder of a cd_batch run that measured TIFF")
-    parser.add_argument("tiff", type=Path, help="The TIFF that run measured")
-    parser.add_argument("--pages", help="Two pages to use instead of the run's median and slowest, e.g. 94,46")
-    args = parser.parse_args(argv)
+@dataclass
+class Context:
+    """Where both parts start: the run, its TIFF and measuring settings, its measured pages (timings.csv rows), the
+    median and the slowest page (numbers, the run's seconds, images), the GPUs, CPU threads per worker, the start."""
+    run: Path
+    tiff: Path
+    run_info: dict
+    settings: dict
+    timings: list
+    median_page: int
+    median_run_s: float
+    slowest_page: int
+    slowest_run_s: float
+    median_image: np.ndarray
+    slowest_image: np.ndarray
+    gpus: list
+    threads: int
+    started: float
+
+
+def setup(args) -> Context:
+    """The start both parts share: every input is read and checked before anything is measured."""
+    started = time.perf_counter()
     run, tiff = args.run_folder, args.tiff
     if not tiff.is_file():
         raise SystemExit(f"TIFF not found: {tiff}")
     run_info = load_run(run)
-    settings = run_info["settings"]["measure"]
     timings = measured(csv_rows(run / "timings.csv", tiff))
     (median_page, median_run_s), (slowest_page, slowest_run_s) = pick_pages(timings, args.pages)
     gpus = visible_gpus()
     if not gpus:
         raise SystemExit("No GPU found (nvidia-smi / CUDA_VISIBLE_DEVICES)")
+    reader = FrameReader(tiff)
+    try:
+        median_image, slowest_image = reader.read(median_page), reader.read(slowest_page)
+    except (IndexError, ValueError) as error:
+        raise SystemExit(f"{tiff.name}: {error}") from None
+    finally:
+        reader.close()
     threads = max(1, (os.cpu_count() or 1) // len(gpus))  # cd_batch's threads with one worker per GPU
-    started = time.perf_counter()
-    tokens, problems = {}, []
-    details = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "tiff": str(tiff), "run": str(run),
-               "pages": {"median": median_page, "slowest": slowest_page}, "gpus_used": gpus,
-               "threads_per_worker": threads}
+    return Context(run, tiff, run_info, run_info["settings"]["measure"], timings, median_page, median_run_s,
+                   slowest_page, slowest_run_s, median_image, slowest_image, gpus, threads, started)
+
+
+def progress(started: float, problems: list):
+    """step(title) prints a progress line (seconds since ``started``); attempt(title, function) runs one part, and a
+    failure prints one sentence and is kept in ``problems`` (that part's tokens stay "-")."""
 
     def step(title: str) -> None:
         print(f"[{time.perf_counter() - started:4.0f} s] {title}", flush=True)
@@ -772,6 +827,37 @@ def main(argv=None) -> int:
         except Exception as error:
             problems.append(f"{title}: {_describe(error)}")
             print(f"       {title} failed: {_describe(error)}", flush=True)
+    return step, attempt
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("run_folder", type=Path, help="The --output folder of a cd_batch run that measured TIFF")
+    parser.add_argument("tiff", type=Path, help="The TIFF that run measured")
+    parser.add_argument("--pages", help="Two pages to use instead of the run's median and slowest, e.g. 94,46")
+    parser.add_argument("--part", type=int, choices=(1, 2), default=1,
+                        help="2: the follow-up run (scripts/cd_diagnose_part2.py)")
+    args = parser.parse_args(argv)
+    context = setup(args)
+    if args.part == 2:
+        from scripts import cd_diagnose_part2
+        return cd_diagnose_part2.main(context)
+    return part_one(context)
+
+
+def part_one(context: Context) -> int:
+    """This machine; the median page in a worker alone, beside a second one, with one on every GPU; every deblend step
+    of both pages; the numbers. Three lines."""
+    run, tiff, run_info, settings, timings = (context.run, context.tiff, context.run_info, context.settings,
+                                              context.timings)
+    median_page, median_run_s, slowest_page = context.median_page, context.median_run_s, context.slowest_page
+    median_image, slowest_image = context.median_image, context.slowest_image
+    gpus, threads, started = context.gpus, context.threads, context.started
+    tokens, problems = {}, []
+    details = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "tiff": str(tiff), "run": str(run),
+               "pages": {"median": median_page, "slowest": slowest_page}, "gpus_used": gpus,
+               "threads_per_worker": threads}
+    step, attempt = progress(started, problems)
 
     step("this machine")
     files = code_files()
@@ -792,7 +878,7 @@ def main(argv=None) -> int:
     model = {"WDDM": "w", "TCC": "t", "MCDM": "m"}.get(models.pop(), "-") if len(models) == 1 else "-"
     virtual = "v" if any(gpu.get("virtualization", "None") not in ("None", "N/A") for gpu in table or []) else ""
     busy_before = {}
-    for _, index, busy, _, _ in idle:
+    for _, index, busy, *_ in idle:
         busy_before.setdefault(index, []).append(busy)
     gpus_token = f"{len(table)}{model}{virtual}" if table else "-"
     before_token = num(max(np.mean(v) for v in busy_before.values()), 0) if busy_before else "-"
@@ -801,13 +887,6 @@ def main(argv=None) -> int:
                    cpu_alone_ms=cpu_alone, cpu=platform.processor(), platform=platform.platform(),
                    run_commit=run_info.get("git_commit"), measure=settings,
                    run_stage_medians=stage_groups(run_stages(timings)) if timings else None)
-    reader = FrameReader(tiff)
-    try:
-        median_image, slowest_image = reader.read(median_page), reader.read(slowest_page)
-    except (IndexError, ValueError) as error:
-        raise SystemExit(f"{tiff.name}: {error}") from None
-    finally:
-        reader.close()
     seen = {}
 
     step(f"a worker alone on GPU {gpus[0]}: GPU round trip, page {median_page} {TIMED_RUNS + 1} times, synthetic page")
