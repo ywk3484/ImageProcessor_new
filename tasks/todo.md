@@ -410,3 +410,20 @@ dataset whose TIFFs sit in subfolders (cd_batch already searches folders recursi
 - [x] docs/remote_server.md: read check, warm-up, trials on one whole file each into its own --output (a file given
       alone is keyed by its name, so the old "trial pages are kept" was wrong for subfolders), the whole dataset in
       one command, correct reading explanation
+
+# The reference is one page of a TIFF (2026-10-26)
+
+The user: the reference image is a single page in a TIFF, not a whole TIFF file. `--reference-page` already picks
+it, but the commands in the docs never showed it, and the reference was first read by the workers, after run.json
+was written: a wrong page number stopped the run, and the corrected command was then refused as "other settings".
+
+- [x] Main process reads the reference page once, before anything is written; a page that cannot be read stops with
+      a clear message; the workers get that image (no re-reading); the first line names the page used
+- [x] Test: the reference is a page of one of the dataset's own TIFFs; a page past the end is refused and leaves no
+      output; the corrected command then runs
+- [x] docs/remote_server.md: commands with `--reference-page`, the one-page rule, a reference inside the dataset
+- [x] Measure the read on the HDD: first read of the 740-page file's headers 4.9-5.2 s cold, then 0.1-0.3 s (the
+      disk's own cache), so the per-worker reads cost seconds once per run, not more
+- Result: a page past the end now stops with "--reference-page 740 of ...scan_user.tif: IndexError: page 740 is out
+  of range (740 pages)" and leaves no output folder; with page 5 of the same HDD file as the reference, GPU workers:
+  that page's error 0.0, the other pages measured as usual. Tests: 11 passed (test_cd_batch, test_read_speed).

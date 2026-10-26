@@ -5,13 +5,14 @@ page and method.
         --pixel-size 21 --unit nm
 
 Inputs are TIFF files, folders (searched recursively for .tif / .tiff) or wildcards; every page of every file is
-one image. A page is measured only when it holds holes: the error of its phase cross-correlation with --reference
-(an image with holes; --reference-page picks a page of a TIFF) must be below --max-error (default 0.3). The error is
-scikit-image's ``phase_cross_correlation(reference, page, normalization=None)`` error, whole-pixel: 0 when the page
-is the reference pattern at some shift, about 0.5 and more for other patterns (scikit-image's default "phase"
-normalization gives ~1.0 for every pair, so it cannot tell them apart). Pages of another size are compared on the
-centre part both share. --error-function FILE.py:NAME uses your own function NAME(reference, image) -> error instead;
---no-hole-check measures every page.
+one image. A page is measured only when it holds holes: the error of its phase cross-correlation with the reference
+(one page with holes: page --reference-page of the --reference TIFF, 0 = first) must be below --max-error (default
+0.3). The error is scikit-image's ``phase_cross_correlation(reference, page, normalization=None)`` error,
+whole-pixel: 0 when the page is the reference pattern at some shift, about 0.5 and more for other patterns
+(scikit-image's default "phase" normalization gives ~1.0 for every pair, so it cannot tell them apart). Pages of
+another size are compared on the centre part both share. --error-function FILE.py:NAME uses your own function
+NAME(reference, image) -> error instead; --no-hole-check measures every page. The reference page is read once, at the
+start; it may be a page of one of the dataset's own TIFFs.
 
 Each page with holes is measured exactly as by scripts/cd_report.py (same methods, options and defaults; only the
 display outlines, which the numbers do not depend on, are skipped).
@@ -255,7 +256,7 @@ def make_check(settings: dict, xp):
     check = settings["hole_check"]
     if check is None:
         return None
-    reference = read_image(Path(check["reference"]), check["reference_page"])
+    reference = settings["reference_image"]  # read once by the main process
     if check["error_function"]:
         function = load_error_function(check["error_function"])
         return lambda image: float(function(reference, image))
@@ -845,13 +846,17 @@ class Run:
 def build_settings(args) -> dict:
     """What decides the numbers (``measure``, ``hole_check``: checked on resume) and how to run (the rest)."""
     methods = [m for m in ALL_METHODS if m in args.methods]
-    hole_check = None
+    hole_check = reference_image = None
     if not args.no_hole_check:
         if args.reference is None:
             raise SystemExit("Give --reference (an image with holes) or --no-hole-check")
         reference = args.reference.resolve()
         if not reference.is_file():
             raise SystemExit(f"--reference not found: {reference}")
+        try:  # before run.json is written, so that the corrected command is not refused as other settings
+            reference_image = read_image(reference, args.reference_page)
+        except Exception as error:
+            raise SystemExit(f"--reference-page {args.reference_page} of {reference}: {_describe(error)}") from None
         stat = reference.stat()
         hole_check = {"reference": str(reference), "reference_page": args.reference_page,
                       "reference_bytes": stat.st_size, "reference_mtime": int(stat.st_mtime),
@@ -866,6 +871,7 @@ def build_settings(args) -> dict:
                     "tail_area_level": args.tail_level, "tail_window": args.tail_window,
                     "n_angles": 16, "outlines": False},  # outlines only draw maps; the numbers do not use them
         "hole_check": hole_check,
+        "reference_image": reference_image,  # the reference page itself, sent to the workers (not in run.json)
         "pages": pages,
         "backend": args.backend,
         "threads": 1,
@@ -876,8 +882,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("inputs", nargs="+", help="TIFF files, folders (searched recursively) or wildcards")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--reference", type=Path, help="An image with holes, the pattern pages must match")
-    parser.add_argument("--reference-page", type=int, default=0, help="Page of a TIFF --reference (0 = first)")
+    parser.add_argument("--reference", type=Path, help="The TIFF (or other image) holding the reference: one page "
+                        "with holes, the pattern pages must match")
+    parser.add_argument("--reference-page", type=int, default=0, help="The reference's page in that TIFF (0 = first)")
     parser.add_argument("--max-error", type=float, default=0.3,
                         help="Pages whose cross-correlation error with the reference is at least this have no holes")
     parser.add_argument("--error-function", help="FILE.py:NAME, your own NAME(reference, image) -> error")
@@ -912,6 +919,10 @@ def main(argv=None) -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     check_settings(args.output, {"measure": settings["measure"], "hole_check": settings["hole_check"]})
     run = Run(args, settings, files, file_keys(files))
+    if settings["hole_check"] is not None:
+        height, width = settings["reference_image"].shape
+        reference = settings["hole_check"]["reference"]
+        print(f"Reference: page {args.reference_page} of {reference} ({width} x {height} px)", flush=True)
     print(f"{len(files)} TIFF files; {len(run.done)} pages already done in {args.output}", flush=True)
     return run.run_here() if args.in_process else run.run()
 

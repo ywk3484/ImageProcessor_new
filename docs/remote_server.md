@@ -72,26 +72,32 @@ python scripts/read_speed.py /data/dataset1/stripe_001/scan_001.tif
 
 # 2. Once per machine (or new container): the first run compiles the GPU code, ~30 s before the first page
 python scripts/cd_batch.py /data/dataset1/stripe_001/scan_001.tif --reference /data/reference.tif \
-    --output /results/warmup --pixel-size 21 --unit nm --pages 0:10
+    --reference-page 12 --output /results/warmup --pixel-size 21 --unit nm --pages 0:10
 
 # 3. Trials: one whole TIFF (mostly pages with holes), 1, 2 and 3 workers per GPU, each into its own folder;
 #    compare the last lines ("This run: N pages in T s"). Step 1 left the file in RAM, so they time the GPUs.
 for n in 1 2 3; do
   python scripts/cd_batch.py /data/dataset1/stripe_001/scan_001.tif --reference /data/reference.tif \
-      --output /results/trial_w$n --pixel-size 21 --unit nm --workers-per-gpu $n
+      --reference-page 12 --output /results/trial_w$n --pixel-size 21 --unit nm --workers-per-gpu $n
 done
 
 # 4. The whole dataset: every .tif/.tiff in the folder and in all its subfolders, with the best worker count
-python scripts/cd_batch.py /data/dataset1 --reference /data/reference.tif --output /results/dataset1 \
-    --pixel-size 21 --unit nm --workers-per-gpu 2
+python scripts/cd_batch.py /data/dataset1 --reference /data/reference.tif --reference-page 12 \
+    --output /results/dataset1 --pixel-size 21 --unit nm --workers-per-gpu 2
 ```
 
-Keep the reference outside the dataset folder, or it is measured as a page too. The `file` column is each file's
-path below the dataset folder (`stripe_001/scan_001.tif`), and a resumed run skips the (file, page) pairs already in
-`pages.csv`. So run a dataset with one command and resume it with the same command; give trials their own
-`--output` (a file given alone is named without its folder). Running one subfolder at a time into the same
-`--output` would take same-named files of different subfolders as already measured. A run takes hours: start it in
-`tmux` or with `nohup` so that logging out does not stop it.
+The reference is one page: `--reference /data/reference.tif --reference-page 12` uses page 12 of that TIFF and
+nothing else of it (0 is the first page, so ImageJ's slice 13 is page 12). The run reads it once, at the start, and
+its first line names it: `Reference: page 12 of /data/reference.tif (2048 x 1378 px)`. A page number the file does
+not have stops the run before anything is written. The page may also be one of the dataset's own pages
+(`--reference /data/dataset1/stripe_001/scan_001.tif --reference-page 37`): that file is measured as usual. A
+separate reference file belongs outside the dataset folder, or its pages are measured as data too.
+
+The `file` column is each file's path below the dataset folder (`stripe_001/scan_001.tif`), and a resumed run skips
+the (file, page) pairs already in `pages.csv`. So run a dataset with one command and resume it with the same
+command; give trials their own `--output` (a file given alone is named without its folder). Running one subfolder at
+a time into the same `--output` would take same-named files of different subfolders as already measured. A run takes
+hours: start it in `tmux` or with `nohup` so that logging out does not stop it.
 
 ### Reading and run time
 
@@ -115,7 +121,7 @@ taking turns: run `nvidia-cuda-mps-control -d` on the host before the run (in Do
 | Parameter | Default | Meaning |
 |---|---|---|
 | inputs | | TIFF files, folders (searched recursively) or wildcards. All pages of all files are measured. |
-| `--reference`, `--reference-page` | required, `0` | An image with holes. A page counts as having holes when its phase cross-correlation error with it is below `--max-error`. |
+| `--reference`, `--reference-page` | required, `0` | The reference: one page with holes, page `--reference-page` of the `--reference` TIFF (0 = the first page). A page counts as having holes when its phase cross-correlation error with it is below `--max-error`. |
 | `--max-error` | `0.3` | scikit-image's `phase_cross_correlation(reference, page, normalization=None)` error: 0 = the same pattern at some shift. Synthetic test: hole pages 0.16-0.26, noise / lines / pads 0.47-0.61. |
 | `--error-function` | none | `FILE.py:NAME`: your own `NAME(reference, image) -> error` instead (NumPy arrays in, a number out; it may use the GPU). |
 | `--no-hole-check` | off | Measure every page. |

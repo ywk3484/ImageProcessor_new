@@ -104,3 +104,8 @@
   seen). Measured: it first walks every page header through the whole file (13 s cold, one seek per page), then reads
   the pixels. Time a plain read, then each step of the library call, before giving a cause.
 
+- **Show every option the user's own case needs in the example commands, and check inputs before saving state.**
+  The docs' commands had `--reference /data/reference.tif` without `--reference-page` (it was only in the table), so
+  the user read the reference as a whole TIFF; it is one page of one. And the reference page was first read by the
+  workers, after run.json was saved: a wrong page number stopped the run and the corrected command was then refused
+  as "other settings". Read and check every input before writing anything a later run is compared with.

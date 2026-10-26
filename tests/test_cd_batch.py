@@ -116,6 +116,20 @@ def test_batch_resumes_and_refuses_other_settings(dataset, tmp_path):
         main(run + ["--max-error", "0.25"])
 
 
+def test_reference_is_one_page_of_a_tiff_even_one_of_the_dataset(dataset, tmp_path, capsys):
+    data, _, _ = dataset
+    out = tmp_path / "out"
+    run = [str(data), "--reference", str(data / "lot" / "a.tif"), "--output", str(out), "--in-process", *ARGS]
+    with pytest.raises(SystemExit, match=r"--reference-page 4 of .*a\.tif: IndexError: page 4 is out of range"):
+        main(run + ["--reference-page", "4"])  # one past the last page
+    assert not out.exists()  # nothing written, so the corrected command is not refused as other settings
+    main(run + ["--reference-page", "3"])
+    assert f"Reference: page 3 of {data / 'lot' / 'a.tif'} ({W} x {H} px)" in capsys.readouterr().out
+    rows = {(r["file"], int(r["page"])): r for r in _rows(out / "pages.csv")}
+    assert [rows[key]["status"] for key in sorted(rows)] == ["no_holes", "ok", "ok", "no_holes", "no_holes", "ok"]
+    assert float(rows["lot/a.tif", 3]["pcc_error"]) < 1e-6  # the reference page itself, measured as usual
+
+
 def test_workers_survive_a_crash_and_a_hung_page(dataset, tmp_path):
     import tifffile
 
