@@ -129,6 +129,11 @@
   machine, build one script that measures every candidate at once (code version, environment, machine, GPU sharing,
   the real pages' stage split and deblend behaviour, the numbers), verify it here first, and make it print a few
   short lines of labelled tokens in which no letter looks like a digit. Ask for those lines only.
+- **Count the characters before asking for typed output, and say what the goal is before any method.** Part 2
+  printed six lines of about 400 characters of letter tokens; the user, who types them by hand, asked whether I
+  really thought that was typable and what I was even trying to do. Hand-typed output must be the few numbers that
+  decide the next step (about 150 characters at most), each with its meaning in plain words next to it, with the
+  full record left in a file for later questions. And every report starts with the goal in one plain sentence.
 - **A reference that uses the stop rule under test is no reference.** "Today's loop allowed 200 rounds" stopped at
   round 36 by the same 1e-3 rule, 1 nm short of where the loop ends; cures compared with it looked like different
   fixed points. Run the reference to a stop the drift cannot meet by chance (here 1e-5; the plain loop, Anderson and
