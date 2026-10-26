@@ -452,4 +452,17 @@ cells 11 px wide; workers per GPU make no difference.
 - [x] One page of my own 48-page test file never settles either (page 7: 1.67 s deblend, 2.8 s page)
 - [x] GPU busy 59 % of a page here (nvidia-smi); a bigger GPU only speeds up the big kernels (tail_area 0.29 -> 0.17)
 - [x] Blob page: 3.3 s vs 1.7 s; deblend passes 0.65 vs 0.50 s, the rest from full-size (51 x 49) cell stacks
-- [ ] User runs the rounds check (PowerShell paste) on 5 trial pages: rounds used, settled, dropped/added, cell size
+- [x] User ran the rounds check: page 94 (29,638 holes, cells 12x11) 10 + 20 rounds, never settled, deblend 2.43 s
+      of 4.45 s; page 46 (38,386 holes, cells 39x19) hole list changed twice, so 10 + 10 + 30 rounds from scratch,
+      never settled, deblend 8.34 s of 11.09 s (each round 2.5x slower: bigger cells)
+- [x] Cause (page 7 here, wrappers only): the background map's rule "a tile is measured if >= 10 % of its pixels
+      are free, else interpolated from measured tiles". Only 13 % of tiles pass (median tile 7 % free). Tile
+      (13,25) sits at 135/136 free px of the 136 needed: it switches every 4 rounds; each switch moves the
+      background of 1,400 of 2,128 tiles (up to 1.6 grey levels), the fits follow, the tile switches back.
+      p99 change per round repeats 0.0079 0.0049 0.0022 0.0011 forever (stop needs < 0.0006)
+- [x] So the CDs depend on where the loop stops in the cycle: 10 and 30 rounds agree (20 rounds apart = 5
+      cycles), 20 rounds differs (page means up to 0.36 nm, single holes p99 up to 9.3 nm). A repeatability bug,
+      not only speed. Settling pages also switch tiles, but early (round 2), then settle in 7-8 rounds
+- [ ] User runs the tile-switch check (PowerShell paste) on the same 5 trial pages, to confirm this on real data
+- [ ] Then a plan for approval: a background map without the on/off switch (numbers change once, all methods),
+      no restart from scratch after the hole re-check, then the remaining ~1.5 s per page from the remote's stages
