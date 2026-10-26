@@ -101,10 +101,10 @@ GPU implementations are **hybrid**: segmentation stays on CPU (OpenCV), expensiv
 ## Task Management
 
 1. **Plan First**: Write plan to `tasks/todo.md` with checkable items
-2. **Verify Plan**: Check in before starting implementation
+2. **Verify Plan**: Check in before starting implementation (bug reports excepted: just fix them, see 6 above)
 3. **Track Progress**: Mark items complete as you go
 4. **Explain Changes**: High-level summary at each step
-5. **Document Results**: Add review section to `tasks/todo.md`
+5. **Document Results**: Add review section to `tasks/todo.md`; once it passes ~150 lines, move finished sections to `tasks/archive/todo-YYYY-MM.md`
 6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
 
 ## Core Principles
