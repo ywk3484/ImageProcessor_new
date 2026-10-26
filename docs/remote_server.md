@@ -66,38 +66,54 @@ Runs the report's 10 CD methods on every page of every TIFF of one dataset, on a
 page with each method's average CD. Pages without holes are skipped by comparing each page with a reference image
 that has holes.
 
-```bash
-# 1. How fast your disk reads one TIFF (each read from the disk, not from RAM)
-python scripts/read_speed.py /data/dataset1/stripe_001/scan_001.tif
+Run the commands in PowerShell from the repository folder, with your Python environment active. Each command is one
+line, so it pastes as it is; put a path with spaces in double quotes.
 
-# 2. Once per machine (or new container): the first run compiles the GPU code, ~30 s before the first page
-python scripts/cd_batch.py /data/dataset1/stripe_001/scan_001.tif --reference /data/reference.tif \
-    --reference-page 12 --output /results/warmup --pixel-size 21 --unit nm --pages 0:10
+1. How fast your disk reads one TIFF (each read comes from the disk, not from RAM):
 
-# 3. Trials: one whole TIFF (mostly pages with holes), 1, 2 and 3 workers per GPU, each into its own folder;
-#    compare the last lines ("This run: N pages in T s"). Step 1 left the file in RAM, so they time the GPUs.
-for n in 1 2 3; do
-  python scripts/cd_batch.py /data/dataset1/stripe_001/scan_001.tif --reference /data/reference.tif \
-      --reference-page 12 --output /results/trial_w$n --pixel-size 21 --unit nm --workers-per-gpu $n
-done
-
-# 4. The whole dataset: every .tif/.tiff in the folder and in all its subfolders, with the best worker count
-python scripts/cd_batch.py /data/dataset1 --reference /data/reference.tif --reference-page 12 \
-    --output /results/dataset1 --pixel-size 21 --unit nm --workers-per-gpu 2
+```powershell
+python scripts\read_speed.py D:\data\dataset1\stripe_001\scan_001.tif
 ```
 
-The reference is one page: `--reference /data/reference.tif --reference-page 12` uses page 12 of that TIFF and
+2. Once per machine: the first run compiles the GPU code (about 30 s before the first page) and keeps it for later
+   runs.
+
+```powershell
+python scripts\cd_batch.py D:\data\dataset1\stripe_001\scan_001.tif --reference D:\data\reference.tif --reference-page 12 --output D:\results\warmup --pixel-size 21 --unit nm --pages 0:10
+```
+
+3. Trials: one whole TIFF (mostly pages with holes) with 1, 2 and 3 workers per GPU, each into its own folder. The
+   three lines run one after another. Compare their last lines (`This run: N pages in T s`). Step 1 left the file in
+   RAM, so they time the GPUs, not the disk.
+
+```powershell
+python scripts\cd_batch.py D:\data\dataset1\stripe_001\scan_001.tif --reference D:\data\reference.tif --reference-page 12 --output D:\results\trial_w1 --pixel-size 21 --unit nm --workers-per-gpu 1
+python scripts\cd_batch.py D:\data\dataset1\stripe_001\scan_001.tif --reference D:\data\reference.tif --reference-page 12 --output D:\results\trial_w2 --pixel-size 21 --unit nm --workers-per-gpu 2
+python scripts\cd_batch.py D:\data\dataset1\stripe_001\scan_001.tif --reference D:\data\reference.tif --reference-page 12 --output D:\results\trial_w3 --pixel-size 21 --unit nm --workers-per-gpu 3
+```
+
+4. The whole dataset: every .tif / .tiff in the folder and in all its subfolders, with the best worker count from
+   step 3.
+
+```powershell
+python scripts\cd_batch.py D:\data\dataset1 --reference D:\data\reference.tif --reference-page 12 --output D:\results\dataset1 --pixel-size 21 --unit nm --workers-per-gpu 2
+```
+
+The reference is one page: `--reference D:\data\reference.tif --reference-page 12` uses page 12 of that TIFF and
 nothing else of it (0 is the first page, so ImageJ's slice 13 is page 12). The run reads it once, at the start, and
-its first line names it: `Reference: page 12 of /data/reference.tif (2048 x 1378 px)`. A page number the file does
+its first line names it: `Reference: page 12 of D:\data\reference.tif (2048 x 1378 px)`. A page number the file does
 not have stops the run before anything is written. The page may also be one of the dataset's own pages
-(`--reference /data/dataset1/stripe_001/scan_001.tif --reference-page 37`): that file is measured as usual. A
+(`--reference D:\data\dataset1\stripe_001\scan_001.tif --reference-page 37`): that file is measured as usual. A
 separate reference file belongs outside the dataset folder, or its pages are measured as data too.
 
 The `file` column is each file's path below the dataset folder (`stripe_001/scan_001.tif`), and a resumed run skips
 the (file, page) pairs already in `pages.csv`. So run a dataset with one command and resume it with the same
 command; give trials their own `--output` (a file given alone is named without its folder). Running one subfolder at
-a time into the same `--output` would take same-named files of different subfolders as already measured. A run takes
-hours: start it in `tmux` or with `nohup` so that logging out does not stop it.
+a time into the same `--output` would take same-named files of different subfolders as already measured.
+
+A run takes hours. Start it in a PowerShell window on the server; over Remote Desktop, leave with Disconnect, not Sign
+out (signing out stops the run). Do not click into that window while it runs: in the standard console window a click
+starts a text selection, and the run waits until you press Esc.
 
 ### Reading and run time
 
@@ -112,11 +128,10 @@ load, the disk itself is the limit: no reader is faster than it.
 
 Measuring is the slower part: on an RTX 4060 Ti a 2048 x 1378 page with 30,000 holes takes 1.6 s (about 0.8 s on
 the GPU, the rest on the CPU); a page without holes only takes the hole check, ~0.01 s. An RTX 6000 Ada does the GPU
-part several times faster, so there the CPU part decides: run more workers per GPU (`--workers-per-gpu 3` or `4`,
-one CPU core each) until the pages per second stop rising, or the disk's speed is reached (its MB/s divided by
-2.8 MB per page). With several workers per GPU on Linux, NVIDIA's multi-process service lets them share a GPU without
-taking turns: run `nvidia-cuda-mps-control -d` on the host before the run (in Docker the container also needs
-`--ipc=host`).
+part several times faster, so there the CPU part decides. Workers that share a GPU take turns on it (Windows has no
+NVIDIA multi-process service to let them run together), so a second worker helps only by doing its CPU part while
+another uses the GPU; on this Windows PC it did not help. The trials decide: take the worker count after which the
+pages per second stop rising, or the disk's speed is reached (its MB/s divided by 2.8 MB per page).
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -141,5 +156,6 @@ Outputs in `--output`:
 - `run.json`: the settings. Running again into the same `--output` resumes; other method or hole-check settings
   are refused.
 
-Ctrl+C (or `docker stop`) lets the pages being measured finish, then stops; run the same command again to continue.
-In Docker the container needs the GPUs (`--gpus all`, or compose's GPU reservation).
+Ctrl+C lets the pages being measured finish, then stops (Ctrl+C again: at once); run the same command again to
+continue. At the end of a run `pages.csv` and `timings.csv` are sorted by file and page; one that is open in another
+program then (Excel keeps the files it opens locked) stays in the order measured, with all its rows.

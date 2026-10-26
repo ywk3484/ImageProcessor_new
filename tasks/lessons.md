@@ -109,3 +109,8 @@
   the user read the reference as a whole TIFF; it is one page of one. And the reference page was first read by the
   workers, after run.json was saved: a wrong page number stopped the run and the corrected command was then refused
   as "other settings". Read and check every input before writing anything a later run is compared with.
+- **Never infer the target machine from files in the repo; write commands for the shell it really has.** I took the
+  repo's Dockerfile / compose.yaml for the remote and wrote bash loops, `\` continuations, tmux / nohup, MPS and
+  Docker notes; the remote is Windows Server 2022 without Docker, and the first loop the user pasted failed to parse
+  in PowerShell. Ask for (or state) the target OS and shell before writing commands for another machine, and give
+  copy-paste instructions as one plain command per line, without loops or line continuations.

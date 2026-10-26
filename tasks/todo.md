@@ -427,3 +427,17 @@ was written: a wrong page number stopped the run, and the corrected command was 
 - Result: a page past the end now stops with "--reference-page 740 of ...scan_user.tif: IndexError: page 740 is out
   of range (740 pages)" and leaves no output folder; with page 5 of the same HDD file as the reference, GPU workers:
   that page's error 0.0, the other pages measured as usual. Tests: 11 passed (test_cd_batch, test_read_speed).
+
+# The remote is Windows Server 2022, not Docker (2026-10-26)
+
+The user: the step-3 trials command gave a parse error; the remote runs Windows Server 2022 without Docker. The docs
+were written for Linux and bash (I had taken the repo's Dockerfile / compose.yaml for the remote).
+
+- [x] Cause: PowerShell cannot parse the bash loop (its parser: "Missing opening '(' after keyword 'for'"); the `\`
+      line continuations and the lines starting with `--` fail too
+- [x] docs/remote_server.md for PowerShell: one line per command, Windows paths, the three trials as three lines;
+      Remote Desktop Disconnect instead of tmux / nohup; a click into the console pauses the run; no MPS or Docker
+- [x] cd_batch: a results file held open by another program when the run ends (Excel) raised WinError 5 and left a
+      .tmp file (reproduced); now it stays in the order measured, with a note
+- [x] Checked: the docs' PowerShell blocks parse (0 errors); the three trial lines ran one after another in
+      PowerShell on this PC (GPU workers, 1 / 2 / 3 per GPU); tests 12 passed (test_cd_batch, test_read_speed)

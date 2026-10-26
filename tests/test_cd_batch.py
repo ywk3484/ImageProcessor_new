@@ -1,10 +1,11 @@
 import csv
+import sys
 
 import numpy as np
 import pytest
 
 from scripts.benchmark_cd import lattice
-from scripts.cd_batch import FrameReader, file_keys, main, parse_pages, pcc_error
+from scripts.cd_batch import FrameReader, _sorted_rewrite, file_keys, main, parse_pages, pcc_error
 from scripts.cd_report import ALL_METHODS, cd_statistics
 from subpx import measure_cds
 
@@ -128,6 +129,20 @@ def test_reference_is_one_page_of_a_tiff_even_one_of_the_dataset(dataset, tmp_pa
     rows = {(r["file"], int(r["page"])): r for r in _rows(out / "pages.csv")}
     assert [rows[key]["status"] for key in sorted(rows)] == ["no_holes", "ok", "ok", "no_holes", "no_holes", "ok"]
     assert float(rows["lot/a.tif", 3]["pcc_error"]) < 1e-6  # the reference page itself, measured as usual
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows refuses to replace a file another program holds")
+def test_a_results_file_open_in_another_program_at_the_end_keeps_all_rows(tmp_path, capsys):
+    path = tmp_path / "pages.csv"
+    path.write_text("file,page\nb.tif,1\na.tif,0\n", encoding="utf-8")
+    order = lambda row: (row[0], int(row[1]))  # noqa: E731
+    with path.open(encoding="utf-8"):  # held open, as Excel holds the files it opens
+        _sorted_rewrite(path, ["file", "page"], order)
+    assert "open in another program" in capsys.readouterr().out
+    assert path.read_text(encoding="utf-8") == "file,page\nb.tif,1\na.tif,0\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["pages.csv"]  # no temporary file left
+    _sorted_rewrite(path, ["file", "page"], order)  # closed again: sorted
+    assert path.read_text(encoding="utf-8") == "file,page\na.tif,0\nb.tif,1\n"
 
 
 def test_workers_survive_a_crash_and_a_hung_page(dataset, tmp_path):

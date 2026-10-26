@@ -434,7 +434,8 @@ def _drop_partial_line(path: Path) -> None:
 
 
 def _sorted_rewrite(path: Path, fields: list[str], order) -> None:
-    """Rewrite a finished CSV sorted by (file, page) (temporary file, then replace); rows held as lists."""
+    """Rewrite a finished CSV sorted by (file, page) (temporary file, then replace); rows held as lists. A file another
+    program holds open (Windows refuses to replace it; Excel keeps the files it opens) stays in the order measured."""
     with path.open(encoding="utf-8", newline="") as handle:
         reader = csv.reader(handle)
         header = next(reader, None)
@@ -445,7 +446,11 @@ def _sorted_rewrite(path: Path, fields: list[str], order) -> None:
         writer = csv.writer(handle)
         writer.writerow(header or fields)
         writer.writerows(rows)
-    os.replace(temporary, path)
+    try:
+        os.replace(temporary, path)
+    except PermissionError:
+        temporary.unlink()
+        print(f"{path.name} is open in another program: left in the order measured (all rows are there)", flush=True)
 
 
 def _git_commit() -> str | None:
