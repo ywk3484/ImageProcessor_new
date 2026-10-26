@@ -442,6 +442,7 @@ def deblend(
     shape = image.shape
     seeds_xy = np.asarray(seeds_xy, float).reshape(-1, 2)
     n = len(seeds_xy)
+    cpu._validate_iteration_options(n, iterations, tolerance, relaxation, max_iter, init)
     masks = np.asarray(masks, dtype=bool)
     if n == 0:
         return cpu.deblend(image, seeds_xy, masks, origins_xy, iterations=iterations, tile=tile, exclude=exclude,
@@ -529,6 +530,7 @@ def deblend(
         cpu.fit_status(params, masks, caps, status, sigma=_sigma_major(params))
     else:
         params, status = np.asarray(init, dtype=np.float64).copy(), np.full(n, "ok", dtype="U32")
+        cpu.fit_status(params, masks, caps, status, sigma=_sigma_major(params))
 
     model_d = _render_device(global_params(params), shape, radius_cap, radii(params))
     used, converged = 0, False
@@ -538,9 +540,13 @@ def deblend(
         # All cells update at once against last iteration's neighbours, damped (see the CPU module).
         step = np.where(np.isfinite(fitted), fitted - params, 0.0)
         params = params + relaxation * step
+        status = np.full(n, "ok", dtype="U32")
+        cpu.fit_status(params, masks, caps, status, sigma=sigmas(params))
         model_d = _render_device(global_params(params), shape, radius_cap, radii(params))
-        ok = status == "ok"
-        if not ok.any() or np.percentile(np.abs(step[ok][:, 1:]).max(axis=1), 99) < tolerance:
+        ok = (status == "ok") & np.isfinite(fitted).all(axis=1)
+        if not ok.any():
+            break
+        if np.percentile(np.abs(step[ok][:, 1:]).max(axis=1), 99) < tolerance:
             converged = True
             break
     background_d, info = background_of(model_d, params, status)

@@ -5,28 +5,33 @@ page and method.
         --pixel-size 21 --unit nm
 
 Inputs are TIFF files, folders (searched recursively for .tif / .tiff) or wildcards; every page of every file is
-one image. A page is measured only when it holds holes: the error of its phase cross-correlation with the reference
-(one page with holes: page --reference-page of the --reference TIFF, 0 = first) must be below --max-error (default
-0.3). The error is scikit-image's ``phase_cross_correlation(reference, page, normalization=None)`` error,
-whole-pixel: 0 when the page is the reference pattern at some shift, about 0.5 and more for other patterns
-(scikit-image's default "phase" normalization gives ~1.0 for every pair, so it cannot tell them apart). Pages of
+one image. A page is measured when its correlation error with the reference is below --max-error. The reference is
+one page with holes: page --reference-page of the --reference TIFF, 0 = first. The default --hole-check-mode centered
+removes each image's mean before computing scikit-image's whole-pixel correlation error (normalization=None), so
+constant brightness cannot make a blank page match the pattern. Constant images are rejected. Its default threshold
+0.8 is an initial screen, not a calibrated classifier for every dataset; check known hole/non-hole pages. The prior
+uncentered screen is available as --hole-check-mode raw (default threshold 0.3). Explicit --max-error overrides either.
+The error is 0 for the same pattern at some shift and approaches 1 for unrelated patterns. Pages of
 another size are compared on the centre part both share. --error-function FILE.py:NAME uses your own function
 NAME(reference, image) -> error instead; --no-hole-check measures every page. The reference page is read once, at the
 start; it may be a page of one of the dataset's own TIFFs.
 
-Each page with holes is measured exactly as by scripts/cd_report.py (same methods, options and defaults; only the
-display outlines, which the numbers do not depend on, are skipped).
+The default ten methods use the same measurements as scripts/cd_report.py. The additional local_* methods bypass
+Gaussian deblending when requested alone. The batch keeps only numerical results, omitting display data.
 
 Outputs in --output:
     pages.csv    one row per page: file (path below the common input folder), page (0 = first), status (ok or
                  no_holes), pcc_error, holes (cells measured), image_intensity (mean of all pixels, counts),
-                 cell_intensity (mean over the holes of tail_area's mean light above the local level, counts), then
+                 cell_intensity (mean over the holes of tail_area's mean light above the local level, counts),
+                 deblend_converged, deblend_iterations (total across passes), deblend_passes, then
                  per method <method>_valid (holes it measured) and <method>_cd, <method>_cd_x, <method>_cd_y: the
                  mean CD, x width and y width over those holes, in --unit. No other statistics.
     timings.csv  one row per page: seconds of each stage, cell stack size, worker peak memory.
     failed.csv   pages that failed, with the error; the next run tries them again.
-    run.json     the settings. Running again into the same --output resumes (pages already in pages.csv are
-                 skipped); other settings are refused.
+    run.json     the settings, measurement implementation and input identities. Running again into the same --output
+                 resumes (pages already in pages.csv are skipped); changed implementations, settings or inputs are
+                 refused. Use a new output folder for older, unversioned runs.
+    invocations.jsonl  actual elapsed seconds and page counts per invocation (resume gaps are not measured time).
 
 One reader thread reads the files one after another, each front to back, the way a disk reads fastest: no page is
 read twice and the pages are not counted beforehand (on an HDD that alone walks the whole file). Pages already done,
@@ -44,6 +49,7 @@ import csv
 from collections import deque
 from dataclasses import dataclass, field
 import glob
+import hashlib
 import importlib.util
 import json
 import os
@@ -62,20 +68,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.cd_report import ALL_METHODS, _spread, cd_statistics, cell_intensity  # the report's numbers
+from subpx.cd import LOCAL_METHODS
 
-SCHEMA = 1
+SCHEMA = 2
+MEASUREMENT_VERSION = 2
 PREFETCH = 2            # pages sent to a worker before its earlier ones are done
 PROGRESS_SECONDS = 30
 MAX_FAILURES_IN_A_ROW = 20
 STAGES = ("segmentation", "deblend", "gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg",
-          "tail_window", "tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio", "result")
+          "tail_window", "tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio",
+          *LOCAL_METHODS, "result")
 TIMING_FIELDS = (["file", "page", "status", "gpu", "worker", "height", "width", "holes", "stack_h", "stack_w",
                   "window_px", "read_s", "check_s", "measure_s"] + [f"{s}_s" for s in STAGES] + ["peak_rss_mb"])
 FAILED_FIELDS = ["file", "page", "error", "time"]
 
 
 def page_fields(methods) -> list[str]:
-    fields = ["file", "page", "status", "pcc_error", "holes", "image_intensity", "cell_intensity"]
+    fields = ["file", "page", "status", "pcc_error", "holes", "image_intensity", "cell_intensity",
+              "deblend_converged", "deblend_iterations", "deblend_passes"]
     for name in methods:
         fields += [f"{name}_valid", f"{name}_cd", f"{name}_cd_x", f"{name}_cd_y"]
     return fields
@@ -114,6 +124,8 @@ def parse_pages(text: str | None) -> slice:
     try:
         if ":" not in text:
             page = int(text)
+            if page < 0:
+                raise SystemExit(f"--pages counts from the first page (0): no negative numbers, not {text!r}")
             return slice(page, page + 1)
         start, stop = text.split(":", 1)
         pages = slice(int(start) if start.strip() else None, int(stop) if stop.strip() else None)
@@ -215,25 +227,49 @@ def pcc_error(reference, image, *, xp=np) -> float:
 
 
 class PccCheck:
-    """``pcc_error`` against one reference, its spectrum kept per image size (computed once per worker)."""
+    """Correlation error against one reference, caching its spectrum per image size.
 
-    def __init__(self, reference, *, xp=np):
+    ``centered`` removes each image's mean before correlation, so a bright blank
+    cannot match a low-contrast pattern merely through its constant background.
+    A constant or numerically constant image is rejected with error 1. Raw mode
+    retains scikit-image's uncentered error for existing comparisons.
+    """
+
+    def __init__(self, reference, *, xp=np, mode: str = "raw"):
+        if mode not in ("raw", "centered"):
+            raise ValueError("hole-check mode must be 'raw' or 'centered'")
         self.reference = np.asarray(reference, dtype=np.float64)
-        self.xp = xp
+        self.xp, self.mode = xp, mode
         self._spectra = {}
+
+    def _prepare(self, image):
+        xp = self.xp
+        data = xp.asarray(image, dtype=xp.float64)
+        if self.mode == "centered":
+            mean = data.mean()
+            data = data - mean
+            energy = float((data * data).sum())
+            # Reject zero contrast, including roundoff after centering a large offset.
+            scale = max(abs(float(mean)), 1.0)
+            if not np.isfinite(energy) or energy <= data.size * (32 * np.finfo(float).eps * scale) ** 2:
+                return data, 0.0
+            return data, energy
+        return data, float((data * data).sum())
 
     def __call__(self, image) -> float:
         xp = self.xp
         reference, image = _common_centre(self.reference, np.asarray(image))
         shape = image.shape
         if shape not in self._spectra:
-            ref = xp.asarray(reference, dtype=xp.float64)
-            self._spectra[shape] = (xp.fft.rfft2(ref), float((ref * ref).sum()))
+            ref, reference_amp = self._prepare(reference)
+            self._spectra[shape] = (xp.fft.rfft2(ref), reference_amp)
         spectrum, reference_amp = self._spectra[shape]
-        moving = xp.asarray(image, dtype=xp.float64)
+        moving, moving_amp = self._prepare(image)
+        if self.mode == "centered" and (reference_amp <= 0 or moving_amp <= 0):
+            return 1.0
         cc = xp.fft.irfft2(spectrum * xp.conj(xp.fft.rfft2(moving)), s=shape)
         peak = float(xp.abs(cc).max())
-        amp = reference_amp * float((moving * moving).sum())
+        amp = reference_amp * moving_amp
         with np.errstate(divide="ignore", invalid="ignore"):
             return float(np.sqrt(abs(1.0 - peak * peak / amp))) if amp > 0 else float("nan")
 
@@ -260,7 +296,7 @@ def make_check(settings: dict, xp):
     if check["error_function"]:
         function = load_error_function(check["error_function"])
         return lambda image: float(function(reference, image))
-    return PccCheck(reference, xp=xp)
+    return PccCheck(reference, xp=xp, mode=check.get("mode", "raw"))
 
 
 # --------------------------------------------------------------------------------------------------------- measuring
@@ -269,7 +305,10 @@ def page_values(result, image, methods) -> dict:
     stats = cd_statistics(result)
     intensity = cell_intensity(result)
     values = {"holes": len(result.seeds_xy), "image_intensity": float(np.mean(image, dtype=np.float64)),
-              "cell_intensity": _spread(intensity)["mean"] if intensity is not None else float("nan")}
+              "cell_intensity": _spread(intensity)["mean"] if intensity is not None else float("nan"),
+              "deblend_converged": result.meta.get("deblend_converged", ""),
+              "deblend_iterations": result.meta.get("deblend_iterations_used", ""),
+              "deblend_passes": result.meta.get("deblend_passes", "")}
     for name in methods:
         s = stats[name]
         values.update({f"{name}_valid": s["valid"], f"{name}_cd": s["mean"], f"{name}_cd_x": s["mean_x"],
@@ -294,8 +333,9 @@ def measure_page(image: np.ndarray, file_key: str, page: int, settings: dict, ch
     result = measure_cds(image, backend=settings["backend"], device=device, **settings["measure"])
     row.update(page_values(result, image, settings["measure"]["methods"]), status="ok")
     seconds = result.meta.get("seconds", {})
-    timing.update(status="ok", holes=len(result.seeds_xy), stack_h=result.masks.shape[1],
-                  stack_w=result.masks.shape[2], window_px=result.meta.get("tail_window_px", ""),
+    stack_h, stack_w = result.meta.get("cell_stack_shape", result.masks.shape[1:])
+    timing.update(status="ok", holes=len(result.seeds_xy), stack_h=stack_h,
+                  stack_w=stack_w, window_px=result.meta.get("tail_window_px", ""),
                   measure_s=seconds.get("total", ""), **{f"{s}_s": seconds.get(s, "") for s in STAGES})
     return row, timing
 
@@ -461,11 +501,40 @@ def _git_commit() -> str | None:
         return None
 
 
+def measurement_fingerprint() -> str:
+    """Hash the implementation used for these numbers, independently of documentation commits."""
+    names = ["subpx/cd.py", "subpx/types.py", "subpx/backends.py", "scripts/cd_batch.py", "scripts/cd_report.py"]
+    names += [f"subpx/_cpu/{name}.py" for name in
+              ("cd", "cells", "centers", "components", "deblend", "invariant_cd", "local_cd")]
+    names += [f"subpx/_gpu/{name}.py" for name in
+              ("_cuda", "cd", "cells", "deblend", "regions", "upsample", "voronoi", "windows")]
+    digest = hashlib.sha256(f"measurement-version:{MEASUREMENT_VERSION}\n".encode())
+    for name in sorted(names):
+        path = ROOT / name
+        if path.is_file():
+            digest.update(name.encode())
+            digest.update(b"\0")
+            digest.update(path.read_text(encoding="utf-8").encode())
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def input_manifest(files: list[Path], keys: list[str]) -> list[dict]:
+    """Identify each file behind a resume key without reading large TIFF pixel data."""
+    return [{"file": key, "path": str(path.resolve()), "bytes": (stat := path.stat()).st_size,
+             "mtime_ns": stat.st_mtime_ns} for path, key in zip(files, keys)]
+
+
 def check_settings(output: Path, settings: dict) -> None:
     """Write run.json, or make sure a resumed run uses the settings of the earlier one."""
     path = output / "run.json"
+    fingerprint = measurement_fingerprint()
     if path.exists():
         earlier = json.loads(path.read_text(encoding="utf-8"))
+        if (earlier.get("measurement_version") != MEASUREMENT_VERSION
+                or earlier.get("measurement_fingerprint") != fingerprint):
+            raise SystemExit(f"{output} holds results from a different or unversioned measurement implementation; "
+                             "use a new --output folder to keep the comparisons separate")
         before, now = earlier.get("settings", {}), json.loads(json.dumps(settings))
         if before != now:
             keys = sorted({k for k in set(before) | set(now) if before.get(k) != now.get(k)})
@@ -473,6 +542,7 @@ def check_settings(output: Path, settings: dict) -> None:
                              "use another --output or the earlier settings")
         return
     path.write_text(json.dumps({"schema": SCHEMA, "settings": settings, "git_commit": _git_commit(),
+                                "measurement_version": MEASUREMENT_VERSION, "measurement_fingerprint": fingerprint,
                                 "created": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2) + "\n", encoding="utf-8")
 
 
@@ -837,6 +907,10 @@ class Run:
     def finish(self, complete: bool) -> int:
         elapsed = time.perf_counter() - self.started
         done = sum(self.counts.values())
+        invocation = {"finished": time.strftime("%Y-%m-%d %H:%M:%S"), "elapsed_s": elapsed,
+                      "counts": self.counts, "complete": bool(complete), "backend": self.settings["backend"]}
+        with (self.output / "invocations.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(invocation) + "\n")
         print(f"This run: {done} pages in {elapsed:.0f} s ({self.counts['ok']} ok, {self.counts['no_holes']} no "
               f"holes, {self.counts['failed']} failed); results: {self.output / 'pages.csv'}", flush=True)
         if complete:
@@ -850,7 +924,12 @@ class Run:
 
 def build_settings(args) -> dict:
     """What decides the numbers (``measure``, ``hole_check``: checked on resume) and how to run (the rest)."""
-    methods = [m for m in ALL_METHODS if m in args.methods]
+    methods = [m for m in (*ALL_METHODS, *LOCAL_METHODS) if m in args.methods]
+    max_error = args.max_error if args.max_error is not None else (0.8 if args.hole_check_mode == "centered" else 0.3)
+    if not np.isfinite(max_error) or max_error <= 0 or (not args.error_function and max_error > 1):
+        raise SystemExit("--max-error must be positive and finite (at most 1 for the built-in correlation screen)")
+    if args.deblend_iterations < 1 or not np.isfinite(args.deblend_tolerance) or args.deblend_tolerance <= 0:
+        raise SystemExit("--deblend-iterations must be positive and --deblend-tolerance must be positive and finite")
     hole_check = reference_image = None
     if not args.no_hole_check:
         if args.reference is None:
@@ -865,16 +944,22 @@ def build_settings(args) -> dict:
         stat = reference.stat()
         hole_check = {"reference": str(reference), "reference_page": args.reference_page,
                       "reference_bytes": stat.st_size, "reference_mtime": int(stat.st_mtime),
-                      "max_error": args.max_error,
+                      "reference_digest": hashlib.sha256(np.ascontiguousarray(reference_image).tobytes()).hexdigest(),
+                      "max_error": max_error, "mode": args.hole_check_mode,
                       "error_function": str(Path(args.error_function.rpartition(":")[0]).resolve()) + ":"
                       + args.error_function.rpartition(":")[2] if args.error_function else None}
+        if args.error_function:
+            custom_path = Path(args.error_function.rpartition(":")[0])
+            load_error_function(args.error_function)  # validate before saving resume state
+            hole_check["error_function_digest"] = hashlib.sha256(custom_path.read_bytes()).hexdigest()
     pages = parse_pages(args.pages)
     return {
         "measure": {"methods": methods, "seeds": args.seeds, "invert": args.invert, "area_min": args.area_min,
                     "area_max": args.area_max, "pixel_size": args.pixel_size, "unit": args.unit,
                     "half_area_level": args.half_level, "half_area_peak_pixels": args.peak_pixels,
                     "tail_area_level": args.tail_level, "tail_window": args.tail_window,
-                    "n_angles": 16, "outlines": False},  # outlines only draw maps; the numbers do not use them
+                    "deblend_iterations": args.deblend_iterations, "deblend_tolerance": args.deblend_tolerance,
+                    "n_angles": 16, "outlines": False, "metrics_only": True},
         "hole_check": hole_check,
         "reference_image": reference_image,  # the reference page itself, sent to the workers (not in run.json)
         "pages": pages,
@@ -891,12 +976,16 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference", type=Path, help="The TIFF (or other image) holding the reference: one page "
                         "with holes, the pattern pages must match")
     parser.add_argument("--reference-page", type=int, default=0, help="The reference's page in that TIFF (0 = first)")
-    parser.add_argument("--max-error", type=float, default=0.3,
-                        help="Pages whose cross-correlation error with the reference is at least this have no holes")
+    parser.add_argument("--hole-check-mode", choices=("centered", "raw"), default="centered",
+                        help="centered removes constant brightness; raw reproduces the previous screen")
+    parser.add_argument("--max-error", type=float,
+                        help="Reject correlation errors at least this value (default: centered 0.8, raw 0.3)")
     parser.add_argument("--error-function", help="FILE.py:NAME, your own NAME(reference, image) -> error")
     parser.add_argument("--no-hole-check", action="store_true", help="Measure every page")
     parser.add_argument("--pages", help="Pages of every file, e.g. 0:20 (first 20) or 100: (0 = first page)")
-    parser.add_argument("--methods", nargs="+", choices=ALL_METHODS, default=list(ALL_METHODS))
+    parser.add_argument("--methods", nargs="+", choices=(*ALL_METHODS, *LOCAL_METHODS), default=list(ALL_METHODS))
+    parser.add_argument("--deblend-iterations", type=int, default=30)
+    parser.add_argument("--deblend-tolerance", type=float, default=1e-3)
     parser.add_argument("--half-level", type=float, default=0.5)
     parser.add_argument("--peak-pixels", type=float, default=4.0)
     parser.add_argument("--tail-level", type=float, default=0.2)
@@ -927,8 +1016,10 @@ def main(argv=None) -> int:
     if not files:
         raise SystemExit("No .tif / .tiff files in the inputs")
     args.output.mkdir(parents=True, exist_ok=True)
-    check_settings(args.output, {"measure": settings["measure"], "hole_check": settings["hole_check"]})
-    run = Run(args, settings, files, file_keys(files))
+    keys = file_keys(files)
+    check_settings(args.output, {"measure": settings["measure"], "hole_check": settings["hole_check"],
+                                "inputs": input_manifest(files, keys)})
+    run = Run(args, settings, files, keys)
     if settings["hole_check"] is not None:
         height, width = settings["reference_image"].shape
         reference = settings["hole_check"]["reference"]

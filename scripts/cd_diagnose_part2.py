@@ -65,7 +65,6 @@ measure):
 from __future__ import annotations
 
 import csv
-from datetime import datetime
 import json
 import locale
 import os
@@ -275,17 +274,33 @@ def column(rows: list[dict], key: str) -> list[float]:
 
 
 def trial(folder: Path) -> dict | None:
-    """One earlier cd_batch run, from its files alone; None when the folder holds none of 20 hole pages or more. Its
-    wall time runs from run.json's "created" (the start) to the last change of pages.csv (the end)."""
+    """An earlier run with at least 20 measured pages, using recorded invocation durations.
+
+    Legacy runs without durations have unknown throughput. CSV modification times
+    are deliberately unused: sorting, copying and a no-op resume can change them.
+    """
     if not all(os.path.isfile(folder / name) for name in ("run.json", "timings.csv", "pages.csv")):
         return None
     pages = read_rows(folder / "pages.csv")
     holes = sum(row.get("status") == "ok" for row in pages)
     if holes < 20:
         return None
-    created = json.loads((folder / "run.json").read_text(encoding="utf-8"))["created"]
-    wall = (folder / "pages.csv").stat().st_mtime - datetime.strptime(created, "%Y-%m-%d %H:%M:%S").timestamp()
-    wall = wall if wall > 0 else float("nan")
+    durations, recorded_pages, recorded_holes = [], 0, 0
+    path = folder / "invocations.jsonl"
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                invocation = json.loads(line)
+                counts = invocation["counts"]
+                completed = int(counts["ok"]) + int(counts["no_holes"])
+                elapsed = float(invocation["elapsed_s"])
+                if completed > 0 and elapsed > 0 and np.isfinite(elapsed):
+                    durations.append(elapsed)
+                    recorded_pages += completed
+                    recorded_holes += int(counts["ok"])
+            except (ValueError, KeyError, TypeError):
+                continue  # a partial final record cannot establish elapsed time
+    wall = sum(durations) if durations and recorded_pages >= len(pages) else float("nan")
     timings = read_rows(folder / "timings.csv")
     workers = {}  # GPU -> its worker ids
     for row in timings:
@@ -294,7 +309,7 @@ def trial(folder: Path) -> dict | None:
     seconds = column([row for row in timings if row.get("status") == "ok"], "measure_s")
     memory = column(timings, "peak_rss_mb")
     return {"name": folder.name, "workers_per_gpu": max(map(len, workers.values()), default=0), "workers": total,
-            "pages": len(pages), "hole_pages": holes, "wall_s": wall, "hole_pages_per_s": holes / wall,
+            "pages": len(pages), "hole_pages": holes, "wall_s": wall, "hole_pages_per_s": recorded_holes / wall,
             "median_page_s": float(np.median(seconds)) if seconds else None,
             "busy_pct": 100 * sum(seconds) / (total * wall), "read_s": sum(column(timings, "read_s")),
             "peak_memory_gb": max(memory) * total / 1024 if memory else None}
@@ -341,11 +356,14 @@ def batch_command(tiff: Path, output: Path, pages: tuple[int, int], workers_per_
                "--methods", *measure["methods"]]
     for key, flag in FLAGS.items():
         command += [flag, str(measure[key])]
+    for key, flag in (("deblend_iterations", "--deblend-iterations"), ("deblend_tolerance", "--deblend-tolerance")):
+        if key in measure:
+            command += [flag, str(measure[key])]
     command += ["--invert"] if measure["invert"] else []
     if check is None:
         return command + ["--no-hole-check"]
     command += ["--reference", check["reference"], "--reference-page", str(check["reference_page"]),
-                "--max-error", str(check["max_error"])]
+                "--max-error", str(check["max_error"]), "--hole-check-mode", check.get("mode", "raw")]
     return command + (["--error-function", check["error_function"]] if check["error_function"] else [])
 
 
@@ -353,7 +371,7 @@ def settings_differences(a: dict, b: dict) -> int:
     """How many settings differ between two run.json "settings": the keys of measure and of hole_check (a part that is
     null in one of them and not in the other counts once)."""
     count = 0
-    for part in set(a) | set(b):
+    for part in ("measure", "hole_check"):
         x, y = a.get(part), b.get(part)
         if isinstance(x, dict) and isinstance(y, dict):
             count += sum(x.get(key) != y.get(key) for key in set(x) | set(y))

@@ -67,6 +67,8 @@ def write_trial(folder, created, wall, workers, seconds, memory, holes=20, other
                       for p, status in enumerate(statuses))
     (folder / "timings.csv").write_text("file,page,status,gpu,worker,read_s,measure_s,peak_rss_mb\n" + timings,
                                         encoding="utf-8")
+    (folder / "invocations.jsonl").write_text(json.dumps({"elapsed_s": wall,
+        "counts": {"ok": holes, "no_holes": others, "failed": 0}}) + "\n", encoding="utf-8")
     start = datetime.strptime(created, "%Y-%m-%d %H:%M:%S").timestamp()
     os.utime(folder / "pages.csv", (start + wall, start + wall))
 
@@ -90,20 +92,33 @@ def test_earlier_trials_from_their_files(tmp_path):
     assert part2.trial(results / "notes") is None and part2.trial(results / "warmup") is None
 
 
+def test_trial_rate_ignores_csv_timestamp_and_noop_resumes(tmp_path):
+    folder = tmp_path / "run"
+    write_trial(folder, "2026-10-26 10:00:00", 100, [("0", 0)], 4.0, [1000.0])
+    original = part2.trial(folder)
+    os.utime(folder / "pages.csv", None)  # copying or sorting is not measurement time
+    with (folder / "invocations.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"elapsed_s": 10000, "counts": {"ok": 0, "no_holes": 0, "failed": 0}}) + "\n")
+    assert part2.trial(folder)["hole_pages_per_s"] == original["hole_pages_per_s"]
+    (folder / "invocations.jsonl").unlink()
+    assert np.isnan(part2.trial(folder)["wall_s"])  # old timestamps cannot establish runtime
+
+
 def run_settings(reference, **changes):
     """A run.json "settings" as cd_batch writes it, with values other than its defaults."""
     measure = {"methods": [m for m in ALL_METHODS if m in ("projection", "half_area", "tail_area", "foot_area")],
                "seeds": "peaks", "invert": True, "area_min": 5, "area_max": 300, "pixel_size": 21.0, "unit": "nm",
                "half_area_level": 0.45, "half_area_peak_pixels": 3.0, "tail_area_level": 0.25, "tail_window": 1.3,
-               "n_angles": 16, "outlines": False}
+               "n_angles": 16, "outlines": False, "metrics_only": True,
+               "deblend_iterations": 55, "deblend_tolerance": 0.0002}
     hole_check = {"reference": str(reference.resolve()), "reference_page": 1, "reference_bytes": 0,
-                  "reference_mtime": 0, "max_error": 0.25, "error_function": None}
+                  "reference_mtime": 0, "max_error": 0.25, "error_function": None, "mode": "centered"}
     return {"measure": measure, "hole_check": dict(hole_check, **changes)}
 
 
 def without_file_stats(settings):
     check = settings["hole_check"]
-    stats = ("reference_bytes", "reference_mtime")
+    stats = ("reference_bytes", "reference_mtime", "reference_digest", "error_function_digest")
     return {"measure": settings["measure"],
             "hole_check": check and {key: value for key, value in check.items() if key not in stats}}
 

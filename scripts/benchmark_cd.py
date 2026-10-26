@@ -1,19 +1,22 @@
 """Time CD measurement at full-image scale on a synthetic contact-hole lattice.
 
-Defaults match ~2048x5408 px images with a 10 px pitch (~1.1e5 holes). Run it
-on the processing machine to see its own numbers:
+Defaults use the batch's ten report methods, metrics-only output, and a
+1378x2048 px page with a 10 px pitch. Run it on the processing machine:
 
     python scripts/benchmark_cd.py                                   # cpu and gpu, pitch/FWHM 2
     python scripts/benchmark_cd.py --backends gpu --fwhm 7 --seeds peaks   # dense array
-    python scripts/benchmark_cd.py --shape 512 1352 --backends cpu gpu     # quick, 1/16 size
+    python scripts/benchmark_cd.py --shape 256 384 --backends cpu gpu     # quick parity check
+    python scripts/benchmark_cd.py --backends gpu --full-results         # include display data and export
 
-Reports seconds for the measurement and for writing compact outputs, peak
-GPU memory, and (with both backends) how far the GPU results are from the CPU's.
+Reports measurement time, peak live GPU memory, and CPU/GPU agreement.
+Writing compact output is timed only with --full-results. This clean Gaussian
+lattice can converge much faster than real pages; it is not a dataset-time estimate.
 """
 
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import sys
 import tempfile
@@ -26,6 +29,23 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from subpx import measure_cds, save_cd_results
+from scripts.cd_report import ALL_METHODS
+
+
+@contextmanager
+def _batch_gpu(device):
+    """Use the requested GPU and the batch worker's reusable memory pool."""
+    import cupy as cp
+    from subpx._gpu import _cuda
+
+    with cp.cuda.Device(device):
+        saved = _cuda.KEEP_MEMORY
+        _cuda.KEEP_MEMORY = True
+        try:
+            yield
+        finally:
+            _cuda.KEEP_MEMORY = saved
+            _cuda.release_memory()
 
 
 def lattice(shape, pitch: float, fwhm: float, snr: float, *, amplitude=150.0, background=40.0, seed=0):
@@ -54,61 +74,67 @@ def lattice(shape, pitch: float, fwhm: float, snr: float, *, amplitude=150.0, ba
 
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--shape", type=int, nargs=2, default=(2048, 5408), metavar=("H", "W"))
+    parser.add_argument("--shape", type=int, nargs=2, default=(1378, 2048), metavar=("H", "W"))
     parser.add_argument("--pitch", type=float, default=10.0)
     parser.add_argument("--fwhm", type=float, default=5.0)
     parser.add_argument("--snr", type=float, default=20.0)
     parser.add_argument("--seeds", choices=("threshold", "peaks"), default="threshold")
-    parser.add_argument("--methods", nargs="+", default=None, help="Default: all four")
+    parser.add_argument("--methods", nargs="+", default=ALL_METHODS, help="Default: the batch's ten report methods")
     parser.add_argument("--backends", nargs="+", choices=("cpu", "gpu"), default=("cpu", "gpu"))
     parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--full-results", action="store_true", help="Keep display data and time compact export")
     args = parser.parse_args(argv)
 
     image, centers = lattice(tuple(args.shape), args.pitch, args.fwhm, args.snr)
     print(f"Synthetic {image.shape[0]}x{image.shape[1]}: {len(centers)} holes, pitch {args.pitch:g} px, "
           f"FWHM {args.fwhm:g} px (pitch/FWHM {args.pitch / args.fwhm:.2f}), SNR {args.snr:g}, seeds={args.seeds}", flush=True)
+    options = dict(seeds=args.seeds, area_max=200, device=args.device, methods=tuple(args.methods),
+                   n_angles=16, outlines=args.full_results, metrics_only=not args.full_results)
+    print(f"Methods: {', '.join(args.methods)}; "
+          + ("full results" if args.full_results else "metrics only; compact writing skipped"), flush=True)
     results = {}
     for backend in args.backends:
-        hook = None
-        if backend == "gpu":
-            import cupy as cp
+        with _batch_gpu(args.device) if backend == "gpu" else nullcontext():
+            hook = None
+            if backend == "gpu":
+                import cupy as cp
 
-            class PeakHook(cp.cuda.MemoryHook):
-                """Largest GPU memory held by arrays at once."""
-                name = "peak"
+                class PeakHook(cp.cuda.MemoryHook):
+                    """Largest GPU memory held by arrays at once."""
+                    name = "peak"
 
-                def __init__(self):
-                    self.pool, self.peak = cp.get_default_memory_pool(), 0
+                    def __init__(self):
+                        self.pool, self.peak = cp.get_default_memory_pool(), 0
 
-                def malloc_postprocess(self, **kwargs):
-                    self.peak = max(self.peak, self.pool.used_bytes())
+                    def malloc_postprocess(self, **kwargs):
+                        self.peak = max(self.peak, self.pool.used_bytes())
 
-            # Compile the kernels outside the timing (they are cached on disk afterwards).
-            measure_cds(image[:200, :400], backend="gpu", seeds=args.seeds, area_max=400, device=args.device,
-                        methods=None if args.methods is None else tuple(args.methods))
-            hook = PeakHook()
-        start = time.perf_counter()
-        if hook is not None:
-            hook.__enter__()
-        try:
-            result = measure_cds(image, backend=backend, seeds=args.seeds, area_max=400, device=args.device,
-                                 methods=None if args.methods is None else tuple(args.methods))
-        finally:
-            if hook is not None:
-                hook.__exit__(None, None, None)
-        measured = time.perf_counter() - start
-        with tempfile.TemporaryDirectory() as tmp:
+                # Compile the kernels outside the timing (they are cached on disk afterwards).
+                measure_cds(image[:200, :400], backend="gpu", **options)
+                hook = PeakHook()
             start = time.perf_counter()
-            save_cd_results(result, tmp, compact=True)
-            written = time.perf_counter() - start
-        memory = f", peak GPU memory {hook.peak / 2**30:.2f} GiB" if hook is not None else ""
-        print(f"{backend}: measure {measured:.1f} s, write compact {written:.1f} s ({len(result.seeds_xy)} cells, "
-              f"deblend iterations {result.meta.get('deblend_iterations_used')}){memory}", flush=True)
-        for method, m in result.measurements.items():
-            values = m.metrics["cd_equivalent_px"][m.valid]
-            median = f"{np.median(values):.4f}" if values.size else "n/a"
-            print(f"  {method}: {m.valid.sum()}/{len(m.valid)} valid, median CD {median} px", flush=True)
-        results[backend] = result
+            if hook is not None:
+                hook.__enter__()
+            try:
+                result = measure_cds(image, backend=backend, **options)
+            finally:
+                if hook is not None:
+                    hook.__exit__(None, None, None)
+            measured = time.perf_counter() - start
+            writing = "compact writing skipped (metrics only)"
+            if args.full_results:
+                with tempfile.TemporaryDirectory() as tmp:
+                    start = time.perf_counter()
+                    save_cd_results(result, tmp, compact=True)
+                    writing = f"write compact {time.perf_counter() - start:.1f} s"
+            memory = f", peak GPU memory {hook.peak / 2**30:.2f} GiB" if hook is not None else ""
+            print(f"{backend}: measure {measured:.1f} s, {writing} ({len(result.seeds_xy)} cells, "
+                  f"deblend iterations {result.meta.get('deblend_iterations_used')}){memory}", flush=True)
+            for method, m in result.measurements.items():
+                values = m.metrics["cd_equivalent_px"][m.valid]
+                median = f"{np.median(values):.4f}" if values.size else "n/a"
+                print(f"  {method}: {m.valid.sum()}/{len(m.valid)} valid, median CD {median} px", flush=True)
+            results[backend] = result
     if len(results) == 2:
         cpu, gpu = results["cpu"], results["gpu"]
         same_cells = len(cpu.seeds_xy) == len(gpu.seeds_xy) and np.array_equal(cpu.seeds_xy, gpu.seeds_xy)

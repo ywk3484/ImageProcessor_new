@@ -1,7 +1,7 @@
 """GPU kernels behind ``subpx._cpu.invariant_cd._half_area`` on CuPy.
 
 ``grow_regions`` replaces the flood-fill loop (hundreds of small array operations per chunk) and ``top_mean`` the
-full sort behind the averaged peak. Both return the same arrays as the code they replace, bit for bit.
+full sort behind the averaged peak. Regions are identical; peak means agree to floating-point rounding.
 ``measure_regions`` does everything ``_half_area`` derives from the enlarged cells in one kernel (one block per
 cell, no (k, H, W) temporaries): the same elementwise arithmetic and region; only the order of floating-point sums
 differs (thresholds of edge / foot, mean_signal and second moments agree to rounding).
@@ -381,18 +381,19 @@ def grow_regions(above, top, max_steps: int):
 
 
 def _tail_mean(picked, k: int, length: int, n: int):
-    """Mean of each row's picked n largest values over the view ``top_mean`` documents (bit for bit partition)."""
-    tail = cp.empty((k, length), dtype=cp.float64)
-    tail[:, length - n:] = cp.sort(picked, axis=1)
-    return tail[:, length - n:].mean(axis=1)
+    """Average only the picked values, without a padded copy of every original pixel.
+
+    The contiguous reduction can round differently from the original strided partition view; its error is at
+    floating-point roundoff, while storage scales with the selected count instead of the enlarged window.
+    """
+    return cp.sort(picked, axis=1).mean(axis=1)
 
 
 def top_mean(flat, n: int):
-    """``cupy.partition(flat, -n, axis=1)[:, -n:].mean(axis=1)`` bit for bit, without sorting whole rows.
+    """``cupy.partition(flat, -n, axis=1)[:, -n:].mean(axis=1)`` to roundoff, without sorting whole rows.
 
     The n largest values of each row are picked, sorted (CuPy's partition sorts whole rows, so its last n columns
-    are the sorted n largest) and written into the last n columns of an array of the old shape, so that the mean
-    runs over the same view and adds the same values in the same order.
+    are the sorted n largest). Only those n values are retained for the reduction.
     """
     require_cupy()
     k, length = flat.shape

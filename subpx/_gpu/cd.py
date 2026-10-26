@@ -215,9 +215,11 @@ def _chunks(n: int, cell_bytes: int) -> list[slice]:
 def _ellipses(centers, eigenvalues, axes, angles):
     """Batched ``_half_max_ellipse`` (same operations, so equal inputs give equal bits)."""
     sigma = 1 / np.sqrt(eigenvalues)
-    unit_circle = np.column_stack((np.cos(angles), np.sin(angles)))
-    contour = centers[:, None, :] + (unit_circle[None] * (_K * sigma)[:, None, :]) @ axes.transpose(0, 2, 1)
-    contour = np.concatenate((contour, contour[:, :1]), axis=1)
+    contour = None
+    if angles is not None:
+        unit_circle = np.column_stack((np.cos(angles), np.sin(angles)))
+        contour = centers[:, None, :] + (unit_circle[None] * (_K * sigma)[:, None, :]) @ axes.transpose(0, 2, 1)
+        contour = np.concatenate((contour, contour[:, :1]), axis=1)
     covariance = (axes * (sigma * sigma)[:, None, :]) @ axes.transpose(0, 2, 1)
     fit = dict(
         sigma_major_px=sigma[:, 0], sigma_minor_px=sigma[:, 1],
@@ -241,7 +243,7 @@ def _polygon_geometry(contours) -> dict[str, np.ndarray]:
 
 def _ellipse_geometry(contours, sigma, covariance) -> dict[str, np.ndarray]:
     """Batched ``_ellipse_geometry``: analytic area and projections, polygon perimeter."""
-    geometry = _polygon_geometry(contours)
+    geometry = _polygon_geometry(contours) if contours is not None else {"perimeter_px": np.full(len(sigma), np.nan)}
     area = np.pi * _K**2 * np.prod(sigma, axis=1)
     geometry.update(area_px2=area, cd_equivalent_px=2 * np.sqrt(area / np.pi),
                     cd_x_px=2 * _K * np.sqrt(covariance[:, 0, 0]), cd_y_px=2 * _K * np.sqrt(covariance[:, 1, 1]))
@@ -462,19 +464,19 @@ def measure_cells(
 
 def gaussian_method(
     params: np.ndarray, status: np.ndarray, cleaned: np.ndarray, masks: np.ndarray,
-    origins_xy: np.ndarray, n_angles: int,
+    origins_xy: np.ndarray, n_angles: int, *, metrics_only: bool = False,
 ) -> CDMethodResult:
     """GPU ``subpx._cpu.cd.gaussian_method``: fit residuals on the GPU, ellipses vectorized on the host."""
     require_cupy()
     n = len(params)
-    angles = np.arange(n_angles) * (2 * np.pi / n_angles)
+    angles = None if metrics_only else np.arange(n_angles) * (2 * np.pi / n_angles)
     names = cpu.GEOMETRY_METRICS + ("background", "peak_signal") + cpu.FIT_METRICS[:-1] + ("fit_rmse",)
     result = CDMethodResult(
         method="gaussian", centers_xy=np.full((n, 2), np.nan),
-        contours_xy=np.full((n, n_angles + 1, 2), np.nan),
+        contours_xy=np.full((n, 0 if metrics_only else n_angles + 1, 2), np.nan),
         valid=np.zeros(n, dtype=bool), status=np.asarray(status, dtype="U32").copy(),
         metrics={name: np.full(n, np.nan) for name in names},
-        geometry={"eigenvalues": np.full((n, 2), np.nan), "axes": np.full((n, 2, 2), np.nan)},
+        geometry={} if metrics_only else {"eigenvalues": np.full((n, 2), np.nan), "axes": np.full((n, 2, 2), np.nan)},
     )
     if n == 0:
         return result
@@ -509,11 +511,12 @@ def gaussian_method(
     keep = ~degenerate
     cells = finite[keep]
     contour, sigma, covariance, fit = _ellipses(centers[keep], eigenvalues[keep], axes[keep], angles)
-    result.contours_xy[cells] = contour
-    result.geometry["eigenvalues"][cells] = eigenvalues[keep]
-    result.geometry["axes"][cells] = axes[keep]
+    if not metrics_only:
+        result.contours_xy[cells] = contour
+        result.geometry["eigenvalues"][cells] = eigenvalues[keep]
+        result.geometry["axes"][cells] = axes[keep]
     _store(result, cells, fit)
     ok = result.status[cells] == "ok"
-    _store(result, cells[ok], _ellipse_geometry(contour[ok], sigma[ok], covariance[ok]))
+    _store(result, cells[ok], _ellipse_geometry(None if metrics_only else contour[ok], sigma[ok], covariance[ok]))
     result.valid[:] = result.status == "ok"
     return result

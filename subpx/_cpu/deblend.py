@@ -28,7 +28,7 @@ _CHUNK_ELEMENTS = 2_000_000
 
 @dataclass
 class DeblendState:
-    """Converged deblending of one image.
+    """Deblending of one image, including whether the iteration converged.
 
     ``cleaned`` holds each cell's pixels with the background map and all other
     holes' models removed (zero outside the cell). ``params`` are ROI-local.
@@ -264,11 +264,14 @@ def fit_status(p: np.ndarray, masks: np.ndarray, cap: np.ndarray, status: np.nda
     """Mark diverged, non-Gaussian and off-cell fits in ``status`` (in place, from "ok"); ``sigma``: their
     ``sigma_major`` when already known."""
     h, w = masks.shape[1:]
-    sig = sigma_major(p) if sigma is None else sigma
     bad = ~np.isfinite(p).all(axis=1)
+    sig = np.full(len(p), np.nan) if sigma is None else sigma
+    if sigma is None:
+        sig[~bad] = sigma_major(p[~bad])
     status[bad] = "fit_diverged"
     status[~bad & ((p[:, 0] <= 0) | (sig >= 0.999 * cap))] = "non_gaussian_fit"
-    ci = np.round(p[:, 2]).astype(int).clip(0, h - 1), np.round(p[:, 1]).astype(int).clip(0, w - 1)
+    centers = np.where(np.isfinite(p[:, 1:3]), p[:, 1:3], 0.0)
+    ci = np.round(centers[:, 1]).astype(int).clip(0, h - 1), np.round(centers[:, 0]).astype(int).clip(0, w - 1)
     inside = (p[:, 1] >= -0.5) & (p[:, 1] <= w - 0.5) & (p[:, 2] >= -0.5) & (p[:, 2] <= h - 0.5)
     inside &= masks[np.arange(len(p)), ci[0], ci[1]]
     status[(status == "ok") & ~inside] = "center_outside_cell"
@@ -400,6 +403,21 @@ def auto_tile(seeds_xy: np.ndarray, shape: tuple[int, int]) -> tuple[int, float]
     return int(np.clip(round(4 * pitch), 16, max(shape))), pitch
 
 
+def _validate_iteration_options(n, iterations, tolerance, relaxation, max_iter, init):
+    """Validate internal continuation inputs before allocating fitting workspaces."""
+    for name, value, minimum in (("iterations", iterations, 0), ("max_iter", max_iter, 1)):
+        if not np.isfinite(value) or int(value) != value or value < minimum:
+            raise ValueError(f"{name} must be an integer >= {minimum}")
+    if not np.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("tolerance must be finite and nonnegative")
+    if not np.isfinite(relaxation) or not 0 < relaxation <= 1:
+        raise ValueError("relaxation must be in (0, 1]")
+    if init is not None:
+        params = np.asarray(init)
+        if params.shape != (n, 6) or not np.isfinite(params).all():
+            raise ValueError("init must be a finite (number of cells, 6) parameter array")
+
+
 def deblend(
     image: np.ndarray, seeds_xy: np.ndarray, masks: np.ndarray, origins_xy: np.ndarray, *,
     iterations: int = 30, tile: int | None = None, exclude: np.ndarray | None = None,
@@ -425,6 +443,7 @@ def deblend(
     shape = image.shape
     seeds_xy = np.asarray(seeds_xy, float).reshape(-1, 2)
     n = len(seeds_xy)
+    _validate_iteration_options(n, iterations, tolerance, relaxation, max_iter, init)
     origins = np.asarray(origins_xy, dtype=np.int64).reshape(-1, 2)
     if tile is None:
         tile = auto_tile(seeds_xy, shape)[0]
@@ -449,11 +468,12 @@ def deblend(
     if n == 0:
         background, info = background_of(image, np.zeros(shape), np.zeros((0, 6)), np.zeros(0, "U32"))
         return DeblendState(background, np.zeros(shape), np.zeros((0, 6)), np.zeros(0, "U32"),
-                            np.zeros(masks.shape), tile, 0, info, True)
+                            np.zeros(masks.shape), tile, 0, info, False)
     roi_shape = masks.shape[1:]
     raw = windows(image, origins, roi_shape)
     grids = roi_grids(origins, roi_shape)
     radius_cap = int(max(roi_shape))
+    caps = sigma_caps(masks)
 
     # Initialize from the cell-border background; the iterations replace it.
     if init is None:
@@ -466,6 +486,7 @@ def deblend(
                                              max_iter=max_iter)
     else:
         params, status = np.asarray(init, dtype=np.float64).copy(), np.full(n, "ok", dtype="U32")
+        fit_status(params, masks, caps, status)
 
     def global_params(p):
         g = p.copy()
@@ -484,11 +505,16 @@ def deblend(
         # stops the overshoot that strongly overlapping tails otherwise cause.
         step = np.where(np.isfinite(fitted), fitted - params, 0.0)
         params = params + relaxation * step
+        # Status belongs to the accepted damped parameters, not the full proposal.
+        status = np.full(n, "ok", dtype="U32")
+        fit_status(params, masks, caps, status)
         model = render_models(global_params(params), shape, radius_cap=radius_cap)
-        ok = status == "ok"
+        ok = (status == "ok") & np.isfinite(fitted).all(axis=1)
         # The 99th percentile: a few noise-dominated holes jitter indefinitely
         # without affecting the rest, and should not hold every cell to the cap.
-        if not ok.any() or np.percentile(np.abs(step[ok][:, 1:]).max(axis=1), 99) < tolerance:
+        if not ok.any():
+            break  # No usable fits is a failure, not numerical convergence.
+        if np.percentile(np.abs(step[ok][:, 1:]).max(axis=1), 99) < tolerance:
             converged = True
             break
     background, info = background_of(image - model, model, params, status)

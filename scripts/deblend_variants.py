@@ -231,6 +231,7 @@ def deblend(image, seeds_xy, masks, origins_xy, *, iterations=30, tile=None, exc
         cpu.fit_status(params, masks, caps, status, sigma=gpu._sigma_major(params))
     else:
         params, status = np.asarray(init, dtype=np.float64).copy(), np.full(n, "ok", dtype="U32")
+        cpu.fit_status(params, masks, caps, status, sigma=gpu._sigma_major(params))
     if variant.widen:
         # Widths (1 + widen) wider in every direction: L = [[e^u1, 0], [u2, e^u3]] divided by (1 + widen).
         params[:, 3] -= np.log(1 + variant.widen)
@@ -304,6 +305,9 @@ def deblend(image, seeds_xy, masks, origins_xy, *, iterations=30, tile=None, exc
                 new[mask] = mixed
                 update = "anderson"
         last_params, params = params, new
+        status = np.full(n, "ok", dtype="U32")
+        cpu.fit_status(params, masks, caps, status, sigma=sigmas(params))
+        ok = (status == "ok") & np.isfinite(fitted).all(axis=1)
         model_d = gpu._render_device(global_params(params), shape, radius_cap, radii(params))
         p99 = _p99(step, ok)
         if trace is not None:
@@ -325,7 +329,9 @@ def deblend(image, seeds_xy, masks, origins_xy, *, iterations=30, tile=None, exc
                     row["cos"] = float(np.sum(a * b)) / math.sqrt(norms)
             trace.append(row)
         previous = {"params": last_params, "step": step, "ok": ok, "norm": norm, "background": background_d}
-        if not ok.any() or p99 < tolerance:
+        if not ok.any():
+            break
+        if p99 < tolerance:
             converged = True
             break
     background_d, info, _ = background_of(model_d, params, status)

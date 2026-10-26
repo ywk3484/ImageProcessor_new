@@ -28,7 +28,12 @@ METHOD_LABELS = {
     "edge_area": "Area inside the steepest edge (no peak, no background step)",
     "foot_area": "Area inside the foot of the edge, a tail boundary (no peak, no background step)",
     "foot_area_ratio": "Area inside the foot of the edge, foot found once per image (no peak, no background step)",
+    "local_projection": "Raw-cell projection max-slope width",
+    "local_half_area": "Raw-cell area above half height",
+    "local_half_area_min_avg": "Raw-cell half area (minimum level, averaged peak)",
+    "local_tail_area": "Raw-cell area above a low local threshold",
 }
+LOCAL_METHODS = ("local_projection", "local_half_area", "local_half_area_min_avg", "local_tail_area")
 # Opt-in methods insensitive to a per-hole source-pulse scale (subpx/_cpu/invariant_cd.py).
 INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min", "half_area_min_avg",
                      "tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
@@ -53,6 +58,7 @@ def measure_cds(
     background_level: float | None = None,
     background_tile: int | None = None,
     deblend_iterations: int = 30,
+    deblend_tolerance: float = 1e-3,
     pixel_size: float = 1.0,
     unit: str = "px",
     backend: str = "cpu",
@@ -67,6 +73,7 @@ def measure_cds(
     tail_area_level: float = 0.2,
     tail_window: float = 1.2,
     outlines: bool = True,
+    metrics_only: bool = False,
 ) -> CDResult:
     """Extract Voronoi cells and measure their contours and critical dimensions.
 
@@ -119,6 +126,15 @@ def measure_cds(
         ``foot_area_ratio`` finds that foot once per image (median ratio of
         foot to steepest level) and sets each hole's threshold at that ratio
         times its own steepest level.
+        Experimental ``local_projection``, ``local_half_area``,
+        ``local_half_area_min_avg`` and ``local_tail_area`` measure raw
+        Voronoi cells without Gaussian neighbour subtraction. Projection
+        first subtracts the median cell-edge level; the area methods use
+        their own local level and peak. ``local_tail_area`` uses the median
+        edge level, averaged peak and ``tail_area_level`` within the cell,
+        not a wider model-shared window. Neighbour overlap is uncorrected.
+        A local-only call skips deblending entirely; mixed calls use the
+        final deblended seed list for all methods and still pay its cost.
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
         map, then measures every cell with the background and all neighbouring
@@ -156,7 +172,13 @@ def measure_cds(
     background_tile : int, optional
         Background-map tile size in pixels; default about four pitches.
     deblend_iterations : int
-        Maximum deblending iterations; stops earlier on convergence.
+        Iteration cap for the final seed list; stops earlier on convergence.
+        Preliminary seed-revision passes may add iterations. Metadata records
+        the total work across all passes.
+    deblend_tolerance : float
+        Positive fit-parameter stopping tolerance. Smaller values request a
+        tighter stop, subject to the iteration cap. Check
+        ``meta['deblend_converged']``; convergence does not establish accuracy.
     pixel_size : float
         Isotropic length per pixel, used by plots and calibrated CSV columns.
     unit : str
@@ -208,6 +230,12 @@ def measure_cds(
         ``contours_xy``, ``geometry['edge_px']`` and ``perimeter_px`` stay NaN),
         for runs that keep only the numbers; every CD, width, centre, status
         and other metric is unchanged.
+    metrics_only : bool
+        Omit display contours and inputs, and return empty ``(N, 0, 0)``
+        ROI/mask arrays. CDs, widths, centers, validity and fit diagnostics
+        are retained; display perimeters may be NaN. Intended for batch
+        tables, not viewers or compact geometry exports. Local-only calls
+        also use bounded cell-size groups instead of a page-wide padded stack.
 
     Returns
     -------
@@ -240,6 +268,8 @@ def measure_cds(
         raise ValueError("methods must be unique choices from " + ", ".join(METHOD_LABELS))
     if "gaussian" in methods and background != "model":
         raise ValueError("method 'gaussian' requires background='model'")
+    if set(methods) & set(LOCAL_METHODS) and background != "model":
+        raise ValueError("local methods require background='model' (they bypass that model when used alone)")
     if background != "model" and set(methods) & set(INVARIANT_METHODS):
         raise ValueError("methods " + ", ".join(INVARIANT_METHODS) + " require background='model'")
     for name, value in (("nominal_cd", nominal_cd), ("psf_fwhm", psf_fwhm), ("flux_ratio_scale", flux_ratio_scale)):
@@ -257,6 +287,10 @@ def measure_cds(
         raise ValueError("tail_window must be between 0.5 and 2 pitches")
     if not isinstance(outlines, (bool, np.bool_)):
         raise ValueError("outlines must be True or False")
+    if not isinstance(metrics_only, (bool, np.bool_)):
+        raise ValueError("metrics_only must be True or False")
+    if not np.isfinite(deblend_tolerance) or deblend_tolerance <= 0:
+        raise ValueError("deblend_tolerance must be positive")
     if {"disk", "flux_ratio"} & set(methods) and nominal_cd is None and psf_fwhm is None:
         raise ValueError("methods 'disk' and 'flux_ratio' need nominal_cd or psf_fwhm (the imaging blur)")
     for name, value, lower in (("area_min", area_min, 1), ("area_max", area_max, area_min),
@@ -289,6 +323,7 @@ def measure_cds(
             dark_level=float(dark_level), flux_ratio_scale=flux_ratio_scale,
             half_area_level=float(half_area_level), half_area_peak_pixels=float(half_area_peak_pixels),
             tail_area_level=float(tail_area_level), tail_window=float(tail_window), outlines=bool(outlines),
+            metrics_only=bool(metrics_only), deblend_tolerance=float(deblend_tolerance),
         )
 
 
@@ -338,27 +373,34 @@ def _measure_cds(
     smooth_sigma, fit_fraction, peak_min_distance, background_level, background_tile, deblend_iterations,
     pixel_size, unit, backend, cell_backend, device, nominal_cd=None, psf_fwhm=None, dark_level=0.0,
     flux_ratio_scale=None, half_area_level=0.5, half_area_peak_pixels=4.0, tail_area_level=0.2,
-    tail_window=1.2, outlines=True,
+    tail_window=1.2, outlines=True, metrics_only=False, deblend_tolerance=1e-3,
 ) -> CDResult:
     from ._cpu.centers import _segment_binary
     from ._cpu.components import connected_components_stats_cpu
     from ._cpu.cells import _extract_voronoi_rois, compute_voronoi_labels_cpu
 
+    local_methods = tuple(m for m in methods if m in LOCAL_METHODS)
+    only_local = len(local_methods) == len(methods)
+
     if backend == "gpu":
         from ._gpu._cuda import release_memory
         from ._gpu.cd import gaussian_method, measure_cells
-        from ._gpu.deblend import deblend as deblend_gpu
-
-        def deblend(*args, **kwargs):
-            state = deblend_gpu(*args, **kwargs)
-            release_memory()
-            return state
+        from ._gpu.deblend import deblend as _deblend
     else:
         from ._cpu.cd import gaussian_method, measure_cells
-        from ._cpu.deblend import deblend
+        from ._cpu.deblend import deblend as _deblend
 
         def release_memory():
             pass
+
+    deblend_passes = []
+
+    def deblend(*args, **kwargs):
+        kwargs.setdefault("tolerance", deblend_tolerance)
+        state = _deblend(*args, **kwargs)
+        deblend_passes.append(int(state.iterations))
+        release_memory()
+        return state
 
     started = time.perf_counter()
     seconds = {}  # per stage, in meta["seconds"]
@@ -405,6 +447,15 @@ def _measure_cds(
         interior = [True] * len(rows)  # decided after fitting, from each hole's width
     def build_cells(rows):
         seeds_xy = np.asarray(rows, dtype=float).reshape(-1, 6)[:, 4:6].copy()
+        if only_local:
+            from ._cpu.local_cd import cell_boxes
+            if cell_backend == "gpu":
+                from ._gpu.voronoi import compute_voronoi_labels_gpu
+                labels = compute_voronoi_labels_gpu(seeds_xy, img.shape, device=device)
+            else:
+                labels = compute_voronoi_labels_cpu(seeds_xy, img.shape)
+            origins, _ = cell_boxes(rows, img.shape, int(pad))
+            return seeds_xy, labels, np.empty((len(rows), 0, 0)), np.empty((len(rows), 0, 0), bool), origins
         if cell_backend == "gpu" and background == "model":
             # Deblending reads the image itself: no background-filled ROI stack.
             from ._gpu.cells import voronoi_cells
@@ -427,14 +478,36 @@ def _measure_cds(
         "fit_fraction": float(fit_fraction), "half_area_level": float(half_area_level),
         "half_area_peak_pixels": float(half_area_peak_pixels), "tail_area_level": float(tail_area_level),
         "tail_window": float(tail_window), "outlines": bool(outlines), "cell_backend": cell_backend,
-        "measurement_backend": backend, "device": int(device),
+        "measurement_backend": backend, "device": int(device), "metrics_only": bool(metrics_only),
+        "deblend_tolerance": float(deblend_tolerance),
         "segmentation_rescaled": rescaled, "components_before_filter": components_before_filter,
         "coordinates": "global [x, y] pixels; images indexed [y, x]",
         "nominal_cd": nominal_cd, "psf_fwhm": psf_fwhm, "dark_level": float(dark_level), "seconds": seconds,
     }
     background_map = deblend_model = None
     start = time.perf_counter()
-    if background == "border":
+    if only_local:
+        from ._cpu.local_cd import measure_local
+
+        report = np.flatnonzero(interior)
+        measurements, origins, rois, masks, info = measure_local(
+            signal_image, cell_labels, rows, report, methods=local_methods, pad=int(pad), n_angles=int(n_angles),
+            half_area_level=half_area_level, half_area_peak_pixels=half_area_peak_pixels,
+            tail_area_level=tail_area_level, outlines=outlines, metrics_only=metrics_only,
+            store_cells=not metrics_only, xp=_array_module(backend),
+        )
+        seconds.update(info.pop("seconds"))
+        meta.update(info, background="local", measurement_scheme="local", deblend_converged=None,
+                    deblend_iterations_used=0, deblend_passes=0,
+                    background_definition="Per-cell edge levels on raw Voronoi cells; no Gaussian deblending")
+        for measured in measurements.values():
+            measured.metrics["background"] *= sign
+        remap = np.full(len(rows) + 1, -1, dtype=np.int32)
+        remap[report] = np.arange(len(report), dtype=np.int32)
+        cell_labels = remap[cell_labels]
+        release_memory()
+        start = time.perf_counter()
+    elif background == "border":
         measurements = measure_cells(
             rois, masks, origins, all_seeds, methods=methods, n_angles=int(n_angles),
             radial_step=radial_step, smooth_sigma=smooth_sigma, fit_fraction=fit_fraction,
@@ -511,7 +584,7 @@ def _measure_cds(
         report = np.flatnonzero(interior)
         cleaned = state.cleaned[report]
         seconds["deblend"], start = time.perf_counter() - start, time.perf_counter()
-        measured = [m for m in methods if m != "gaussian" and m not in INVARIANT_METHODS]
+        measured = [m for m in methods if m != "gaussian" and m not in INVARIANT_METHODS and m not in LOCAL_METHODS]
         found = measure_cells(
             cleaned, masks[report], origins[report], all_seeds[report], methods=tuple(measured),
             n_angles=int(n_angles), radial_step=radial_step, smooth_sigma=smooth_sigma,
@@ -522,6 +595,7 @@ def _measure_cds(
         if "gaussian" in methods:
             found["gaussian"] = gaussian_method(
                 state.params[report], state.status[report], cleaned, masks[report], origins[report], int(n_angles),
+                metrics_only=metrics_only,
             )
             seconds["gaussian"], start = time.perf_counter() - start, time.perf_counter()
         invariant = tuple(m for m in methods if m in INVARIANT_METHODS)
@@ -536,10 +610,22 @@ def _measure_cds(
                 tail_area_level=tail_area_level, tail_window=tail_window,
                 pitch_px=float(pitch) if np.isfinite(pitch) else None, outlines=outlines,
                 xp=_array_module(backend),
+                metrics_only=metrics_only,
             )
             found.update(extra)
             seconds.update(info.pop("seconds", {}))
             meta.update(info)
+            start = time.perf_counter()
+        if local_methods:
+            from ._cpu.local_cd import measure_local
+            extra, _, _, _, info = measure_local(
+                signal_image, cell_labels, rows, report, methods=local_methods, pad=int(pad), n_angles=int(n_angles),
+                half_area_level=half_area_level, half_area_peak_pixels=half_area_peak_pixels,
+                tail_area_level=tail_area_level, outlines=outlines, metrics_only=metrics_only,
+                store_cells=not metrics_only, xp=_array_module(backend),
+            )
+            found.update(extra)
+            seconds.update(info["seconds"])
             start = time.perf_counter()
         release_memory()
         local_background = sign * map_coordinates(
@@ -547,7 +633,10 @@ def _measure_cds(
         ) if len(report) else np.zeros(0)
         measurements = {}
         for name in methods:
-            found[name].metrics["background"][:] = local_background
+            if name in LOCAL_METHODS:
+                found[name].metrics["background"] *= sign
+            else:
+                found[name].metrics["background"][:] = local_background
             measurements[name] = found[name]
         rois = cleaned
         background_map = sign * state.background_map
@@ -560,7 +649,8 @@ def _measure_cds(
             background_tiles=state.background_info.get("tiles"),
             background_measured_tiles=state.background_info.get("measured_tiles"),
             background_tile_px=int(state.tile_px), background_level=background_level,
-            deblend_iterations=int(deblend_iterations), deblend_iterations_used=int(state.iterations),
+            deblend_iterations=int(deblend_iterations), deblend_iterations_used=sum(deblend_passes),
+            deblend_passes=len(deblend_passes), deblend_pass_iterations=deblend_passes,
             deblend_converged=bool(state.converged),
             deblend_status_counts=dict(zip(statuses.tolist(), counts.tolist())),
             modelled_holes=int(len(rows)), seeds_added_from_residual=int(added),
@@ -576,6 +666,12 @@ def _measure_cds(
         if "tile_medians" in state.background_info:
             deblend_model["tile_medians"] = state.background_info["tile_medians"]
         masks, origins = masks[report], origins[report]
+    meta.setdefault("cell_stack_shape", list(masks.shape[1:]))
+    if metrics_only:
+        rois, masks = np.empty((len(report), 0, 0)), np.empty((len(report), 0, 0), bool)
+        for measured in measurements.values():
+            measured.contours_xy = np.empty((len(report), 0, 2))
+            measured.inputs.clear()
     row_array = np.asarray(rows, dtype=float).reshape(-1, 6)
     result = CDResult(
         image=img.copy(), binary=binary > 0, component_labels=component_labels,
@@ -671,6 +767,8 @@ def save_cd_viewer(result: CDResult, path, *, metric: str = "cd_equivalent_px", 
     up); cell IDs and coordinates shown remain those of the full image.
     """
     from ._cd_viewer import write_viewer
+    if result.meta.get("metrics_only"):
+        raise ValueError("the viewer requires metrics_only=False")
     return write_viewer(result, path, metric=metric, region=region)
 
 
@@ -694,6 +792,8 @@ def save_cd_results(result: CDResult, output, *, compact: bool = False) -> dict[
     The two halves are ``save_cd_tables`` and ``save_cd_arrays``, for
     pipelines that write the CSVs in another process.
     """
+    if compact and result.meta.get("metrics_only"):
+        raise ValueError("compact geometry export requires metrics_only=False; save tables or a full NPZ instead")
     return {**save_cd_tables(result, output, compact=compact), **save_cd_arrays(result, output, compact=compact)}
 
 
@@ -759,6 +859,8 @@ def save_cd_tables(result: CDResult, output, *, compact: bool = False) -> dict[s
 
 def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[str, Path]:
     """The array half of ``save_cd_results``: raw_data.npz and manifest.json (which lists the CSVs too)."""
+    if compact and result.meta.get("metrics_only"):
+        raise ValueError("compact geometry export requires metrics_only=False; save tables or a full NPZ instead")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     names = _output_names(compact)
@@ -832,6 +934,10 @@ def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[s
         },
         "methods": summary, "files": list(names),
     }
+    for name in LOCAL_METHODS:
+        manifest["definitions"][name] = (
+            METHOD_LABELS[name] + "; raw Voronoi cell, no fitted background map or Gaussian neighbour correction; "
+            "local edge level and each cell's own intensity scale. Regions touching the cell border are invalid.")
     paths["manifest.json"].write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return paths
 
@@ -904,6 +1010,9 @@ def _rebuild_rois(arrays: dict, model: dict, meta: dict, sign: float) -> np.ndar
     """Measured cells exactly as ``measure_cds`` stored them in ``CDResult.rois``."""
     signal = arrays["image"].astype(np.float64) * sign
     masks, origins = arrays["masks"], arrays["origins_xy"]
+    if meta.get("background") == "local":
+        from ._cpu.deblend import windows
+        return np.where(masks, windows(signal, origins, masks.shape[1:]), 0.0)
     if meta.get("background") == "border":
         from ._cpu.cells import _extract_voronoi_rois
         rows = np.column_stack((arrays["boxes_xywh"], arrays["seeds_xy"])).tolist()

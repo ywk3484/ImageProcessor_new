@@ -1,5 +1,78 @@
 # Run the contact-hole CD pipeline
 
+## Compare the faster experimental methods on your existing trial
+
+The goal is to compare speed, coverage and CD changes before another whole-dataset run. From the repository root
+in the remote PC's Python environment, run one command with the previous trial folder and its TIFF:
+
+```powershell
+python scripts\cd_compare.py D:\results\trial_w1 D:\data\dataset1\stripe_001\scan_001.tif
+```
+
+This reuses the trial's calibration and measurement settings. It selects up to eight previously measured pages
+across the recorded runtime range, including the slowest. On one GPU it compares the model methods with three
+new methods, `local_half_area`, `local_half_area_min_avg` and `local_tail_area`. The local methods measure raw
+Voronoi cells and skip Gaussian deblending. Both paths are warmed before timing. Two selected pages also get a
+tighter model fit (at least 60 rounds allowed and tolerance at most 1e-4). This is a sensitivity check, **not a
+ground-truth reference**, and its convergence flag is saved. For exact corresponding pages across repeated
+datasets, add `--pages 94,46` to each run. Page indices start at zero.
+
+The last lines give seconds per page for each scheme and the extra-round change in page means. No output needs
+to be typed back to use the results. Everything is saved in a new `comparison_<date>_<time>` folder under the trial:
+
+- `pages.csv`: timings, coverage, convergence and each method's page means.
+- `changes.csv`: model/local differences, both over each method's valid population and over mutually matched
+  positions; unmatched positions and changed valid flags are counted separately.
+- `stability.csv`: ordinary versus tighter model fits, including whether the tighter fit converged.
+- `screen.csv`: raw and centered hole-check errors on selected hole pages and up to two formerly skipped pages.
+  The acceptance columns use the new defaults, explicitly named; they do not reproduce a custom old threshold.
+- `holes/*.npz`: seed positions, measured centers, CD/x/y values in pixels, calibration, validity and statuses.
+  These small files support matching the same physical holes across repeated datasets without saving image stacks.
+- `summary.json`: the settings, code fingerprint, prior-run provenance and timing summary.
+
+The reported speed is **one-device computation on selected hole pages**, excluding disk reads and warm-up.
+It is not whole-dataset throughput or a repeatability ranking. The three area definitions are different from
+the model-based definitions; in particular, local tail area is confined to its cell. A region touching its cell
+boundary is invalid. Independent gain/offset invariance holds for fixed cell territories; detection and cell
+boundaries are still recomputed, and overlapping neighbours remain uncorrected. Compare coverage and corresponding
+pages from all repeated datasets, as well as sensitivity to real size changes. `--local-methods` can additionally
+select `local_projection`, but steepest-edge selection can switch on concave/multilobed shapes, so it is optional.
+
+Local validation on an RTX 4060 Ti, a 1378 x 2048 drifting synthetic page with 39,042 holes: the ten model methods
+took 3.56 s, and all four local methods including projection took 0.50 s (median of three warmed runs). The model
+fit used 30 rounds and did not converge. Local tail area measured 38,037 holes versus 39,035 for model tail area;
+their mean CDs were 133.02 versus 143.40 nm at 21 nm/pixel. This demonstrates speed and changed coverage/definition,
+not better real-data precision. On that page, model metrics-only output took 3.56 s versus 3.67 s retaining display
+arrays; the larger gain comes from bypassing deblending. Real remote gains must come from the comparison above.
+
+After inspecting the pilot, run the local candidates through the normal multi-GPU batch tool into a **new** folder:
+
+```powershell
+python scripts\cd_batch.py D:\data\dataset1 --reference D:\data\reference.tif --reference-page 12 --output D:\results\dataset1_local --pixel-size 21 --unit nm --workers-per-gpu 1 --methods local_half_area local_half_area_min_avg local_tail_area
+```
+
+Existing method names and the batch's default ten methods remain available. Mixing local and model methods in
+one call aligns them to the model's final seed list but still performs deblending; use local-only methods for the
+fast path. Local-only `cell_intensity` is blank because that existing column belongs to model `tail_area`.
+
+New batch outputs include `deblend_converged`, `deblend_iterations` (total over all passes) and `deblend_passes`.
+Local-only rows have blank convergence and zero rounds. Unconverged model rows remain available, explicitly
+flagged. `--deblend-iterations` and `--deblend-tolerance` control the model solve; seed revision can add rounds
+beyond the final-pass budget. Stronger convergence alone does not validate the Gaussian model.
+
+Resume now checks measurement-code and input identities. Older output folders, changed implementations, or changed
+input lists are refused: use a new folder so the comparison cannot silently mix results. Copying the update over an
+existing checkout does not delete or convert earlier results. The numerical fixes correct winding-region growth
+and statuses of accepted fits; pathological cases can therefore change even for an existing method name.
+
+The default hole screen now subtracts each image's mean before correlation and rejects constant images. Its
+initial threshold is `--max-error 0.8`, equivalent to an absolute normalized correlation above 0.6. This is a
+practical initial threshold, not a validated classifier for every dataset; inspect `screen.csv` and skipped-page
+coverage. `--hole-check-mode raw` retains the old calculation and default 0.3 threshold. An explicitly supplied
+`--max-error` overrides either default. For a preselected set known to contain holes, use `--no-hole-check`.
+
+## Single-image inspection
+
 ```powershell
 # TIFF: select page 10 (the 11th image).
 python scripts/analyze_contact_holes.py "D:\data\images.tiff" --page 10 --output "D:\results\page_10"
@@ -138,7 +211,8 @@ pages per second stop rising, or the disk's speed is reached (its MB/s divided b
 |---|---|---|
 | inputs | | TIFF files, folders (searched recursively) or wildcards. All pages of all files are measured. |
 | `--reference`, `--reference-page` | required, `0` | The reference: one page with holes, page `--reference-page` of the `--reference` TIFF (0 = the first page). A page counts as having holes when its phase cross-correlation error with it is below `--max-error`. |
-| `--max-error` | `0.3` | scikit-image's `phase_cross_correlation(reference, page, normalization=None)` error: 0 = the same pattern at some shift. Synthetic test: hole pages 0.16-0.26, noise / lines / pads 0.47-0.61. |
+| `--hole-check-mode` | `centered` | Subtract each image's mean before correlation, rejecting zero contrast. `raw` retains the previous uncentered calculation. |
+| `--max-error` | `0.8` centered; `0.3` raw | Accept errors below this value. Centered 0.8 requires absolute normalized correlation above 0.6; inspect acceptance on your data. |
 | `--error-function` | none | `FILE.py:NAME`: your own `NAME(reference, image) -> error` instead (NumPy arrays in, a number out; it may use the GPU). |
 | `--no-hole-check` | off | Measure every page. |
 | `--pages` | all | e.g. `0:20` (first 20 pages of every file), `100:` (from page 100). Page 0 is the first; no negative numbers. |
@@ -155,7 +229,8 @@ Outputs in `--output`:
 - `timings.csv`: seconds per stage, the cell stack size, and the worker's peak memory for every page.
 - `failed.csv`: pages that failed, with the error. Running the same command again retries them.
 - `run.json`: the settings. Running again into the same `--output` resumes; other method or hole-check settings
-  are refused.
+  or measurement-code/input identities are refused.
+- `invocations.jsonl`: elapsed time and completed-page counts for each invocation, excluding pauses between runs.
 
 Ctrl+C lets the pages being measured finish, then stops (Ctrl+C again: at once); run the same command again to
 continue. At the end of a run `pages.csv` and `timings.csv` are sorted by file and page; one that is open in another

@@ -435,7 +435,7 @@ class _Session:
             result = self.results[key] = self.measure_now(self.images[name])
             seconds = time.perf_counter() - start
         return dict(probe.summary(), seconds=seconds, holes=len(result.seeds_xy),
-                    largest_cell=tuple(int(v) for v in result.masks.shape[1:]),
+                    largest_cell=tuple(int(v) for v in result.meta.get("cell_stack_shape", result.masks.shape[1:])),
                     stage_seconds=result.meta["seconds"], added=result.meta.get("seeds_added_from_residual"),
                     dropped=result.meta.get("seeds_dropped_as_insignificant"))
 

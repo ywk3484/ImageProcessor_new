@@ -1,11 +1,12 @@
 import csv
+import json
 import sys
 
 import numpy as np
 import pytest
 
 from scripts.benchmark_cd import lattice
-from scripts.cd_batch import FrameReader, _sorted_rewrite, file_keys, main, parse_pages, pcc_error
+from scripts.cd_batch import FrameReader, PccCheck, _sorted_rewrite, file_keys, main, parse_pages, pcc_error
 from scripts.cd_report import ALL_METHODS, cd_statistics
 from subpx import measure_cds
 
@@ -79,11 +80,14 @@ def test_batch_measures_the_hole_pages_like_the_report_and_skips_the_others(data
         image = pages[row["file"]][int(row["page"])]
         assert float(row["image_intensity"]) == float(np.mean(image, dtype=np.float64))
         if row["status"] != "ok":
-            assert float(row["pcc_error"]) >= 0.3 and row["holes"] == "" and row["half_area_cd"] == ""
+            assert float(row["pcc_error"]) >= 0.8 and row["holes"] == "" and row["half_area_cd"] == ""
             continue
-        assert float(row["pcc_error"]) < 0.3
+        assert float(row["pcc_error"]) < 0.8
         # The same numbers as measuring the page directly with the report's settings (outlines included).
         result = measure_cds(image, methods=ALL_METHODS, **OPTIONS)
+        assert row["deblend_converged"] == str(result.meta["deblend_converged"])
+        assert int(row["deblend_iterations"]) == result.meta["deblend_iterations_used"]
+        assert int(row["deblend_passes"]) == result.meta["deblend_passes"]
         stats = cd_statistics(result)
         assert int(row["holes"]) == len(result.seeds_xy)
         for name in ALL_METHODS:
@@ -107,6 +111,9 @@ def test_batch_resumes_and_refuses_other_settings(dataset, tmp_path):
     assert len(_rows(out / "pages.csv")) == 6
     main(run)  # nothing left to do
     assert (out / "pages.csv").read_text(encoding="utf-8") == first
+    invocations = [json.loads(line) for line in (out / "invocations.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [sum(entry["counts"].values()) for entry in invocations] == [4, 2, 0]
+    assert all(entry["elapsed_s"] > 0 for entry in invocations)
     lines = first.splitlines(keepends=True)
     (out / "pages.csv").write_text("".join(lines[:3]) + "".join(lines[4:]) + "lot/a.tif,3,ok,0.1", encoding="utf-8")
     main(run)  # the removed row and the row cut off by a "crash" are measured again
@@ -263,3 +270,117 @@ def test_file_keys_and_page_selection(tmp_path):
     assert list(range(10)[parse_pages("4")]) == [4]
     with pytest.raises(SystemExit):
         parse_pages("a:b")
+    with pytest.raises(SystemExit):
+        parse_pages("-1")
+
+
+def _array_module(backend):
+    if backend == "cpu":
+        return np
+    cp = pytest.importorskip("cupy")
+    try:
+        available = cp.cuda.runtime.getDeviceCount() > 0
+    except Exception:
+        available = False
+    if not available:
+        pytest.skip("CUDA device unavailable")
+    return cp
+
+
+@pytest.mark.parametrize("backend", ["cpu", "gpu"])
+def test_centered_screen_rejects_bright_blank_and_noise_and_ignores_gain_and_offset(backend):
+    reference, _ = lattice((256, 320), 10.0, 4.4, 20.0, amplitude=50, background=120)
+    blank = np.full(reference.shape, reference.mean())
+    noise = blank + np.random.default_rng(4).normal(0, 2, reference.shape)
+    # The old screen accepts both because their constant background dominates.
+    assert pcc_error(reference, blank) < 0.3
+    assert pcc_error(reference, noise) < 0.3
+    xp = _array_module(backend)
+    check = PccCheck(reference, mode="centered", xp=xp)
+    assert check(blank) == 1
+    assert check(noise) > 0.99
+    assert check(np.zeros(reference.shape)) == 1
+    moved = np.roll(reference.astype(float), (3, 5), axis=(0, 1))
+    assert check(2.3 * moved + 1500) < 1e-6
+    assert PccCheck(blank, mode="centered", xp=xp)(reference) == 1
+
+
+@pytest.mark.parametrize("backend", ["cpu", "gpu"])
+def test_centered_screen_matches_centered_scikit_image_for_each_crop_size(backend):
+    from skimage.registration import phase_cross_correlation
+    from scripts.cd_batch import _common_centre
+
+    reference = _holes(1)
+    check = PccCheck(reference, mode="centered", xp=_array_module(backend))
+    for image in (_holes(2), _holes(3)[:100, :150], _holes(4)):
+        ref, mov = _common_centre(reference.astype(float), image.astype(float))
+        _, expected, _ = phase_cross_correlation(ref - ref.mean(), mov - mov.mean(), normalization=None)
+        assert check(image) == pytest.approx(expected, abs=1e-12)
+
+
+def test_resume_checks_measurement_code_but_not_unrelated_git_commits(tmp_path, monkeypatch):
+    import scripts.cd_batch as batch
+
+    settings = {"measure": {"methods": ["gaussian"]}, "hole_check": None}
+    monkeypatch.setattr(batch, "measurement_fingerprint", lambda: "algorithm-one")
+    monkeypatch.setattr(batch, "_git_commit", lambda: "commit-one")
+    batch.check_settings(tmp_path, settings)
+    monkeypatch.setattr(batch, "_git_commit", lambda: "documentation-commit")
+    batch.check_settings(tmp_path, settings)
+    monkeypatch.setattr(batch, "measurement_fingerprint", lambda: "algorithm-two")
+    with pytest.raises(SystemExit, match="different or unversioned measurement implementation"):
+        batch.check_settings(tmp_path, settings)
+    (tmp_path / "run.json").write_text(json.dumps({"settings": settings}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="new --output folder"):
+        batch.check_settings(tmp_path, settings)
+
+
+def test_measurement_fingerprint_tracks_measurement_source_only(tmp_path, monkeypatch):
+    import scripts.cd_batch as batch
+
+    (tmp_path / "subpx").mkdir()
+    code = tmp_path / "subpx" / "cd.py"
+    code.write_text("measurement = 1\n", encoding="utf-8")
+    monkeypatch.setattr(batch, "ROOT", tmp_path)
+    before = batch.measurement_fingerprint()
+    (tmp_path / "README.md").write_text("new guide", encoding="utf-8")
+    (tmp_path / "subpx" / "viewer.py").write_text("viewer = 2\n", encoding="utf-8")
+    assert batch.measurement_fingerprint() == before
+    code.write_text("measurement = 2\n", encoding="utf-8")
+    assert batch.measurement_fingerprint() != before
+
+
+def test_resume_cannot_confuse_distinct_inputs_with_the_same_filename(tmp_path):
+    import tifffile
+
+    files = []
+    for folder in ("first", "second"):
+        (tmp_path / folder).mkdir()
+        path = tmp_path / folder / "same.tif"
+        tifffile.imwrite(path, _holes(1), photometric="minisblack")
+        files.append(path)
+    out = tmp_path / "out"
+    options = ["--output", str(out), "--no-hole-check", "--in-process", "--pages", "0:0", *ARGS]
+    assert main([str(files[0]), *options]) == 0
+    with pytest.raises(SystemExit, match="other settings.*inputs"):
+        main([str(files[1]), *options])
+
+
+def test_batch_options_select_mode_specific_defaults_and_local_methods(tmp_path):
+    import tifffile
+    from scripts.cd_batch import argument_parser, build_settings
+
+    parser = argument_parser()
+    args = parser.parse_args(["input.tif", "--output", "out", "--no-hole-check", "--methods", "local_half_area",
+                              "--deblend-iterations", "60", "--deblend-tolerance", "0.0001"])
+    settings = build_settings(args)
+    assert settings["measure"]["methods"] == ["local_half_area"]
+    assert settings["measure"]["metrics_only"] is True
+    assert settings["measure"]["deblend_iterations"] == 60
+    assert settings["measure"]["deblend_tolerance"] == 1e-4
+    reference = tmp_path / "reference.tif"
+    tifffile.imwrite(reference, np.arange(64, dtype=np.uint8).reshape(8, 8))
+    common = ["input.tif", "--output", "out", "--reference", str(reference)]
+    assert build_settings(parser.parse_args(common))["hole_check"]["max_error"] == 0.8
+    assert build_settings(parser.parse_args(common + ["--hole-check-mode", "raw"]))["hole_check"]["max_error"] == 0.3
+    assert build_settings(parser.parse_args(common + ["--max-error", "0.37"]))["hole_check"]["max_error"] == 0.37

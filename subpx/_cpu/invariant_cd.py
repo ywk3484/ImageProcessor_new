@@ -304,26 +304,29 @@ def far_field(table: DiskTable, params_global: np.ndarray, shape: tuple[int, int
     return tail[pad:pad + height, pad:pad + width]
 
 
-def _empty(method: str, n: int, n_angles: int, names: tuple[str, ...]) -> CDMethodResult:
+def _empty(method: str, n: int, n_angles: int, names: tuple[str, ...], *, metrics_only: bool = False) -> CDMethodResult:
     names = ("area_px2", "cd_equivalent_px", "cd_x_px", "cd_y_px", "perimeter_px", "background", "peak_signal") + names
     return CDMethodResult(
-        method=method, centers_xy=np.full((n, 2), np.nan), contours_xy=np.full((n, n_angles + 1, 2), np.nan),
+        method=method, centers_xy=np.full((n, 2), np.nan),
+        contours_xy=np.full((n, 0 if metrics_only else n_angles + 1, 2), np.nan),
         valid=np.zeros(n, bool), status=np.full(n, "no_signal", dtype="U32"),
         metrics={name: np.full(n, np.nan) for name in names},
-        geometry={"center_local": np.full((n, 2), np.nan), "edge_px": np.full((n, n_angles), np.nan)},
+        geometry={"center_local": np.full((n, 2), np.nan),
+                  "edge_px": np.full((n, 0 if metrics_only else n_angles), np.nan)},
     )
 
 
 def _set_ellipses(result: CDMethodResult, rows, centers_local, cd_x, cd_y, origins, n_angles: int) -> None:
     """Axis-aligned ellipse contours (circles when cd_x == cd_y) through ``radial_contours``."""
-    angles = np.arange(n_angles) * (2 * np.pi / n_angles)
-    a, b = cd_x[:, None] / 2, cd_y[:, None] / 2
-    edge = a * b / np.sqrt((b * np.cos(angles)) ** 2 + (a * np.sin(angles)) ** 2)
     result.geometry["center_local"][rows] = centers_local
-    result.geometry["edge_px"][rows] = edge
     result.centers_xy[rows] = centers_local + origins
-    result.contours_xy[rows] = radial_contours(centers_local, edge, origins, n_angles)
-    a, b = a[:, 0], b[:, 0]
+    a, b = cd_x / 2, cd_y / 2
+    if result.contours_xy.shape[1]:
+        angles = np.arange(n_angles) * (2 * np.pi / n_angles)
+        edge = a[:, None] * b[:, None] / np.sqrt((b[:, None] * np.cos(angles)) ** 2
+                                                 + (a[:, None] * np.sin(angles)) ** 2)
+        result.geometry["edge_px"][rows] = edge
+        result.contours_xy[rows] = radial_contours(centers_local, edge, origins, n_angles)
     m = result.metrics
     m["cd_x_px"][rows], m["cd_y_px"][rows] = cd_x, cd_y
     m["area_px2"][rows] = np.pi * a * b
@@ -359,13 +362,13 @@ def _to_numpy(a):
 
 
 def _projection(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_angles: int,
-                step: float = 0.02, xp=np) -> CDMethodResult:
+                step: float = 0.02, xp=np, metrics_only: bool = False) -> CDMethodResult:
     """Summed x/y profiles of each neighbour-removed cell; width between the steepest rise and fall.
 
     On CuPy each cell is computed in the top-left sub-block of the stack that holds its mask (see ``_half_areas``):
     its profile is zero beyond it, so the spline of the whole stack's width gives the same values there."""
     n, h, w = masks.shape
-    result = _empty("projection", n, n_angles, ())
+    result = _empty("projection", n, n_angles, (), metrics_only=metrics_only)
     widths, centers, statuses = np.full((n, 2), np.nan), np.full((n, 2), np.nan), np.full((n, 2), "", dtype="U32")
     peak_signal = result.metrics["peak_signal"]
     buckets = _size_buckets(masks) if xp is not np else [(np.arange(n), h, w)]
@@ -465,10 +468,11 @@ def _grow(region):
 
 def _connected_to_top(above, top, xp=np, max_steps: int | None = None):
     """Per image of the batch, the pixels of ``above`` connected through 8-neighbours to its ``top`` pixel (flat
-    index), grown from it for at most ``max_steps`` (default H + W) steps. On CuPy one kernel does it (same result,
+    index), grown from it for at most ``max_steps`` (default H * W) steps. The default reaches every pixel even
+    along a winding path; growth stops early once unchanged. On CuPy one kernel does it (same result,
     bit for bit)."""
     k, H, W = above.shape
-    max_steps = H + W if max_steps is None else max_steps
+    max_steps = H * W if max_steps is None else max_steps
     if xp is not np:
         from .._gpu.regions import grow_regions
         region = grow_regions(above, top, max_steps)
@@ -487,7 +491,7 @@ def _connected_to_top(above, top, xp=np, max_steps: int | None = None):
 
 def _top_mean(flat, n: int, xp=np):
     """Mean of each row's ``n`` largest values: ``partition(flat, -n)[:, -n:].mean(axis=1)``; on CuPy a selection
-    kernel replaces sorting whole rows (same result, bit for bit)."""
+    kernel replaces sorting whole rows (same result to floating-point rounding)."""
     if xp is not np:
         from .._gpu.regions import top_mean
         return top_mean(flat, n)
@@ -497,7 +501,8 @@ def _top_mean(flat, n: int, xp=np):
 def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_angles: int,
                level: float = 0.5, factor: int = 4, background: str = "median", peak_pixels: float | None = None,
                name: str | None = None, level_masks: np.ndarray | None = None, zone_masks: np.ndarray | None = None,
-               cuts: np.ndarray | None = None, outlines: bool = True, xp=np) -> CDMethodResult:
+               cuts: np.ndarray | None = None, outlines: bool = True, xp=np,
+               metrics_only: bool = False) -> CDMethodResult:
     """Area above the cell's local level + ``level`` x the peak height, on a ``factor``x cubic enlargement.
 
     Local level b: ``background`` ('median' or 'min') of the cell's outermost pixels, or 'zero' (none: the
@@ -512,13 +517,14 @@ def _half_area(cleaned: np.ndarray, masks: np.ndarray, origins: np.ndarray, n_an
     cd_x / cd_y = widths of the equal-area ellipse with the region's x / y second moments; ``mean_signal`` = mean
     of the enlarged cell above b over the region. ``level_masks``: per cell, the pixels b is the median of
     (instead of the outermost pixels). ``outlines=False`` skips the display outline (contours, ``edge_px`` and
-    ``perimeter_px`` stay NaN); every other value is unchanged.
+    ``perimeter_px`` stay NaN); every other value is unchanged. ``metrics_only=True`` also omits storage for
+    contours and angular geometry, returning zero-length angle axes.
     """
     if name is None:
         name = {spec: key for key, spec in _HALF_AREA.items()}[background, peak_pixels is not None]
     spec = {"name": name, "level": level, "background": background, "peak_pixels": peak_pixels, "cuts": cuts}
     return _half_areas(cleaned, masks, origins, n_angles, [spec], factor=factor, level_masks=level_masks,
-                       zone_masks=zone_masks, outlines=outlines, xp=xp)[name]
+                       zone_masks=zone_masks, outlines=outlines, xp=xp, metrics_only=metrics_only)[name]
 
 
 _BUCKETS: list = []  # the last _size_buckets call: (masks, step, result); the same stack is grouped several times
@@ -541,7 +547,8 @@ def _size_buckets(masks, step: int = 4) -> list[tuple[np.ndarray, int, int]]:
 
 def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, factor: int = 4, level_masks=None,
                 zone_masks=None, outlines: bool = True, xp=np, enlarged: dict | None = None,
-                seconds: dict | None = None, rectangles: np.ndarray | None = None) -> dict[str, CDMethodResult]:
+                seconds: dict | None = None, rectangles: np.ndarray | None = None,
+                metrics_only: bool = False) -> dict[str, CDMethodResult]:
     """``_half_area`` for several methods on the same cells (``specs``: dicts of name, level, background,
     peak_pixels, cuts), the same numbers as one call each: each chunk of cells is enlarged once per local level
     (the methods without one share it) and its averaged peak taken once per enlargement. ``enlarged`` (CuPy): a dict
@@ -554,10 +561,12 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
     size), with the operators and constants of the whole stack: everything outside a mask is zero or False there,
     so a cell's values do not change, but a large cell elsewhere no longer makes every cell's work larger."""
     n, h, w = masks.shape
+    outlines = outlines and not metrics_only
     results = {}
     for spec in specs:
         results[spec["name"]] = _empty(spec["name"], n, n_angles, ("local_level", "threshold", "mean_signal")
-                                       + (("steepest_level",) if spec["background"] == "foot" else ()))
+                                       + (("steepest_level",) if spec["background"] == "foot" else ()),
+                                       metrics_only=metrics_only)
     if not n:
         return results
     zy, zx = _zoom_operators(h, factor)[0], _zoom_operators(w, factor)[0]
@@ -574,13 +583,14 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
         iy1, ix1 = iy[:, 0].astype(xp.int32), ix[0].astype(xp.int32)
         if enlarged is not None and n * H * W * 8 > min(4 * 2**30, xp.cuda.Device().mem_info[0] // 4):
             enlarged = None  # too large to keep: a later call enlarges again
-    angles = np.arange(n_angles) * (2 * np.pi / n_angles)
-    radii = np.arange(0.0, float(np.hypot(h, w)), 0.125)  # original px
-    cos_a, sin_a, radii_d = xp.asarray(np.cos(angles)), xp.asarray(np.sin(angles)), xp.asarray(radii)
+    if outlines:
+        angles = np.arange(n_angles) * (2 * np.pi / n_angles)
+        radii = np.arange(0.0, float(np.hypot(h, w)), 0.125)  # original px
+        cos_a, sin_a, radii_d = xp.asarray(np.cos(angles)), xp.asarray(np.sin(angles)), xp.asarray(radii)
     gy, gx = xp.arange(H, dtype=float), xp.arange(W, dtype=float)
     status = {name: np.full(n, "no_signal", dtype="U32") for name in results}
     centers = {name: np.full((n, 2), np.nan) for name in results}
-    edges = {name: np.full((n, n_angles), np.nan) for name in results}
+    edges = {name: np.full((n, n_angles), np.nan) for name in results} if outlines else {}
     buckets = _size_buckets(masks) if gpu else [(np.arange(n), h, w)]
     for bucket, (members, hb, wb) in enumerate(buckets):
         Yb, Xb = int(np.searchsorted(near_y, hb)), int(np.searchsorted(near_x, wb))  # enlarged rows / columns
@@ -673,7 +683,7 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
                     fused = measure_regions(
                         big, mask, iy1_b, ix1_b, mode={"edge": "edge", "foot": "foot", "given": "given"}.get(background, "level"),
                         level=level, peak=None if n_top is None else averaged_peak(kind, big, n_top), cuts=given,
-                        zone=zone, d=factor, sy=sy, sx=sx, max_steps=H + W, regions=outlines)
+                        zone=zone, d=factor, sy=sy, sx=sx, max_steps=Yb * Xb, regions=outlines)
                 if fused is not None:
                     peak, cut, steepest, count, touches = (fused[key] for key in ("peak", "cut", "steepest", "count", "touches"))
                     region, cy, cx = fused.get("region"), fused["cy"], fused["cx"]
@@ -683,7 +693,7 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
                     var_y = fused["syy"] / weight * sy * sy
                 else:
                     peak, cut, steepest, region, count, touches, mean_signal, cy, cx, var_x, var_y = _regions_by_arrays(
-                        big, mask, iy_b, ix_b, gy_b, gx_b, sy, sx, factor, level, background, n_top, zone, given, H + W, xp)
+                        big, mask, iy_b, ix_b, gy_b, gx_b, sy, sx, factor, level, background, n_top, zone, given, Yb * Xb, xp)
                 # Equal-area ellipse with the region's x/y spread: its diameters along x and y (exact for an
                 # axis-aligned ellipse; cd_x * cd_y = cd_equivalent^2).
                 cd_eq = 2 * xp.sqrt(count * (sx * sy) / np.pi)
@@ -919,6 +929,7 @@ def measure_invariant(
     nominal_cd_px: float | None = None, dark_level: float = 0.0, flux_ratio_scale: float | None = None,
     rounds: int = 2, half_area_level: float = 0.5, half_area_peak_pixels: float = 4.0, tail_area_level: float = 0.2,
     tail_window: float = 1.2, pitch_px: float | None = None, outlines: bool = True, xp=np,
+    metrics_only: bool = False,
 ) -> tuple[dict[str, CDMethodResult], dict]:
     """Pulse-invariant methods for the reported cells of a converged ``deblend`` state.
 
@@ -930,6 +941,7 @@ def measure_invariant(
     the ``half_area`` family need neither and run on ``xp`` (NumPy or CuPy). ``tail_area``'s window half-width is
     ``tail_window`` x ``pitch_px`` (the median nearest-neighbour distance of the holes when not given).
     ``outlines=False``: no display outlines for the ``half_area`` family (see ``_half_area``).
+    ``metrics_only=True`` also skips display input windows and contour allocations for every method.
     """
     found, info = {}, {}
     seconds = info["seconds"] = {}  # per method (results are on the host when each call returns)
@@ -938,14 +950,14 @@ def measure_invariant(
     if "projection" in methods or half:
         cleaned_r, masks_r, origins_r = state.cleaned[report], masks[report], origins[report]
     if "projection" in methods:
-        found["projection"] = _projection(cleaned_r, masks_r, origins_r, n_angles, xp=xp)
+        found["projection"] = _projection(cleaned_r, masks_r, origins_r, n_angles, xp=xp, metrics_only=metrics_only)
         seconds["projection"], start = time.perf_counter() - start, time.perf_counter()
     if half:  # one call: half_area_min and half_area_min_avg share their enlargement
         specs = [{"name": name, "level": half_area_level, "background": _HALF_AREA[name][0],
                   "peak_pixels": half_area_peak_pixels if _HALF_AREA[name][1] else None, "cuts": None}
                  for name in half]
         found.update(_half_areas(cleaned_r, masks_r, origins_r, n_angles, specs, outlines=outlines, xp=xp,
-                                 seconds=seconds))
+                                 seconds=seconds, metrics_only=metrics_only))
         start = time.perf_counter()
     tails = [name for name in ("tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
              if name in methods]
@@ -957,12 +969,14 @@ def measure_invariant(
             centers = centers[np.isfinite(centers).all(axis=1)]
             pitch = float(np.median(cKDTree(centers).query(centers, k=2)[0][:, 1])) if len(centers) > 1 else float(max(masks.shape[1:]))
         cells, inside, level_masks, territory, win_origins = _wide_cells(signal, state, masks, origins, report, pitch, tail_window, xp=xp)
-        # For display: the middle of each window (where the region is), cut to 0.75 pitch around the hole.
-        keep = min(cells.shape[1] // 2, int(np.ceil(0.75 * pitch)))
-        middle = cells.shape[1] // 2
-        cut = slice(middle - keep, middle + keep + 1)
-        shown = dict(cells=_to_numpy(cells[:, cut, cut]), inside=_to_numpy(inside[:, cut, cut]),
-                     origins=win_origins + (middle - keep))
+        shown = {}
+        if not metrics_only:
+            # For display: the middle of each window, cut to 0.75 pitch around the hole.
+            keep = min(cells.shape[1] // 2, int(np.ceil(0.75 * pitch)))
+            middle = cells.shape[1] // 2
+            cut = slice(middle - keep, middle + keep + 1)
+            shown = dict(cells=_to_numpy(cells[:, cut, cut]), inside=_to_numpy(inside[:, cut, cut]),
+                         origins=win_origins + (middle - keep))
         seconds["tail_window"], start = time.perf_counter() - start, time.perf_counter()
         backgrounds = {"tail_area": "median", "tail_area_norm": "zero", "edge_area": "edge", "foot_area": "foot",
                        "foot_area_ratio": "given"}
@@ -978,7 +992,7 @@ def measure_invariant(
         r0, c0 = np.clip(-oy, 0, size), np.clip(-ox, 0, size)
         rects = np.column_stack((r0, np.clip(height - oy, r0, size), c0, np.clip(width - ox, c0, size)))
         common = dict(level_masks=level_masks, zone_masks=territory, outlines=outlines, xp=xp, enlarged=enlarged,
-                      rectangles=rects)
+                      rectangles=rects, metrics_only=metrics_only)
         tail_found = _half_areas(cells, inside, win_origins, n_angles,
                                  [{"name": name, "level": tail_area_level, "background": backgrounds[name],
                                    "peak_pixels": half_area_peak_pixels, "cuts": None} for name in first],
@@ -1104,11 +1118,14 @@ def measure_invariant(
 
     rows, local = np.arange(len(report)), p[report]
     # The fit input of each reported cell as an ROI window (NaN outside the cell), for inspection.
-    cells = np.full((len(report), h * w), np.nan, dtype=np.float32)
-    np.put_along_axis(cells, order[report], np.where(valid[report], data[report], np.nan).astype(np.float32), axis=1)
-    inputs = {"cells": cells.reshape(len(report), h, w)}
+    inputs = {}
+    if not metrics_only:
+        cells = np.full((len(report), h * w), np.nan, dtype=np.float32)
+        np.put_along_axis(cells, order[report], np.where(valid[report], data[report], np.nan).astype(np.float32), axis=1)
+        inputs = {"cells": cells.reshape(len(report), h, w)}
     if "disk" in methods:
-        result = _empty("disk", len(report), n_angles, ("amplitude", "local_background", "fit_rmse", "cd_uncertainty_px"))
+        result = _empty("disk", len(report), n_angles, ("amplitude", "local_background", "fit_rmse", "cd_uncertainty_px"),
+                        metrics_only=metrics_only)
         result.status[:] = status[report]
         fitted = np.isfinite(local).all(axis=1)
         _set_ellipses(result, rows[fitted], local[fitted, 1:3], local[fitted, 3], local[fitted, 3],
@@ -1123,7 +1140,8 @@ def measure_invariant(
             m[name][~result.valid] = np.nan
         found["disk"] = result
     if "flux_ratio" in methods:
-        result = _empty("flux_ratio", len(report), n_angles, ("flux", "local_background", "flux_ratio"))
+        result = _empty("flux_ratio", len(report), n_angles, ("flux", "local_background", "flux_ratio"),
+                        metrics_only=metrics_only)
         background = local[:, 4]
         flux = np.where(valid[report], data[report] - background[:, None], 0.0).sum(axis=1)
         lit = background - dark_level

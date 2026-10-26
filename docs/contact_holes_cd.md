@@ -6,6 +6,26 @@ several edge definitions, and export spatial maps, contours, and numerical data.
 The reusable API is `measure_cds`, `plot_cd_map`, `save_cd_results`, and
 `save_cd_viewer`.
 
+For fast experimental comparisons, `measure_cds(..., methods=("local_half_area",
+"local_half_area_min_avg", "local_tail_area"), metrics_only=True)` measures raw
+Voronoi cells without Gaussian deblending. The minimum-level variant uses an
+averaged peak; local tail area uses the cell-edge median and the low threshold
+inside that cell. Neighbour overlap is uncorrected, and border-touching regions
+are invalid. These are additional estimators, not replacements for existing
+methods. Fixed-territory gain/offset invariance does not imply end-to-end
+invariance when detection changes. `local_projection` is also available but can
+switch edges on concave shapes. See the remote guide's comparison command for
+timing, coverage, stability and per-hole outputs.
+
+`metrics_only=True` retains CDs, widths, centers, statuses and fit diagnostics,
+but omits display inputs/contours and returns ROI/mask arrays with shape
+`(N, 0, 0)`. Working dimensions remain in `meta['cell_stack_shape']`; local-only
+measurements use bounded cell-size groups. Use `metrics_only=False` for viewers
+and compact exports. Full NPZ and numeric CSV exports can preserve metrics-only
+results. `deblend_iterations_used` is the total over all passes;
+`deblend_pass_iterations` lists those passes. The positive `deblend_tolerance`
+keyword controls the stopping tolerance; always inspect `deblend_converged`.
+
 For real data on a Windows server, follow the
 [short run guide](remote_server.md) for the command, input parameters, image
 loading, and output files.

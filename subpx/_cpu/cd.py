@@ -93,9 +93,11 @@ def _half_max_ellipse(center, eigenvalues, axes, angles):
     """Closed half-maximum contour and widths of a Gaussian with this precision."""
     sigma = 1 / np.sqrt(eigenvalues)  # major, minor
     k = np.sqrt(2 * np.log(2))
-    unit_circle = np.column_stack((np.cos(angles), np.sin(angles)))
-    contour = center + (unit_circle * (k * sigma)) @ axes.T
-    contour = np.vstack((contour, contour[0]))
+    contour = None
+    if angles is not None:
+        unit_circle = np.column_stack((np.cos(angles), np.sin(angles)))
+        contour = center + (unit_circle * (k * sigma)) @ axes.T
+        contour = np.vstack((contour, contour[0]))
     covariance = (axes * (sigma * sigma)) @ axes.T
     fit = dict(
         sigma_major_px=float(sigma[0]), sigma_minor_px=float(sigma[1]),
@@ -128,7 +130,7 @@ def ellipse_contours(
 
 def _ellipse_geometry(contour, sigma, covariance) -> dict[str, float]:
     k = np.sqrt(2 * np.log(2))
-    geometry = _geometry(contour)
+    geometry = _geometry(contour) if contour is not None else {"perimeter_px": float("nan")}
     # Analytic ellipse area and projected widths avoid polygon sampling error.
     area = float(np.pi * k**2 * np.prod(sigma))
     geometry.update(
@@ -141,20 +143,24 @@ def _ellipse_geometry(contour, sigma, covariance) -> dict[str, float]:
 
 def gaussian_method(
     params: np.ndarray, status: np.ndarray, cleaned: np.ndarray, masks: np.ndarray,
-    origins_xy: np.ndarray, n_angles: int,
+    origins_xy: np.ndarray, n_angles: int, *, metrics_only: bool = False,
 ) -> CDMethodResult:
-    """Half-maximum ellipses of the deblended Gaussian fits (ROI-local params)."""
+    """Half-maximum ellipses of the deblended Gaussian fits (ROI-local params).
+
+    ``metrics_only`` omits contours, reconstruction geometry and polygon perimeter.
+    The analytic CD, area, widths, centers, statuses and fit diagnostics are unchanged.
+    """
     from .deblend import model_on_rois, precision_matrices
 
     n = len(params)
-    angles = np.arange(n_angles) * (2 * np.pi / n_angles)
+    angles = None if metrics_only else np.arange(n_angles) * (2 * np.pi / n_angles)
     names = GEOMETRY_METRICS + ("background", "peak_signal") + FIT_METRICS[:-1] + ("fit_rmse",)
     result = CDMethodResult(
         method="gaussian", centers_xy=np.full((n, 2), np.nan),
-        contours_xy=np.full((n, n_angles + 1, 2), np.nan),
+        contours_xy=np.full((n, 0 if metrics_only else n_angles + 1, 2), np.nan),
         valid=np.zeros(n, dtype=bool), status=np.asarray(status, dtype="U32").copy(),
         metrics={name: np.full(n, np.nan) for name in names},
-        geometry={"eigenvalues": np.full((n, 2), np.nan), "axes": np.full((n, 2, 2), np.nan)},
+        geometry={} if metrics_only else {"eigenvalues": np.full((n, 2), np.nan), "axes": np.full((n, 2, 2), np.nan)},
     )
     if n == 0:
         return result
@@ -173,9 +179,10 @@ def gaussian_method(
             result.status[i] = "non_gaussian_fit"
             continue
         contour, sigma, covariance, fit = _half_max_ellipse(center, eigenvalues, axes, angles)
-        result.contours_xy[i] = contour
-        result.geometry["eigenvalues"][i] = eigenvalues
-        result.geometry["axes"][i] = axes
+        if not metrics_only:
+            result.contours_xy[i] = contour
+            result.geometry["eigenvalues"][i] = eigenvalues
+            result.geometry["axes"][i] = axes
         for name, value in fit.items():
             result.metrics[name][i] = value
         if result.status[i] == "ok":
