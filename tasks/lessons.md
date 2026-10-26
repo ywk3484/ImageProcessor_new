@@ -134,6 +134,12 @@
   really thought that was typable and what I was even trying to do. Hand-typed output must be the few numbers that
   decide the next step (about 150 characters at most), each with its meaning in plain words next to it, with the
   full record left in a file for later questions. And every report starts with the goal in one plain sentence.
+- **Lead with the user's operational questions, and never gate an answer on more typing.** After part 2 the user
+  asked, in capitals, what the throughput is now, how long a dataset takes, why the remote is slow, what the loops
+  are and whether the changes give a realistic time. Every one of those was answerable from numbers already in hand,
+  but my reports had led with tokens, candidates and a request for one more typed line. Each report starts with:
+  pages per second now, hours per dataset now, what changes, hours per dataset after, measured or estimated. Method
+  comes last and only in plain words.
 - **A reference that uses the stop rule under test is no reference.** "Today's loop allowed 200 rounds" stopped at
   round 36 by the same 1e-3 rule, 1 nm short of where the loop ends; cures compared with it looked like different
   fixed points. Run the reference to a stop the drift cannot meet by chance (here 1e-5; the plain loop, Anderson and
