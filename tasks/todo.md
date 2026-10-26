@@ -466,3 +466,36 @@ cells 11 px wide; workers per GPU make no difference.
 - [ ] User runs the tile-switch check (PowerShell paste) on the same 5 trial pages, to confirm this on real data
 - [ ] Then a plan for approval: a background map without the on/off switch (numbers change once, all methods),
       no restart from scratch after the hole re-check, then the remaining ~1.5 s per page from the remote's stages
+
+# One diagnostic for the remote (2026-10-26, approved plan)
+
+The user types everything from the remote by hand: one command, three short lines back, no more pastes.
+
+- [x] scripts/cd_diagnose.py RUN_FOLDER TIFF [--pages A,B]: machine (code fingerprint, CUDA/CuPy settings, GPUs and
+      driver model, other load, latency, FP64, CPU), real pages (alone vs every GPU busy vs the trial, GPU busy,
+      stage groups, deblend rounds/passes/split, size groups, tile switches, slowest page), numbers (same page twice,
+      stop 1-3 rounds later, GPU vs CPU on a crop); diagnosis.txt with everything
+- [x] Run here under PowerShell as the user will; check against earlier separate measurements; robustness cases
+- [x] tests/test_cd_diagnose.py: page picking, fingerprint ignores CRLF, token line with missing values
+- [x] Commit + push; my own line recorded below as the reference
+
+## Review
+
+- Reference lines (this PC, RTX 4060 Ti, speed_w1 run of stripe1_board1.tif, pages 20 and 7, 56 s, `.venv` Python
+  3.11; the commit field reads `8526d+1` before the commit, the new commit after it):
+  `v8ea8/8526d+1/fc874 n0 p= wa-n0 u1w/1/1 c51/51/12 a30/401`
+  `x1.6/7/= f1.9 t1.6/2.7/1.6/1.6 m0.5/0.3/0.6/0.2 h61/87 d7/1/56/35/5 j1/12x13 y2/0/0/5`
+  `r2.9/30/2/2/13x13/1 e0/0/0 k0/0`
+- Agrees with the earlier separate checks: page 20 settles in 7 rounds (1.6 s); page 7 runs 10 + 20 rounds (2 passes),
+  2.9 s; GPU = CPU code on a crop (0); same page twice 0; a second worker on one GPU 1.6 -> 2.7 s (turns on WDDM).
+- `--pages 7,12`: tile switches 6, cycle length 4, last steps 79/49/22/11 x1e-4, k 0.38/9.58 nm (the stop-round
+  dependence found before). `--pages 2,12` (a page without holes forced in): 50 rounds in 3 passes, 36 size groups,
+  35x35 cells, 4.2 s; its fresh worker's first page 8.1 s. Kernels are cached per source and options, never per cell
+  size, so that is not per-size compiling; the f token and r's last field measure the first-page cost.
+- Robustness: missing run.json / timings.csv rows / TIFF, bad --pages, page out of range: one sentence, no traceback.
+- Letters inside values were changed so none looks like a digit (power plan b/s -> a/p, opencv o -> v, scipy s -> p,
+  synthetic i/r -> d/n, "holes" -> d); the n token now names the slow settings that are on, the commit field counts
+  the CD files that differ (+N). tests/test_cd_diagnose.py: 9 tests.
+- The interpreter matters here: PowerShell's `python` on this PC is C:\Python313 without tifffile; the runs above use
+  `.venv\Scripts\python.exe`. On the remote the user's own environment is the one the batch ran with.
+- Waiting for the user's 3 lines. No fix before they are back.

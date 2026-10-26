@@ -123,3 +123,9 @@
   settles, and find the cause of each slow page.
 - **Never call a partial fix "fixed".** The blob page went from 15 s to 3.3 s (normal page 1.7 s): the numbers were
   fixed, the time only partly (full-size cell stacks remain). Say what is left, with its cost.
+- **The user types every line from the remote by hand: give one command and a short result, never a paste.** I
+  explained the slowness one hypothesis at a time and each time asked the user to paste a long PowerShell script and
+  type back its output; they called it using them as a testbed and stopped trusting the diagnosis. For another
+  machine, build one script that measures every candidate at once (code version, environment, machine, GPU sharing,
+  the real pages' stage split and deblend behaviour, the numbers), verify it here first, and make it print a few
+  short lines of labelled tokens in which no letter looks like a digit. Ask for those lines only.

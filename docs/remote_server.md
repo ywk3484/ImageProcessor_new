@@ -126,9 +126,10 @@ whole file, and only then the pixels; on an HDD that is one seek per page. Cold 
 either way, so `maxworkers` makes no difference. If `scripts/read_speed.py`'s plain read takes as long as your usual
 load, the disk itself is the limit: no reader is faster than it.
 
-Measuring is the slower part: on an RTX 4060 Ti a 2048 x 1378 page with 30,000 holes takes 1.6 s (about 0.8 s on
-the GPU, the rest on the CPU); a page without holes only takes the hole check, ~0.01 s. An RTX 6000 Ada does the GPU
-part several times faster, so there the CPU part decides. Workers that share a GPU take turns on it (Windows has no
+Measuring is the slower part: on an RTX 4060 Ti a synthetic 2048 x 1378 page with 30,000 holes takes 1.6 s (about
+0.8 s on the GPU, the rest on the CPU); a page without holes only takes the hole check, ~0.01 s. Real pages are
+slower: on 4 x RTX 6000 Ada a real page with holes took 3.5 s per GPU (2026-10-26); `scripts/cd_diagnose.py` (below)
+finds out why on your machine. Workers that share a GPU take turns on it (Windows has no
 NVIDIA multi-process service to let them run together), so a second worker helps only by doing its CPU part while
 another uses the GPU; on this Windows PC it did not help. The trials decide: take the worker count after which the
 pages per second stop rising, or the disk's speed is reached (its MB/s divided by 2.8 MB per page).
@@ -159,3 +160,28 @@ Outputs in `--output`:
 Ctrl+C lets the pages being measured finish, then stops (Ctrl+C again: at once); run the same command again to
 continue. At the end of a run `pages.csv` and `timings.csv` are sorted by file and page; one that is open in another
 program then (Excel keeps the files it opens locked) stays in the order measured, with all its rows.
+
+## Why pages take as long as they do (`scripts/cd_diagnose.py`)
+
+One command after a trial (step 3 above), with that trial's `--output` folder and its TIFF, while nothing else uses
+the GPUs:
+
+```powershell
+python scripts\cd_diagnose.py D:\results\trial_w1 D:\data\dataset1\stripe_001\scan_001.tif
+```
+
+It takes 2-5 minutes and changes nothing. It measures the trial's median and slowest page with holes again, in
+workers started as the batch starts them: one alone on a GPU, two on one GPU, one on every GPU, then one that times
+every deblend step. It also times the machine (CPU, GPU round trip, a fixed synthetic page) and checks the numbers
+(same page twice, against `pages.csv`, GPU against CPU code, 1-3 more deblend rounds). It ends with a summary and
+three short lines; type only those three lines back. On this PC (one RTX 4060 Ti, synthetic test file) they read:
+
+```
+v8ea8/8526d+1/fc874 n0 p= wa-n0 u1w/1/1 c51/51/12 a30/401
+x1.6/7/= f1.9 t1.6/2.7/1.6/1.6 m0.5/0.3/0.6/0.2 h61/87 d7/1/56/35/5 j1/12x13 y2/0/0/5
+r2.9/30/2/2/13x13/1 e0/0/0 k0/0
+```
+
+Each token is a letter and its values, `-` where a value could not be measured; the top of the script says what each
+one is. Everything measured is also written to `diagnosis.txt` in the trial's folder. `--pages 94,46` uses those two
+pages instead of the trial's median and slowest.
