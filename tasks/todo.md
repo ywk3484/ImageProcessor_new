@@ -441,3 +441,15 @@ were written for Linux and bash (I had taken the repo's Dockerfile / compose.yam
       .tmp file (reproduced); now it stays in the order measured, with a note
 - [x] Checked: the docs' PowerShell blocks parse (0 errors); the three trial lines ran one after another in
       PowerShell on this PC (GPU workers, 1 / 2 / 3 per GPU); tests 12 passed (test_cd_batch, test_read_speed)
+
+# Why the remote is slow (2026-10-26, investigation only: no code changes, as the user asked)
+
+Remote trial: 209 pages (133 with holes) in 146 s on 4 GPUs, 3.5 s per hole page (deblend 2.04, tail_area 0.17),
+cells 11 px wide; workers per GPU make no difference.
+
+- [x] Here, both synthetic pages (mine, and one like the user's example: pitch 8, 43,095 holes) settle deblend in one
+      pass of 6-7 rounds: 0.55 s. Forced to never settle (tolerance 0): 10 + 20 rounds, 1.6 s = the remote's 2.0 s
+- [x] One page of my own 48-page test file never settles either (page 7: 1.67 s deblend, 2.8 s page)
+- [x] GPU busy 59 % of a page here (nvidia-smi); a bigger GPU only speeds up the big kernels (tail_area 0.29 -> 0.17)
+- [x] Blob page: 3.3 s vs 1.7 s; deblend passes 0.65 vs 0.50 s, the rest from full-size (51 x 49) cell stacks
+- [ ] User runs the rounds check (PowerShell paste) on 5 trial pages: rounds used, settled, dropped/added, cell size

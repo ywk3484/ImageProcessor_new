@@ -114,3 +114,12 @@
   Docker notes; the remote is Windows Server 2022 without Docker, and the first loop the user pasted failed to parse
   in PowerShell. Ask for (or state) the target OS and shell before writing commands for another machine, and give
   copy-paste instructions as one plain command per line, without loops or line continuations.
+- **Estimate speed from pages that behave like real data, and explain every outlier before reporting.** I told the
+  user 4-16 pages/s for 4 RTX 6000 Ada from GPU specs and clean synthetic pages; the remote measured 3.5 s per hole
+  page, 2.0 s of it deblend. Clean synthetic pages meet deblend's stop rule (99 % of holes move < 0.001 px) in 6-7
+  rounds; real pages likely never do and run all 30 (forced here: 1.6 s). My own test file had such a page (2.7 s)
+  and I reported "slowest page 2.7 s" without asking why. Also the GPU is busy only ~60 % of a page, mostly with small
+  kernels a bigger GPU does not speed up. Before any estimate: measure the GPU's busy share, time a page that never
+  settles, and find the cause of each slow page.
+- **Never call a partial fix "fixed".** The blob page went from 15 s to 3.3 s (normal page 1.7 s): the numbers were
+  fixed, the time only partly (full-size cell stacks remain). Say what is left, with its cost.
