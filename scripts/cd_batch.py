@@ -304,7 +304,8 @@ def make_check(settings: dict, xp):
 def page_values(result, image, methods) -> dict:
     """The page's pages.csv values from its CDResult: the report's statistics, means only."""
     stats = cd_statistics(result)
-    intensity = cell_intensity(result)
+    # This existing batch column specifically describes model tail_area.
+    intensity = cell_intensity(result) if "tail_area" in result.measurements else None
     values = {"holes": len(result.seeds_xy), "image_intensity": float(np.mean(image, dtype=np.float64)),
               "cell_intensity": _spread(intensity)["mean"] if intensity is not None else float("nan"),
               "deblend_converged": result.meta.get("deblend_converged", ""),

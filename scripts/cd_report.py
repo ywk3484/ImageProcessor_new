@@ -102,6 +102,22 @@ DESCRIPTIONS = {
                        "Same tail boundary, less noise per hole; assumes the holes share the profile shape. Uses "
                        "neither the peak nor a background level.",
 }
+DESCRIPTIONS.update({
+    "local_projection": "Width between the steepest edges of the raw cell's x/y projections after subtracting "
+                        "its median edge level; no fitted background or neighbour subtraction.",
+    "local_half_area": "Area connected to the peak above the local half-height threshold in the raw Voronoi "
+                       "cell, enlarged 4x; median edge level and maximum peak; no neighbour subtraction.",
+    "local_half_area_min_avg": "As local_half_area, with the minimum cell-edge level and the averaged brightest "
+                               "pixels as the peak.",
+    "local_tail_area": "Area connected to the peak above the low local threshold in the raw Voronoi cell, "
+                       "enlarged 4x; median edge level and averaged peak; neighbour light remains in the cell.",
+    "pixel_half_area": "Raw-cell half-height area counted on original pixels, using the median edge level and "
+                       "maximum peak; no enlargement or neighbour subtraction.",
+    "pixel_half_area_min_avg": "Raw-cell half-height area counted on original pixels, using the minimum edge "
+                               "level and averaged brightest pixels; no enlargement or neighbour subtraction.",
+    "pixel_tail_area": "Raw-cell area above the low local threshold counted on original pixels, using the "
+                       "median edge level and averaged peak; no enlargement or neighbour subtraction.",
+})
 # The CD and the x / y widths: statistics key suffix, metric, label.
 AXES = (("", "cd_equivalent_px", "CD"), ("_x", "cd_x_px", "x"), ("_y", "cd_y_px", "y"))
 
@@ -138,10 +154,18 @@ def layer_values(result) -> dict[str, np.ndarray]:
     return layers
 
 
+def intensity_source(methods) -> str | None:
+    """The tail-area method supplying cell intensity, preferring the modelled one."""
+    return next((name for name in ("tail_area", "local_tail_area", "pixel_tail_area") if name in methods), None)
+
+
 def cell_intensity(result) -> np.ndarray | None:
-    """Per hole: tail_area's mean light above the local level over its region (NaN where tail_area failed); None
-    when tail_area was not run."""
-    measured = result.measurements.get("tail_area")
+    """Per-hole mean signal in the selected tail-area region, NaN where invalid.
+
+    Prefers tail_area, then local_tail_area, then pixel_tail_area; the latter
+    two measure raw cells, without fitted background or neighbour subtraction.
+    """
+    measured = result.measurements.get(intensity_source(result.measurements))
     return None if measured is None else np.where(measured.valid, measured.metrics["mean_signal"], np.nan)
 
 
@@ -228,10 +252,12 @@ def rays_data(result, name: str) -> dict:
     return {"n": int(rays.shape[1]), "unit": unit, "rays": _b64(codes, "u1")}
 
 
-def hole_data(result, layers: dict[str, np.ndarray], ident: str = "") -> dict:
+def hole_data(result, layers: dict[str, np.ndarray], ident: str = "", image=None) -> dict:
     """Per map layer: hole centers, CD (px), validity and status as base64 arrays; plus what the band profile needs.
 
     The x / y width layers name their ``base`` method and share its centers and status.
+    Numerical summaries require the source image explicitly. Missing contours
+    use equivalent-CD circles in the viewer, without inventing measured rays.
     """
     seeds = result.seeds_xy
     methods = {}
@@ -243,24 +269,43 @@ def hole_data(result, layers: dict[str, np.ndarray], ident: str = "") -> dict:
             "cd": _b64(layers[name], "<f4"),
             "valid": _b64(measured.valid, "u1"), "status": _b64(codes, "u1" if len(statuses) < 256 else "<u2"),
             "status_names": statuses.tolist(), "status_wide": len(statuses) >= 256,
-            "rays_file": f"data/{ident}.{name}.rays.js",
         }
+        edges = measured.geometry.get("edge_px")
+        has_outlines = ((edges is not None and edges.ndim == 2 and edges.shape[1] > 0)
+                        or measured.contours_xy.shape[1] > 1)
+        methods[name]["outline_kind"] = "measured" if has_outlines else "equivalent_circle"
+        if has_outlines:
+            methods[name]["rays_file"] = f"data/{ident}.{name}.rays.js"
         for suffix, _, label in AXES[1:]:
             methods[name + suffix] = {"label": f"{METHOD_LABELS[name]}, {label} width only", "base": name,
                                       "cd": _b64(layers[name + suffix], "<f4")}
     if "cell_intensity" in layers:  # not a length: its own scale and unit
-        methods["cell_intensity"] = {"label": "Cell intensity: mean light above the local level in tail_area's region",
-                                     "base": "tail_area", "cd": _b64(layers["cell_intensity"], "<f4"),
+        source = intensity_source(result.measurements)
+        context = "background and neighbours removed" if source == "tail_area" else "raw cell, neighbour light retained"
+        methods["cell_intensity"] = {"label": f"Cell intensity: mean light above the local level in {source}'s "
+                                              f"region ({context})",
+                                     "base": source, "cd": _b64(layers["cell_intensity"], "<f4"),
                                      "scale": 1.0, "unit": "counts"}
-    model = result.deblend_model
-    # Spot peak above background: the deblend Gaussian's amplitude (mean cell brightness without a model).
-    peak = model["params"][model["report"], 0] if model else result.mean_intensity
-    image = result.image.astype(float)
+    model = getattr(result, "deblend_model", None)
+    if model:
+        peak, peak_label = model["params"][model["report"], 0], "fitted spot amplitude"
+    elif hasattr(result, "cell_labels"):
+        peak, peak_label = result.mean_intensity, "mean cell intensity"
+    else:
+        first = next(((name, m.metrics["peak_signal"]) for name, m in result.measurements.items()
+                      if "peak_signal" in m.metrics), None)
+        peak = first[1] if first else np.full(len(seeds), np.nan)
+        peak_label = f"{first[0]} peak above local level" if first else "unavailable peak"
+    image = getattr(result, "image", None) if image is None else image
+    if image is None:
+        raise ValueError("hole_data requires image= with a CDSummary")
+    image = np.asarray(image, dtype=float)
     pitch = result.meta.get("pitch_px")
-    return {"n": int(len(seeds)), "width": int(result.image.shape[1]), "height": int(result.image.shape[0]),
+    return {"n": int(len(seeds)), "width": int(image.shape[1]), "height": int(image.shape[0]),
             "scale": float(result.pixel_size), "unit": result.unit, "methods": methods,
             # Background brightness of each pixel row / column: its 25th percentile, i.e. the absorber between holes.
-            "peak": _b64(peak, "<f4"), "row_bg": _b64(np.percentile(image, 25, axis=1), "<f4"),
+            "peak": _b64(peak, "<f4"), "peak_label": peak_label,
+            "row_bg": _b64(np.percentile(image, 25, axis=1), "<f4"),
             "col_bg": _b64(np.percentile(image, 25, axis=0), "<f4"), "pitch": float(pitch) if pitch else None}
 
 
@@ -372,9 +417,10 @@ def _stats_table(stats: dict, unit: str) -> str:
             f"{_groups(3)}</tr><tr>{columns}</tr></thead><tbody>{rows}</tbody></table>")
 
 
-def _intensity_table(stats: dict) -> str:
-    return ("<h3>Cell intensity</h3><p class='meta'>Per hole: the mean light above its local level over tail_area's "
-            "region (background and neighbours removed), in image counts. It follows the source pulse and the hole size "
+def _intensity_table(stats: dict, source: str = "tail_area") -> str:
+    context = "background and neighbours removed" if source == "tail_area" else "raw cell, neighbour light retained"
+    return (f"<h3>Cell intensity</h3><p class='meta'>Per hole: the mean light above its local level over {html.escape(source)}'s "
+            f"region ({context}), in image counts. It follows the source pulse and the hole size "
             "together (a bigger hole passes more light).</p><table class='stats'><thead><tr><th>Valid holes</th>"
             "<th>Mean (counts)</th><th>σ (counts)</th><th>3σ (%)</th></tr></thead><tbody>"
             f"<tr><td>{stats['valid']:,}</td><td>{_fmt(stats['mean'])}</td><td>{_fmt(stats['std'])}</td>"
@@ -385,12 +431,11 @@ def _agreement_table(names: list[str], r: np.ndarray) -> str:
     head = "".join(f"<th>{html.escape(n)}</th>" for n in names)
     body = "".join(f"<tr><td>{html.escape(a)}</td>" + "".join(f"<td>{_fmt(v)}</td>" for v in row) + "</tr>"
                    for a, row in zip(names, r))
-    return ("<h3>Do the methods agree on which holes are big?</h3><p class='meta'>Correlation of the per-hole CDs of "
-            "two methods, over the holes both measured: 1 = they rank the holes the same, 0 = unrelated. Two different "
-            "methods that agree see the same thing in each hole (a real size difference, or something both take from "
-            "the same input); low agreement means their hole-to-hole spread is mostly each method's own noise. "
-            "<b>cell_intensity</b> row: how much each CD follows the hole's brightness. Some of it is real (bigger holes "
-            "are brighter); a method whose CD follows brightness much more than the others takes up the source pulse.</p>"
+    return ("<h3>Do the methods agree on which holes are big?</h3><p class='meta'>Pearson correlation of the per-hole "
+            "CDs over holes both methods measured: 1 = a perfect positive linear relation; 0 = no linear relation. "
+            "High correlation does not establish agreement in absolute values, and low correlation alone does not "
+            "identify measurement noise. The <b>cell_intensity</b> row describes association with hole brightness; "
+            "correlation alone cannot distinguish source-pulse changes, real size variation or shared input effects.</p>"
             f"<table class='stats wide'><thead><tr><th></th>{head}</tr></thead><tbody>{body}</tbody></table>")
 
 
@@ -398,6 +443,9 @@ COLORS = {"gaussian": "#5bbf2a", "projection": "#7a7a7a", "projection_x": "#2b8c
           "half_area": "#d6338a", "half_area_min": "#8e44ad", "half_area_min_avg": "#d68910", "tail_area": "#138d75",
           "tail_area_norm": "#2e86c1", "edge_area": "#c0392b",
           "foot_area": "#16a085", "foot_area_ratio": "#7d3c98"}
+COLORS.update({"local_projection": "#64748b", "local_half_area": "#b83280",
+               "local_half_area_min_avg": "#b7791f", "local_tail_area": "#0d9488",
+               "pixel_half_area": "#a855f7", "pixel_half_area_min_avg": "#ea580c", "pixel_tail_area": "#0284c7"})
 # x / y width layers: the method's colour, lighter for x and darker for y (projection keeps its own two).
 COLORS["cell_intensity"] = "#b8860b"
 for _name, _color in list(COLORS.items()):
@@ -440,7 +488,7 @@ def _brightness_summary(entries: list[dict]) -> str:
                  "intensity (%)</th>") if cell else ""
     return ("<h3>Between images: brightness</h3><p class='meta'>One value per image, in image counts: the image "
             "intensity is the simple mean of all its pixels; the cell intensity is the mean over its holes of each "
-            "hole's mean light above the local level in tail_area's region. M, s and 3 s / M as for the CD above "
+            "hole's mean light above the local level in the selected tail-area method's region. M, s and 3 s / M as for the CD above "
             "(s with N − 1).</p>"
             "<table class='stats'><thead><tr><th>Brightness</th><th>Images (N)</th><th>M (counts)</th>"
             "<th>s (counts)</th><th>3s (counts)</th><th>3s / M (%)</th></tr></thead>"
@@ -450,10 +498,11 @@ def _brightness_summary(entries: list[dict]) -> str:
 
 
 def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], notes: list[str], unit: str,
-                 ranges: dict | None = None) -> Path:
+                 ranges: dict | None = None, extra_summary: str = "") -> Path:
     """index.html: summary tab, one tab per image (data loaded on demand from data/<id>.js).
 
     ``ranges``: per map layer, the CD colour range (px) shared by all images.
+    ``extra_summary``: caller-generated HTML placed before the standard statistics.
     """
     def table(title, key):
         """Per image: ``key`` of the CD, the x and the y width (one column group each) of every method."""
@@ -506,10 +555,11 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
         f"<section class='panel' id='panel-{e['id']}' hidden><h2>{html.escape(e['name'])}: statistics</h2>"
         f"<p class='meta'>{e['holes']:,} holes · {e['width']} × {e['height']} px · image intensity (mean of all "
         f"pixels) {_fmt(e['image_mean'])} counts · {e['seconds']:.1f} s</p>{_stats_table(e['stats'], unit)}"
-        f"{_intensity_table(e['intensity']) if e.get('intensity') else ''}{_agreement_table(*e['agreement'])}"
+        f"{_intensity_table(e['intensity'], e.get('intensity_source') or intensity_source(e['stats']) or 'tail_area') if e.get('intensity') else ''}"
+        f"{_agreement_table(*e['agreement'])}"
         "<h3>CD histograms</h3><div class='hists'></div></section>"
         for e in entries if not e.get("error"))
-    page = (_HTML.replace("__SUMMARY__", summary).replace("__LEGEND__", legend).replace("__TABS__", tabs)
+    page = (_HTML.replace("__SUMMARY__", extra_summary + summary).replace("__LEGEND__", legend).replace("__TABS__", tabs)
             .replace("__PANELS__", panels)
             .replace("__NOTES__", "".join(f"<p class='note'>{html.escape(n)}</p>" for n in notes))
             .replace("__ENTRIES__", json.dumps({e["id"]: {"name": e["name"], "image": e["image"], "data": e["data"],
@@ -704,7 +754,7 @@ nav{display:flex;flex-wrap:wrap;gap:4px;padding:0 20px;border-bottom:1px solid v
 .tab{border:1px solid var(--line);border-bottom:none;background:transparent;color:var(--fg);padding:7px 12px;border-radius:6px 6px 0 0;cursor:pointer;font:inherit}
 .tab.active{background:var(--card);font-weight:600;border-color:var(--accent)}.tab:disabled{opacity:.45;cursor:default}
 main{padding:16px 20px}.panel{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
-table.stats{border-collapse:collapse;margin:8px 0}table.stats th,table.stats td{border-bottom:1px solid var(--line);padding:5px 10px;text-align:right;white-space:nowrap}
+table.stats{border-collapse:collapse;margin:8px 0;display:block;overflow-x:auto;max-width:100%}table.stats th,table.stats td{border-bottom:1px solid var(--line);padding:5px 10px;text-align:right;white-space:nowrap}
 table.stats th:first-child,table.stats td:first-child{text-align:left}table.wide{display:block;overflow-x:auto;max-width:100%}
 .swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:baseline}
 .meta,.note{color:var(--muted);margin:2px 0 6px}.error{color:#d33;text-align:left!important;white-space:normal!important;max-width:60ch}
@@ -740,7 +790,7 @@ __NOTES__ __SUMMARY__<h2>Methods</h2><ul class="legend">__LEGEND__</ul></section
 <label>Colours <select id="scale"><option value="shared">same for all images</option><option value="image">per image</option></select></label>
 <button id="fit">Fit image</button><label><input type="checkbox" id="show" checked> Show holes</label>
 <span id="bar"><span id="lo"></span><span id="ramp"></span><span id="hi"></span></span>
-<span class="meta">Drag to pan · wheel to zoom (zoomed in: each hole's measured outline, coloured by its size) · click a hole</span></div>
+<span class="meta">Drag to pan · wheel to zoom · click a hole</span><span class="meta" id="outline-note"></span></div>
 <div class="split"><div id="stage"><canvas id="canvas"></canvas></div><div id="detail"></div></div>
 <h3>Band profile: where does banding come from?</h3>
 <div class="controls"><label>Bands of <select id="axis"><option value="y">rows (along y)</option><option value="x">columns (along x)</option></select></label>
@@ -801,6 +851,8 @@ function histograms(id,d){const box=document.querySelector(`#panel-${id} .hists`
     h.forEach((y,i)=>g.fillRect(i*6,96-y/top*90,5,y/top*90));g.fillStyle=getComputedStyle(document.body).color;g.font="10px sans-serif";
     const sc=m.scale??d.scale;g.fillText((lo*sc).toPrecision(4),0,108);const t=(hi*sc).toPrecision(4);g.fillText(t,240-g.measureText(t).width,108);}}
 function setMethod(){if(!cur)return;const k=$("method").value,m=cur.methods[k],v=m.sorted;
+  const bm=cur.methods[m.base||k];$("outline-note").textContent=bm.outline_kind==="equivalent_circle"?
+    "Zoomed in: equivalent-CD circles; measured outlines were not stored.":"Zoomed in: measured outlines, coloured by size.";
   range=$("scale").value==="shared"&&RANGES[k]?RANGES[k].slice():[quantile(v,.02),quantile(v,.98)];
   if(!(range[1]>range[0]))range=[range[0]-0.5,range[0]+0.5];
   // Colour bins: one fillStyle per bin keeps 1e5 holes fast to draw.
@@ -818,21 +870,23 @@ function draw(){if(!cur||!img||!view)return;ctx.setTransform(1,0,0,1,0,0);ctx.fi
   ctx.lineWidth=1.5/k;if(!dots)loadRays(bn);const R=bm.rays,nr=bm.ray_n,u=bm.ray_unit;
   bins.forEach((list,b)=>{const col=viridis((b+.5)/32);ctx.fillStyle=col;ctx.strokeStyle=col;if(!dots)ctx.beginPath();
     for(const i of list){const x=m.x[i]+.5,y=m.y[i]+.5;if(x<x0||x>x1||y<y0||y>y1)continue;
-      if(dots){const s=Math.max(1.6/k,Math.min(m.cd[i],3));ctx.fillRect(x-s/2,y-s/2,s,s);}
-      else if(R&&R[i*nr]!==255){for(let j=0;j<=nr;j++){const a=RAY_ANG[nr][j%nr],r=R[i*nr+j%nr]*u;
+       if(dots){const s=Math.max(1.6/k,Math.min(bm.cd[i],3));ctx.fillRect(x-s/2,y-s/2,s,s);}
+      else if(R&&nr>0&&R[i*nr]!==undefined&&R[i*nr]!==255){for(let j=0;j<=nr;j++){const a=RAY_ANG[nr][j%nr],r=R[i*nr+j%nr]*u;
         if(j)ctx.lineTo(x+r*a[0],y+r*a[1]);else ctx.moveTo(x+r*a[0],y+r*a[1]);}}
-      else{ctx.moveTo(x+m.cd[i]/2,y);ctx.arc(x,y,m.cd[i]/2,0,2*Math.PI);}}
+       else{ctx.moveTo(x+bm.cd[i]/2,y);ctx.arc(x,y,bm.cd[i]/2,0,2*Math.PI);}}
     if(!dots)ctx.stroke();});
   if(!dots){ctx.strokeStyle="#9a9a9a";ctx.beginPath();const c=3;
     for(let i=0;i<cur.n;i++){if(m.valid[i]&&fin(m.cd[i]))continue;const x=m.x[i]+.5,y=m.y[i]+.5;if(x<x0||x>x1||y<y0||y>y1)continue;
       ctx.moveTo(x-c,y-c);ctx.lineTo(x+c,y+c);ctx.moveTo(x-c,y+c);ctx.lineTo(x+c,y-c);}ctx.stroke();}
   if(sel>=0){const x=m.x[sel]+.5,y=m.y[sel]+.5;ctx.strokeStyle="#ff3b3b";ctx.lineWidth=2.5/k;ctx.beginPath();
-    ctx.arc(x,y,Math.max(fin(m.cd[sel])?m.cd[sel]/2+1:4,8/k),0,2*Math.PI);ctx.stroke();}}
+    ctx.arc(x,y,Math.max(fin(bm.cd[sel])?bm.cd[sel]/2+1:4,8/k),0,2*Math.PI);ctx.stroke();}}
 // Measured outlines: one file per method and image, loaded once the map is zoomed in far enough to draw them.
 const RAY_ANG={};
 function loadRays(name){const bm=cur.methods[name];if(!bm||bm.rays||bm.raysLoading||!bm.rays_file)return;bm.raysLoading=true;
   const id=curId,s=document.createElement("script");s.src=bm.rays_file;
-  s.onload=()=>{const F=window.CD_RAYS[id+"/"+name];if(!F)return;bm.rays=unpack(F.rays,Uint8Array);bm.ray_n=F.n;bm.ray_unit=F.unit;
+  s.onload=()=>{const F=window.CD_RAYS[id+"/"+name];if(!F)return;
+    if(!(F.n>0)){bm.raysLoading=false;bm.rays_file=null;return;}
+    bm.rays=unpack(F.rays,Uint8Array);bm.ray_n=F.n;bm.ray_unit=F.unit;
     if(!RAY_ANG[F.n])RAY_ANG[F.n]=[...Array(F.n)].map((_,j)=>[Math.cos(2*Math.PI*j/F.n),Math.sin(2*Math.PI*j/F.n)]);if(curId===id)draw();};
   s.onerror=()=>{bm.raysLoading=false;bm.rays_file=null;};document.body.appendChild(s);}
 function pick(px,py){const m=cur.methods[$("method").value],x=(px-view.tx)/view.k-.5,y=(py-view.ty)/view.k-.5;
@@ -902,7 +956,7 @@ function bandPlot(){if(!cur)return;const k=$("method").value,ax=$("axis").value,
   const bx=[],by=[];if(chosen)for(const b of chosen.B){bx.push((b+.5)*W);by.push(bandBg(b));}
   plot($("band-br"),{x:xr,y:extent(by),series:[{xs:bx,ys:by,color:"#d08a00",width:2}],
     title:`background brightness per band (25th percentile of each pixel ${ax==="y"?"row":"column"}: the absorber between holes)`,xl});
-  $("bandinfo").innerHTML=`<table class="stats"><thead><tr><th>Map</th><th>Band-to-band spread (${cur.unit})</th><th>R² with background</th><th>R² with spot peak</th><th>R² with sub-pixel position</th></tr></thead><tbody>${rows}</tbody></table>`+
+  $("bandinfo").innerHTML=`<table class="stats"><thead><tr><th>Map</th><th>Band-to-band spread (${cur.unit})</th><th>R² with background</th><th>R² with ${cur.peak_label||"spot peak"}</th><th>R² with sub-pixel position</th></tr></thead><tbody>${rows}</tbody></table>`+
     `<p class="meta">Band-to-band spread: standard deviation of the band means. R²: share of that band-to-band variation that goes along with the quantity (0–100 %). With ${nb} bands, chance alone gives about ${pct(1/Math.max(nb-1,1))} (sub-pixel position, fitted with two terms: ${pct(2/Math.max(nb-1,1))}).</p>`;}
 
 // ---- hole detail ----
@@ -945,7 +999,7 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
     rows+=`<tr><td><span class="swatch" style="background:${COLORS[kk]||"#888"}"></span>${kk}</td><td>${fin(v)?(v*(mm.scale??cur.scale)).toFixed(3)+" "+(mm.unit||cur.unit):"–"}</td><td>${mm.status_names[mm.status[i]]}</td></tr>`;}
   let out=`<b>Hole ${i}</b> at x ${m.x[i].toFixed(2)}, y ${m.y[i].toFixed(2)} px<table>${rows}</table>`;
   const D=window.CD_DETAIL[curId];
-  if(!ENTRIES[curId].detail){$("detail").innerHTML=out+"<p class='meta'>Hole details were not written (--no-hole-details).</p>";return;}
+  if(!ENTRIES[curId].detail){$("detail").innerHTML=out+"<p class='meta'>Cell images were not stored. Per-hole values and statuses are shown above.</p>";return;}
   if(!D){$("detail").innerHTML=out+"<p class='meta'>Loading hole details…</p>";loadDetail(curId);return;}
   prepareDetail(D);const ox=D.ox[i],oy=D.oy[i],cx=m.x[i]-ox,cy=m.y[i]-oy,cdv=m.cd[i];
   if(base==="projection"){const P=cur.methods.projection,px=cur.methods.projection_x.cd[i],py=cur.methods.projection_y.cd[i];

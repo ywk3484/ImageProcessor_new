@@ -384,3 +384,16 @@ def test_batch_options_select_mode_specific_defaults_and_local_methods(tmp_path)
     assert build_settings(parser.parse_args(common))["hole_check"]["max_error"] == 0.8
     assert build_settings(parser.parse_args(common + ["--hole-check-mode", "raw"]))["hole_check"]["max_error"] == 0.3
     assert build_settings(parser.parse_args(common + ["--max-error", "0.37"]))["hole_check"]["max_error"] == 0.37
+
+
+def test_batch_intensity_keeps_its_model_tail_definition():
+    from scripts.benchmark_cd import lattice
+    from scripts.cd_batch import page_values
+    from scripts.cd_report import cell_intensity
+    from subpx import measure_cds
+
+    image = lattice((60, 80), 10, 4, 25)[0]
+    for method in ("local_tail_area", "pixel_tail_area"):
+        result = measure_cds(image, methods=(method,), summary_only=True, backend="cpu", area_max=200)
+        assert cell_intensity(result) is not None  # the report labels this raw-cell intensity explicitly
+        assert np.isnan(page_values(result, image, (method,))["cell_intensity"])
