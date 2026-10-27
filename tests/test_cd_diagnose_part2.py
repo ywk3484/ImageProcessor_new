@@ -109,7 +109,7 @@ def run_settings(reference, **changes):
     measure = {"methods": [m for m in ALL_METHODS if m in ("projection", "half_area", "tail_area", "foot_area")],
                "seeds": "peaks", "invert": True, "area_min": 5, "area_max": 300, "pixel_size": 21.0, "unit": "nm",
                "half_area_level": 0.45, "half_area_peak_pixels": 3.0, "tail_area_level": 0.25, "tail_window": 1.3,
-               "n_angles": 16, "outlines": False, "metrics_only": True,
+               "n_angles": 16, "outlines": False, "metrics_only": True, "summary_only": True,
                "deblend_iterations": 55, "deblend_tolerance": 0.0002}
     hole_check = {"reference": str(reference.resolve()), "reference_page": 1, "reference_bytes": 0,
                   "reference_mtime": 0, "max_error": 0.25, "error_function": None, "mode": "centered"}

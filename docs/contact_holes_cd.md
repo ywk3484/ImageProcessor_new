@@ -30,6 +30,56 @@ For real data on a Windows server, follow the
 [short run guide](remote_server.md) for the command, input parameters, image
 loading, and output files.
 
+## Fast page averages and an actual batch timing
+
+For a quick throughput check on the remote PC, reuse an existing batch run's
+settings and one of its TIFFs:
+
+```powershell
+python scripts\cd_speed.py D:\results\trial_w1 D:\data\scan.tif
+```
+
+This runs `cd_batch` once with the three `pixel_*` methods below, using all
+visible GPUs and one worker per GPU. It reuses the saved detection, calibration,
+threshold and hole-screen settings, including the raw screen of older runs.
+The automatic sample contains up to 512 consecutive pages with the most
+previously accepted pages; `--pages 0:1500` selects a whole 1,500-page TIFF.
+`--output` selects a new results folder; the default is a timestamped folder
+inside the prior run. The original results are retained.
+
+| Method | Level and peak used for the threshold |
+|---|---|
+| `pixel_half_area` | Median cell-edge level and maximum peak, at `--half-level` (default 0.5). |
+| `pixel_half_area_min_avg` | Minimum cell-edge level and averaged brightest pixels, at `--half-level`. |
+| `pixel_tail_area` | Median cell-edge level and averaged brightest pixels, at `--tail-level` (default 0.2). |
+
+These methods count the region connected to the peak directly on original
+pixels, skipping Gaussian deblending and the 4x cubic enlargement used by
+`local_*` area methods. Areas have integer-pixel increments and border-touching
+regions are rejected, so valid counts can differ, especially for tail area.
+
+The batch uses `summary_only=True`: `measure_cds` returns a lightweight
+`CDSummary` containing seeds, per-method numerical arrays, calibration and
+metadata, without image or label-map copies or full-cell intensity statistics.
+Page averages and valid counts are still written to `pages.csv`.
+GPU work is asynchronous: the `local_fused` stage can include pending Voronoi
+work. Use total page or batch time when comparing throughput.
+
+The final lines report measured pages/s and projected time for 1,500 pages and
+1,000 such TIFFs; details are saved in `speed.json`. Timing includes reference
+reading, worker startup, TIFF I/O, screening, measurement and output. The
+automatic sample favors accepted pages, and projections assume the same page
+mix and comparable I/O. Startup is included, making the projection conservative
+relative to an otherwise identical long run; disk cache state is uncontrolled.
+Failed or interrupted trials receive no dataset projection.
+
+Local verification on an RTX 4060 Ti: a synthetic 1378 x 2048 page with 39,042
+holes took about 0.075 s for the three pixel methods, compared with about
+0.43 s for the prior local implementation. A spawned batch of 48 synthetic
+pages completed in 6.0 s (8.03 pages/s, 40 accepted, eight rejected, no failures),
+including startup and I/O; cache state was unknown. The command above measures
+the remote PC's actual throughput on its own data.
+
 ## Run the pipeline
 
 From the repository root, using the existing Windows environment:

@@ -76,6 +76,21 @@ class CDMethodResult:
 
 
 @dataclass
+class CDSummary:
+    """Numerical per-hole measurements without image, label maps or cell statistics.
+
+    Used by ``measure_cds(summary_only=True)`` for batch page averages. Arrays
+    are NumPy and use the same coordinates and units as ``CDResult``.
+    """
+
+    seeds_xy: np.ndarray
+    measurements: dict[str, CDMethodResult]
+    pixel_size: float = 1.0
+    unit: str = "px"
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class CDResult:
     """Cell extraction, per-method CDs, and calibration for one image.
 

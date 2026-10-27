@@ -16,8 +16,9 @@ another size are compared on the centre part both share. --error-function FILE.p
 NAME(reference, image) -> error instead; --no-hole-check measures every page. The reference page is read once, at the
 start; it may be a page of one of the dataset's own TIFFs.
 
-The default ten methods use the same measurements as scripts/cd_report.py. The additional local_* methods bypass
-Gaussian deblending when requested alone. The batch keeps only numerical results, omitting display data.
+The default ten methods use the same measurements as scripts/cd_report.py. The additional local_* and pixel_*
+methods bypass Gaussian deblending when requested alone; pixel_* also skips 4x enlargement. The batch keeps only
+numerical summaries, omitting display data and full-cell intensity statistics.
 
 Outputs in --output:
     pages.csv    one row per page: file (path below the common input folder), page (0 = first), status (ok or
@@ -77,7 +78,7 @@ PROGRESS_SECONDS = 30
 MAX_FAILURES_IN_A_ROW = 20
 STAGES = ("segmentation", "deblend", "gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg",
           "tail_window", "tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio",
-          *LOCAL_METHODS, "result")
+          *LOCAL_METHODS, "local_extract", "local_fused", "result")
 TIMING_FIELDS = (["file", "page", "status", "gpu", "worker", "height", "width", "holes", "stack_h", "stack_w",
                   "window_px", "read_s", "check_s", "measure_s"] + [f"{s}_s" for s in STAGES] + ["peak_rss_mb"])
 FAILED_FIELDS = ["file", "page", "error", "time"]
@@ -333,7 +334,7 @@ def measure_page(image: np.ndarray, file_key: str, page: int, settings: dict, ch
     result = measure_cds(image, backend=settings["backend"], device=device, **settings["measure"])
     row.update(page_values(result, image, settings["measure"]["methods"]), status="ok")
     seconds = result.meta.get("seconds", {})
-    stack_h, stack_w = result.meta.get("cell_stack_shape", result.masks.shape[1:])
+    stack_h, stack_w = result.meta["cell_stack_shape"]
     timing.update(status="ok", holes=len(result.seeds_xy), stack_h=stack_h,
                   stack_w=stack_w, window_px=result.meta.get("tail_window_px", ""),
                   measure_s=seconds.get("total", ""), **{f"{s}_s": seconds.get(s, "") for s in STAGES})
@@ -507,7 +508,7 @@ def measurement_fingerprint() -> str:
     names += [f"subpx/_cpu/{name}.py" for name in
               ("cd", "cells", "centers", "components", "deblend", "invariant_cd", "local_cd")]
     names += [f"subpx/_gpu/{name}.py" for name in
-              ("_cuda", "cd", "cells", "deblend", "regions", "upsample", "voronoi", "windows")]
+              ("_cuda", "cd", "cells", "deblend", "local_cd", "regions", "upsample", "voronoi", "windows")]
     digest = hashlib.sha256(f"measurement-version:{MEASUREMENT_VERSION}\n".encode())
     for name in sorted(names):
         path = ROOT / name
@@ -959,7 +960,7 @@ def build_settings(args) -> dict:
                     "half_area_level": args.half_level, "half_area_peak_pixels": args.peak_pixels,
                     "tail_area_level": args.tail_level, "tail_window": args.tail_window,
                     "deblend_iterations": args.deblend_iterations, "deblend_tolerance": args.deblend_tolerance,
-                    "n_angles": 16, "outlines": False, "metrics_only": True},
+                    "n_angles": 16, "outlines": False, "metrics_only": True, "summary_only": True},
         "hole_check": hole_check,
         "reference_image": reference_image,  # the reference page itself, sent to the workers (not in run.json)
         "pages": pages,

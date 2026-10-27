@@ -1,5 +1,24 @@
 # Run the contact-hole CD pipeline
 
+## Test throughput with the native-pixel methods
+
+For the large-dataset speed trial, use the same two paths as `cd_compare.py`:
+
+```powershell
+python scripts\cd_speed.py D:\results\trial_w1 D:\data\dataset1\stripe_001\scan_001.tif
+```
+
+This measures up to 512 consecutive pages with all visible GPUs, one worker
+each, using the new `pixel_half_area`, `pixel_half_area_min_avg` and
+`pixel_tail_area` methods. They measure connected areas at original pixel
+resolution and skip the 4x enlargement. The command reports actual pages/s,
+including startup and I/O, and conditional dataset-time estimates. It reuses
+the prior run's numerical and screening settings and creates a fresh output
+folder. See [method definitions and local timing](contact_holes_cd.md#fast-page-averages-and-an-actual-batch-timing).
+
+For a full dataset, use these three names in `cd_batch.py --methods`, retain
+your other input/calibration/screening options, and choose a new output folder.
+
 ## Compare the faster experimental methods on your existing trial
 
 The goal is to compare speed, coverage and CD changes before another whole-dataset run. From the repository root

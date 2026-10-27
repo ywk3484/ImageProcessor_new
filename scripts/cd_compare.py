@@ -31,7 +31,7 @@ from subpx.cd import LOCAL_METHODS
 
 PAIRS = {"projection": "local_projection", "half_area": "local_half_area",
          "half_area_min_avg": "local_half_area_min_avg", "tail_area": "local_tail_area"}
-DEFAULT_LOCAL_METHODS = tuple(name for name in LOCAL_METHODS if name != "local_projection")
+DEFAULT_LOCAL_METHODS = ("local_half_area", "local_half_area_min_avg", "local_tail_area")
 
 
 def rows_for(path, tiff, file_key=None):
@@ -175,7 +175,8 @@ def main(argv=None):
         parser.error(str(error))
     options = {key: value for key, value in previous_measure.items()
                if key in inspect.signature(measure_cds).parameters}
-    options.update(backend=args.backend, device=args.device, metrics_only=True, outlines=False, n_angles=16)
+    options.update(backend=args.backend, device=args.device, metrics_only=True, summary_only=True,
+                   outlines=False, n_angles=16)
     model_methods = tuple(m for m in options.pop("methods", ALL_METHODS) if m not in LOCAL_METHODS)
     if not model_methods:
         model_methods = ALL_METHODS

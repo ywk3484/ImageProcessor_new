@@ -430,6 +430,11 @@ def _zoom_operators(size: int, factor: int):
     do not depend on the size of the array holding the cell: the operator of a size is the top-left corner of any
     larger one (to rounding).
     """
+    if factor == 1:
+        # Native-pixel methods do not interpolate. A cubic reconstruction of
+        # the samples differs by rounding and can move exact threshold ties.
+        return np.eye(size), np.eye(size)
+
     from scipy.ndimage import zoom
 
     pad = _ZERO_PAD

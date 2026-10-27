@@ -45,7 +45,7 @@ def _scatter(found, name, part, indices, count):
 
 def measure_local(signal, labels, rows, report, *, methods, pad, n_angles,
                   half_area_level=0.5, half_area_peak_pixels=4.0, tail_area_level=0.2,
-                  outlines=True, metrics_only=False, store_cells=False, xp=np):
+                  outlines=True, metrics_only=False, store_cells=False, xp=np, _fused=True):
     """Measure raw Voronoi cells; no fitted neighbour, background map, or seed revision.
 
     Groups have bounded storage independent of the largest cell elsewhere.
@@ -68,18 +68,78 @@ def measure_local(signal, labels, rows, report, *, methods, pad, n_angles,
             found[name] = _empty(name, 0, n_angles, extra, metrics_only=metrics_only)
         return found, origins, rois, masks, {"seconds": seconds, "cell_stack_shape": [0, 0]}
 
+    if _fused and xp is not np and metrics_only and not store_cells and "local_projection" not in methods:
+        from .._gpu.local_cd import measure_local_areas
+        started = time.perf_counter()
+        signal, labels = xp.asarray(signal), xp.asarray(labels)
+        fallback_elapsed = 0.0
+        fallback_cells = np.zeros(count, bool)
+        groups = None
+        for factor in (4, 1):
+            names = [name for name in methods if name.startswith("pixel_") == (factor == 1)]
+            if not names:
+                continue
+            canonical = [name.replace("pixel_", "local_", 1) if factor == 1 else name for name in names]
+            options = dict(methods=canonical, factor=factor, n_angles=n_angles, half_area_level=half_area_level,
+                           half_area_peak_pixels=half_area_peak_pixels, tail_area_level=tail_area_level)
+            parts = measure_local_areas(signal, labels, origins, sizes, report, **options)
+            if parts is None:
+                # A shared-memory outlier must not send every ordinary cell
+                # through the slower reference path. Retry homogeneous buckets;
+                # only a bucket the kernel declines uses bounded extraction.
+                if groups is None:
+                    buckets = (sizes + 3) // 4 * 4
+                    width_key = int(buckets[:, 1].max()) + 1
+                    _, groups = np.unique(buckets[:, 0] * width_key + buckets[:, 1], return_inverse=True)
+                for group in range(int(groups.max()) + 1):
+                    indices = np.flatnonzero(groups == group)
+                    parts = measure_local_areas(signal, labels, origins[indices], sizes[indices],
+                                                report[indices], **options)
+                    if parts is None:
+                        fallback_started = time.perf_counter()
+                        parts, _, _, _, info = measure_local(
+                            signal, labels, rows, report[indices], methods=names, pad=pad, n_angles=n_angles,
+                            half_area_level=half_area_level, half_area_peak_pixels=half_area_peak_pixels,
+                            tail_area_level=tail_area_level, outlines=False, metrics_only=True, store_cells=False,
+                            xp=xp, _fused=False,
+                        )
+                        fallback_elapsed += time.perf_counter() - fallback_started
+                        fallback_cells[indices] = True
+                        for key, value in info["seconds"].items():
+                            seconds[key] = seconds.get(key, 0.0) + value
+                        source_names = names
+                    else:
+                        source_names = canonical
+                    for name, source in zip(names, source_names):
+                        part = parts[source]
+                        part.method = name
+                        _scatter(found, name, part, indices, count)
+            else:
+                for name, source in zip(names, canonical):
+                    part = parts[source]
+                    part.method = name
+                    found[name] = part
+        seconds["local_fused"] = time.perf_counter() - started - fallback_elapsed
+        return {name: found[name] for name in methods}, origins, rois, masks, {
+            "seconds": seconds, "cell_stack_shape": [int(max_h), int(max_w)],
+            "cell_storage": "fused+bucketed" if fallback_cells.any() else "fused",
+            "local_fallback_cells": int(fallback_cells.sum()),
+        }
+
     started = time.perf_counter()
     image_d, labels_d = xp.asarray(signal), xp.asarray(labels)
     # Four-pixel buckets avoid one tiny variation causing a separate GPU launch.
     bucket_sizes = ((sizes + 3) // 4) * 4
     shapes, groups = np.unique(bucket_sizes, axis=0, return_inverse=True)
-    specs = []
+    specs_by_factor = {4: [], 1: []}
     for name in methods:
         if name == "local_projection":
             continue
-        specs.append(dict(name=name, level=tail_area_level if name == "local_tail_area" else half_area_level,
-                          background="min" if name == "local_half_area_min_avg" else "median",
-                          peak_pixels=None if name == "local_half_area" else half_area_peak_pixels, cuts=None))
+        factor = 1 if name.startswith("pixel_") else 4
+        specs_by_factor[factor].append(dict(
+            name=name, level=tail_area_level if name.endswith("tail_area") else half_area_level,
+            background="min" if name.endswith("half_area_min_avg") else "median",
+            peak_pixels=None if name.endswith("half_area") else half_area_peak_pixels, cuts=None))
     for group, (hb, wb) in enumerate(shapes):
         members = np.flatnonzero(groups == group)
         # Account for the 4x enlargement, not just the raw cells (about 128 MiB).
@@ -117,8 +177,10 @@ def measure_local(signal, labels, rows, report, *, methods, pad, n_angles,
                 part.metrics["background"][:] = _to_numpy(level)
                 _scatter(found, "local_projection", part, indices, count)
                 seconds["local_projection"] = seconds.get("local_projection", 0.0) + time.perf_counter() - started
-            if specs:
-                parts = _half_areas(cells, mask_host, origins[indices], n_angles, specs,
+            for factor, specs in specs_by_factor.items():
+                if not specs:
+                    continue
+                parts = _half_areas(cells, mask_host, origins[indices], n_angles, specs, factor=factor,
                                     outlines=outlines, metrics_only=metrics_only, xp=xp, seconds=seconds)
                 for name, part in parts.items():
                     part.metrics["background"][:] = part.metrics["local_level"]

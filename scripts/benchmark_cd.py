@@ -89,7 +89,8 @@ def main(argv=None) -> None:
     print(f"Synthetic {image.shape[0]}x{image.shape[1]}: {len(centers)} holes, pitch {args.pitch:g} px, "
           f"FWHM {args.fwhm:g} px (pitch/FWHM {args.pitch / args.fwhm:.2f}), SNR {args.snr:g}, seeds={args.seeds}", flush=True)
     options = dict(seeds=args.seeds, area_max=200, device=args.device, methods=tuple(args.methods),
-                   n_angles=16, outlines=args.full_results, metrics_only=not args.full_results)
+                   n_angles=16, outlines=args.full_results, metrics_only=not args.full_results,
+                   summary_only=not args.full_results)
     print(f"Methods: {', '.join(args.methods)}; "
           + ("full results" if args.full_results else "metrics only; compact writing skipped"), flush=True)
     results = {}

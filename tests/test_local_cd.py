@@ -142,6 +142,57 @@ def test_large_outlier_does_not_pad_all_local_cells(monkeypatch):
     assert found["local_projection"].valid[:20].all()
 
 
+def test_gpu_oversized_cell_keeps_ordinary_cells_on_fused_path(monkeypatch):
+    xp = _backend("gpu")
+    from subpx._gpu import local_cd as gpu_local
+
+    image = np.zeros((110, 220))
+    labels = np.full(image.shape, -1, np.int32)
+    rows = []
+    for i in range(20):
+        x, y, size = 4 + i % 10 * 16, 4 + i // 10 * 16, 9
+        yy, xx = np.mgrid[:size, :size]
+        image[y:y + size, x:x + size] = 20 + 90 * np.exp(-((xx - 4.2) ** 2 + (yy - 4.4) ** 2) / 4)
+        labels[y:y + size, x:x + size] = i
+        rows.append([x, y, size, size, x + 4.2, y + 4.4])
+    # Too large for shared memory even at factor 1, but only one such cell.
+    size, x, y = 60, 5, 45
+    yy, xx = np.mgrid[:size, :size]
+    image[y:y + size, x:x + size] = 30 + 120 * np.exp(-((xx - 29.3) ** 2 + (yy - 30.2) ** 2) / 180)
+    labels[y:y + size, x:x + size] = 20
+    rows.append([x, y, size, size, x + 29.3, y + 30.2])
+    report = np.random.default_rng(12).permutation(len(rows))
+    cubic = tuple(name for name in LOCAL_METHODS if name.startswith("local_") and name != "local_projection")
+    methods = cubic + tuple(name.replace("local_", "pixel_") for name in cubic)
+    options = dict(methods=methods, pad=0, n_angles=16, metrics_only=True, outlines=False)
+    expected, *_ = local_cd.measure_local(image, labels, rows, report, **options)
+    fallback_calls, fused_calls = [], []
+    original_half, original_fused = local_cd._half_areas, gpu_local.measure_local_areas
+
+    def record_fallback(cells, masks, *args, **kwargs):
+        fallback_calls.append((cells.shape, kwargs["factor"]))
+        return original_half(cells, masks, *args, **kwargs)
+
+    def record_fused(*args, **kwargs):
+        result = original_fused(*args, **kwargs)
+        fused_calls.append((len(args[4]), kwargs["factor"], result is not None))
+        return result
+
+    monkeypatch.setattr(local_cd, "_half_areas", record_fallback)
+    monkeypatch.setattr(gpu_local, "measure_local_areas", record_fused)
+    found, _, rois, masks, info = local_cd.measure_local(image, labels, rows, report, xp=xp, **options)
+    for name in methods:
+        _compare(expected[name], found[name], tolerance=1e-8)
+    assert (20, 4, True) in fused_calls
+    assert (20, 1, True) in fused_calls
+    assert len(fallback_calls) == 2
+    assert all(shape == (1, 60, 60) for shape, factor in fallback_calls)
+    assert {factor for shape, factor in fallback_calls} == {1, 4}
+    assert rois.shape == masks.shape == (21, 0, 0)
+    assert info["local_fallback_cells"] == 1
+    assert info["cell_storage"] == "fused+bucketed"
+
+
 def test_mixed_methods_keep_common_cell_alignment():
     image = _image()
     options = dict(backend="cpu", area_max=200, n_angles=16, deblend_iterations=3, metrics_only=True)

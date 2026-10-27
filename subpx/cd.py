@@ -9,7 +9,7 @@ import time
 
 import numpy as np
 
-from .types import CDMethodResult, CDResult
+from .types import CDMethodResult, CDResult, CDSummary
 
 
 METHOD_LABELS = {
@@ -32,8 +32,12 @@ METHOD_LABELS = {
     "local_half_area": "Raw-cell area above half height",
     "local_half_area_min_avg": "Raw-cell half area (minimum level, averaged peak)",
     "local_tail_area": "Raw-cell area above a low local threshold",
+    "pixel_half_area": "Pixel-count area above half height",
+    "pixel_half_area_min_avg": "Pixel-count half area (minimum level, averaged peak)",
+    "pixel_tail_area": "Pixel-count area above a low local threshold",
 }
-LOCAL_METHODS = ("local_projection", "local_half_area", "local_half_area_min_avg", "local_tail_area")
+PIXEL_METHODS = ("pixel_half_area", "pixel_half_area_min_avg", "pixel_tail_area")
+LOCAL_METHODS = ("local_projection", "local_half_area", "local_half_area_min_avg", "local_tail_area", *PIXEL_METHODS)
 # Opt-in methods insensitive to a per-hole source-pulse scale (subpx/_cpu/invariant_cd.py).
 INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min", "half_area_min_avg",
                      "tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
@@ -74,7 +78,8 @@ def measure_cds(
     tail_window: float = 1.2,
     outlines: bool = True,
     metrics_only: bool = False,
-) -> CDResult:
+    summary_only: bool = False,
+) -> CDResult | CDSummary:
     """Extract Voronoi cells and measure their contours and critical dimensions.
 
     Parameters
@@ -135,6 +140,11 @@ def measure_cds(
         not a wider model-shared window. Neighbour overlap is uncorrected.
         A local-only call skips deblending entirely; mixed calls use the
         final deblended seed list for all methods and still pay its cost.
+        ``pixel_half_area``, ``pixel_half_area_min_avg`` and ``pixel_tail_area``
+        use the corresponding local level/peak rules on original pixels,
+        without cubic enlargement. They count the peak-connected native-pixel
+        region; area increments are one pixel squared. These are separate,
+        cheaper estimators, not aliases for the 4x local methods.
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
         map, then measures every cell with the background and all neighbouring
@@ -236,10 +246,15 @@ def measure_cds(
         are retained; display perimeters may be NaN. Intended for batch
         tables, not viewers or compact geometry exports. Local-only calls
         also use bounded cell-size groups instead of a page-wide padded stack.
+    summary_only : bool
+        Return ``CDSummary`` with just seeds, per-method numerical results,
+        calibration and metadata. Implies ``metrics_only=True`` and skips
+        image/label copies and full-cell intensity statistics. Intended for
+        batch page averages; use the default for image/geometry exports.
 
     Returns
     -------
-    CDResult
+    CDResult or CDSummary
         Cell arrays and per-method measurements, aligned by zero-based cell
         ID. Failed cells remain present with a status and NaN geometry.
         Contours and centers are global [x, y] pixel coordinates.
@@ -289,6 +304,9 @@ def measure_cds(
         raise ValueError("outlines must be True or False")
     if not isinstance(metrics_only, (bool, np.bool_)):
         raise ValueError("metrics_only must be True or False")
+    if not isinstance(summary_only, (bool, np.bool_)):
+        raise ValueError("summary_only must be True or False")
+    metrics_only = metrics_only or summary_only
     if not np.isfinite(deblend_tolerance) or deblend_tolerance <= 0:
         raise ValueError("deblend_tolerance must be positive")
     if {"disk", "flux_ratio"} & set(methods) and nominal_cd is None and psf_fwhm is None:
@@ -324,6 +342,7 @@ def measure_cds(
             half_area_level=float(half_area_level), half_area_peak_pixels=float(half_area_peak_pixels),
             tail_area_level=float(tail_area_level), tail_window=float(tail_window), outlines=bool(outlines),
             metrics_only=bool(metrics_only), deblend_tolerance=float(deblend_tolerance),
+            summary_only=bool(summary_only),
         )
 
 
@@ -373,8 +392,8 @@ def _measure_cds(
     smooth_sigma, fit_fraction, peak_min_distance, background_level, background_tile, deblend_iterations,
     pixel_size, unit, backend, cell_backend, device, nominal_cd=None, psf_fwhm=None, dark_level=0.0,
     flux_ratio_scale=None, half_area_level=0.5, half_area_peak_pixels=4.0, tail_area_level=0.2,
-    tail_window=1.2, outlines=True, metrics_only=False, deblend_tolerance=1e-3,
-) -> CDResult:
+    tail_window=1.2, outlines=True, metrics_only=False, deblend_tolerance=1e-3, summary_only=False,
+) -> CDResult | CDSummary:
     from ._cpu.centers import _segment_binary
     from ._cpu.components import connected_components_stats_cpu
     from ._cpu.cells import _extract_voronoi_rois, compute_voronoi_labels_cpu
@@ -408,7 +427,9 @@ def _measure_cds(
     # Negation preserves contrast and permits the same bright-feature methods
     # for dark holes, including a background estimate in the correct polarity.
     sign = -1.0 if invert else 1.0
-    signal_image = img.astype(np.float64) * sign
+    signal_image = img.astype(np.float64)
+    if invert:
+        np.negative(signal_image, out=signal_image)
     rescaled = False
     components_before_filter = 0
     pitch = float("nan")
@@ -432,7 +453,9 @@ def _measure_cds(
         # them so their tails are subtracted from interior neighbours.
         if background == "border":
             keep &= inside
-        rows = np.column_stack((x, y, w, h, np.asarray(comp.centroids[1:comp.num_labels]).reshape(-1, 2)))[keep].tolist()
+        rows = np.column_stack((x, y, w, h, np.asarray(comp.centroids[1:comp.num_labels]).reshape(-1, 2)))[keep]
+        if not only_local:
+            rows = rows.tolist()
         component_ids = (np.flatnonzero(keep) + 1).astype(np.int32)
         interior = inside[keep].tolist()
     else:
@@ -450,8 +473,12 @@ def _measure_cds(
         if only_local:
             from ._cpu.local_cd import cell_boxes
             if cell_backend == "gpu":
-                from ._gpu.voronoi import compute_voronoi_labels_gpu
-                labels = compute_voronoi_labels_gpu(seeds_xy, img.shape, device=device)
+                if summary_only and backend == "gpu":
+                    from ._gpu.voronoi import _labels_device
+                    labels = _labels_device(seeds_xy, img.shape)
+                else:
+                    from ._gpu.voronoi import compute_voronoi_labels_gpu
+                    labels = compute_voronoi_labels_gpu(seeds_xy, img.shape, device=device)
             else:
                 labels = compute_voronoi_labels_cpu(seeds_xy, img.shape)
             origins, _ = cell_boxes(rows, img.shape, int(pad))
@@ -479,6 +506,7 @@ def _measure_cds(
         "half_area_peak_pixels": float(half_area_peak_pixels), "tail_area_level": float(tail_area_level),
         "tail_window": float(tail_window), "outlines": bool(outlines), "cell_backend": cell_backend,
         "measurement_backend": backend, "device": int(device), "metrics_only": bool(metrics_only),
+        "summary_only": bool(summary_only),
         "deblend_tolerance": float(deblend_tolerance),
         "segmentation_rescaled": rescaled, "components_before_filter": components_before_filter,
         "coordinates": "global [x, y] pixels; images indexed [y, x]",
@@ -502,9 +530,10 @@ def _measure_cds(
                     background_definition="Per-cell edge levels on raw Voronoi cells; no Gaussian deblending")
         for measured in measurements.values():
             measured.metrics["background"] *= sign
-        remap = np.full(len(rows) + 1, -1, dtype=np.int32)
-        remap[report] = np.arange(len(report), dtype=np.int32)
-        cell_labels = remap[cell_labels]
+        if not summary_only:
+            remap = np.full(len(rows) + 1, -1, dtype=np.int32)
+            remap[report] = np.arange(len(report), dtype=np.int32)
+            cell_labels = remap[cell_labels]
         release_memory()
         start = time.perf_counter()
     elif background == "border":
@@ -657,21 +686,29 @@ def _measure_cds(
             seeds_dropped_as_insignificant=int(dropped),
             pitch_px=float(pitch) if np.isfinite(pitch) else None,
         )
-        remap = np.full(len(rows) + 1, -1, dtype=np.int32)
-        remap[report] = np.arange(len(report), dtype=np.int32)
-        cell_labels = remap[cell_labels]  # -1 stays -1 through the extra slot
-        params_global = state.params.copy()
-        params_global[:, 1:3] += origins  # every modelled hole, as rendered by deblend
-        deblend_model = {"params": params_global, "report": report, "tile_px": int(state.tile_px)}
-        if "tile_medians" in state.background_info:
-            deblend_model["tile_medians"] = state.background_info["tile_medians"]
-        masks, origins = masks[report], origins[report]
+        if not summary_only:
+            remap = np.full(len(rows) + 1, -1, dtype=np.int32)
+            remap[report] = np.arange(len(report), dtype=np.int32)
+            cell_labels = remap[cell_labels]  # -1 stays -1 through the extra slot
+            params_global = state.params.copy()
+            params_global[:, 1:3] += origins  # every modelled hole, as rendered by deblend
+            deblend_model = {"params": params_global, "report": report, "tile_px": int(state.tile_px)}
+            if "tile_medians" in state.background_info:
+                deblend_model["tile_medians"] = state.background_info["tile_medians"]
+            masks, origins = masks[report], origins[report]
     meta.setdefault("cell_stack_shape", list(masks.shape[1:]))
     if metrics_only:
-        rois, masks = np.empty((len(report), 0, 0)), np.empty((len(report), 0, 0), bool)
         for measured in measurements.values():
             measured.contours_xy = np.empty((len(report), 0, 2))
             measured.inputs.clear()
+    if summary_only:
+        result = CDSummary(seeds_xy=all_seeds[report], measurements=measurements,
+                           pixel_size=float(pixel_size), unit=unit, meta=meta)
+        seconds["result"] = time.perf_counter() - start
+        seconds["total"] = time.perf_counter() - started
+        return result
+    if metrics_only:
+        rois, masks = np.empty((len(report), 0, 0)), np.empty((len(report), 0, 0), bool)
     row_array = np.asarray(rows, dtype=float).reshape(-1, 6)
     result = CDResult(
         image=img.copy(), binary=binary > 0, component_labels=component_labels,
@@ -700,6 +737,8 @@ def plot_cd_map(
     cells indicate unavailable values. Axes remain in pixel coordinates.
     Returned Matplotlib axes can be zoomed or saved by the caller.
     """
+    if isinstance(result, CDSummary):
+        raise ValueError("image maps require summary_only=False")
     import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
     from matplotlib.colors import Normalize
@@ -792,6 +831,8 @@ def save_cd_results(result: CDResult, output, *, compact: bool = False) -> dict[
     The two halves are ``save_cd_tables`` and ``save_cd_arrays``, for
     pipelines that write the CSVs in another process.
     """
+    if isinstance(result, CDSummary):
+        raise ValueError("image exports require summary_only=False")
     if compact and result.meta.get("metrics_only"):
         raise ValueError("compact geometry export requires metrics_only=False; save tables or a full NPZ instead")
     return {**save_cd_tables(result, output, compact=compact), **save_cd_arrays(result, output, compact=compact)}
@@ -803,6 +844,8 @@ def _output_names(compact: bool) -> tuple[str, ...]:
 
 def save_cd_tables(result: CDResult, output, *, compact: bool = False) -> dict[str, Path]:
     """The CSV half of ``save_cd_results``: measurements.csv, cells.csv and (unless compact) contours.csv."""
+    if isinstance(result, CDSummary):
+        raise ValueError("cell tables require summary_only=False; batch page tables accept a summary")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     paths = {name: output / name for name in _output_names(compact) if name.endswith(".csv")}
@@ -859,6 +902,8 @@ def save_cd_tables(result: CDResult, output, *, compact: bool = False) -> dict[s
 
 def save_cd_arrays(result: CDResult, output, *, compact: bool = False) -> dict[str, Path]:
     """The array half of ``save_cd_results``: raw_data.npz and manifest.json (which lists the CSVs too)."""
+    if isinstance(result, CDSummary):
+        raise ValueError("image exports require summary_only=False")
     if compact and result.meta.get("metrics_only"):
         raise ValueError("compact geometry export requires metrics_only=False; save tables or a full NPZ instead")
     output = Path(output)
