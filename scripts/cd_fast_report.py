@@ -1,11 +1,10 @@
-"""Report every PNG with fast CD methods and matched slow-method comparisons.
+"""Report every PNG with all original and fast methods in the original layout.
 
-    python scripts/cd_fast_report.py FOLDER --output REPORT --pixel-size 21 --unit nm
+    python scripts/cd_fast_report.py FOLDER --pixel-size 21 --unit nm
 
-Defaults to the three fused 4x local area methods. The corresponding original
-model methods run separately on every image to check agreement and coverage.
---include-pixel also evaluates native-pixel counting; --fast-only skips the
-reference calculation after validation. Open REPORT/index.html offline.
+Includes the ten original report methods, four raw-cell methods and three
+native-pixel methods. Maps, measured outlines, hole details and statistics use
+the original report. Open the printed index.html path directly in a browser.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ import argparse
 from contextlib import contextmanager, nullcontext
 import csv
 import hashlib
-import html
 import json
 from pathlib import Path
 import re
@@ -31,13 +29,12 @@ from scripts import cd_report as report
 from scripts.analyze_contact_holes import load_image
 from scripts.cd_batch import measurement_fingerprint
 from scripts.cd_compare import finite_json, numeric_result
-from scripts.cd_report_compare import aggregate_comparisons, compare_image
-from scripts.cd_report_compare_view import comparison_html, write_comparison_plot
-from subpx import measure_cds
-from subpx.cd import PIXEL_METHODS, _resolve_backends
+from subpx import measure_cds, save_cd_results
+from subpx.cd import LOCAL_METHODS, _resolve_backends
 
-FAST_METHODS = ("local_half_area", "local_half_area_min_avg", "local_tail_area")
-REFERENCE_METHODS = ("half_area", "half_area_min_avg", "tail_area")
+ORIGINAL_METHODS = report.ALL_METHODS
+FAST_METHODS = LOCAL_METHODS
+ALL_METHODS = ORIGINAL_METHODS + FAST_METHODS
 
 
 def write_csv(path, rows, fields=()):
@@ -68,8 +65,8 @@ def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("folder", type=Path)
     parser.add_argument("--output", type=Path, help="New or empty report folder")
-    parser.add_argument("--include-pixel", action="store_true", help="Also compare the three native-pixel methods")
-    parser.add_argument("--fast-only", action="store_true", help="Skip slow references; no agreement claim is made")
+    # Keep the previously supplied command valid; native-pixel methods are now always included.
+    parser.add_argument("--include-pixel", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--recursive", action="store_true", help="Include PNGs in subfolders")
     parser.add_argument("--pixel-size", type=float, default=1.0)
     parser.add_argument("--unit", default="px")
@@ -87,9 +84,8 @@ def argument_parser():
     parser.add_argument("--tail-window", type=float, default=1.2)
     parser.add_argument("--deblend-iterations", type=int, default=30)
     parser.add_argument("--deblend-tolerance", type=float, default=1e-3)
-    parser.add_argument("--match-distance", type=float, default=1.0, help="Maximum seed matching distance in pixels")
-    parser.add_argument("--max-difference", type=float,
-                        help="Optional limit in --unit for the 95th percentile absolute paired-hole difference")
+    parser.add_argument("--no-hole-details", action="store_true", help="Skip the click panel's cell images and profiles")
+    parser.add_argument("--save-results", action="store_true", help="Also save full per-hole results (compact NPZ + CSVs)")
     return parser
 
 
@@ -99,16 +95,15 @@ def _settings(args, backend):
                 pixel_size=args.pixel_size, unit=args.unit, backend=backend, device=args.device,
                 half_area_level=args.half_level, half_area_peak_pixels=args.peak_pixels,
                 tail_area_level=args.tail_level, tail_window=args.tail_window,
-                deblend_iterations=args.deblend_iterations, deblend_tolerance=args.deblend_tolerance,
-                summary_only=True, n_angles=16, outlines=False)
+                deblend_iterations=args.deblend_iterations, deblend_tolerance=args.deblend_tolerance)
 
 
-def _number_rows(name, result):
-    return [dict(image=name, status="ok", method=method, holes=len(result.seeds_xy), **stats, unit=result.unit)
-            for method, stats in report.cd_statistics(result).items()]
+def _write_data(path, namespace, key, value):
+    path.write_text(f"window.{namespace}[{json.dumps(key)}]="
+                    + json.dumps(value, allow_nan=False) + ";\n", encoding="utf-8")
 
 
-def _process_image(path, name, ident, output, fast_methods, reference_methods, options, max_distance, rng):
+def _process_image(path, name, ident, output, options, rng, *, hole_details=True, save_results=False):
     from PIL import Image
 
     started = time.perf_counter()
@@ -117,64 +112,51 @@ def _process_image(path, name, ident, output, fast_methods, reference_methods, o
                   shape=list(image.shape), dtype=str(image.dtype))
     read_s = time.perf_counter() - started
     started = time.perf_counter()
-    fast = measure_cds(image, methods=fast_methods, **options)
-    fast_s = time.perf_counter() - started
-    statistics = report.cd_statistics(fast)
-    rows = _number_rows(name, fast)
-    reference = None
-    reference_s = None
-    reference_error = None
-    comparisons = []
-    if reference_methods:
-        started = time.perf_counter()
-        try:
-            reference = measure_cds(image, methods=reference_methods, **options)
-        except Exception as error:
-            reference_error = str(error) or type(error).__name__
-        reference_s = time.perf_counter() - started
-        if reference is not None:
-            statistics.update(report.cd_statistics(reference))
-            rows.extend(_number_rows(name, reference))
-            comparisons = compare_image(reference, fast, image_id=name, max_distance=max_distance,
-                                        reference_meta={"measure_s": reference_s},
-                                        candidate_meta={"measure_s": fast_s})
-        else:
-            rows.extend(dict(image=name, status="failed", method=method, error=reference_error)
-                        for method in reference_methods)
-
+    # The original viewer aligns methods by hole ID. A mixed call retains that
+    # common seed/cell list; each fast method still measures its raw-cell input.
+    result = measure_cds(image, methods=ALL_METHODS, **options)
+    measure_s = time.perf_counter() - started
     started = time.perf_counter()
+    statistics = report.cd_statistics(result)
+    rows = [dict(image=name, status="ok", method=method, holes=len(result.seeds_xy), **stats, unit=result.unit)
+            for method, stats in statistics.items()]
     image_mean = float(np.mean(image, dtype=np.float64))
-    intensity = report.cell_intensity(fast)
+    intensity = report.cell_intensity(result)
     intensity = None if intensity is None else report._spread(intensity)
-    layers = report.layer_values(fast)
+    layers = report.layer_values(result)
     samples = {}
     for layer, values in layers.items():
         values = values[np.isfinite(values)]
         samples[layer] = rng.choice(values, min(len(values), 50_000), replace=False)
     Image.fromarray(report.display_image(image)).save(output / "images" / f"{ident}.png")
-    data = report.hole_data(fast, layers, ident, image=image)
-    (output / "data" / f"{ident}.js").write_text(
-        f"window.CD_DATA[{json.dumps(ident)}]=" + json.dumps(data, allow_nan=False) + ";\n", encoding="utf-8")
-    np.savez_compressed(output / "arrays" / f"{ident}.fast.npz", **numeric_result(fast))
-    if reference is not None:
-        np.savez_compressed(output / "arrays" / f"{ident}.reference.npz", **numeric_result(reference))
+    _write_data(output / "data" / f"{ident}.js", "CD_DATA", ident, report.hole_data(result, layers, ident))
+    for method in result.measurements:
+        _write_data(output / "data" / f"{ident}.{method}.rays.js", "CD_RAYS", ident + "/" + method,
+                    report.rays_data(result, method))
+    detail = tail = None
+    if hole_details:
+        detail = f"data/{ident}.detail.js"
+        _write_data(output / detail, "CD_DETAIL", ident, report.detail_data(result))
+        wide = report.tail_detail(result)
+        if wide is not None:
+            tail = f"data/{ident}.tail.js"
+            _write_data(output / tail, "CD_TAIL", ident, wide)
+    np.savez_compressed(output / "arrays" / f"{ident}.npz", **numeric_result(result))
+    if save_results:
+        save_cd_results(result, output / "results" / ident, compact=True)
     if intensity is not None:
-        rows.append(dict(image=name, status="ok", method="cell_intensity", holes=len(fast.seeds_xy),
-                         cells=len(fast.seeds_xy), **intensity, unit="counts"))
-    rows.append(dict(image=name, status="ok", method="image_intensity", holes=len(fast.seeds_xy),
+        rows.append(dict(image=name, status="ok", method="cell_intensity", holes=len(result.seeds_xy),
+                         cells=len(result.seeds_xy), **intensity, unit="counts"))
+    rows.append(dict(image=name, status="ok", method="image_intensity", holes=len(result.seeds_xy),
                      valid=int(image.size), mean=image_mean, unit="counts"))
     writing_s = time.perf_counter() - started
-    timing = dict(image=name, status="ok", read_s=read_s, fast_s=fast_s, reference_s=reference_s,
-                  export_s=writing_s, reference_error=reference_error,
-                  reference_converged=None if reference is None else reference.meta.get("deblend_converged"),
-                  reference_iterations=None if reference is None else reference.meta.get("deblend_iterations_used"))
-    entry = dict(id=ident, name=name, holes=len(fast.seeds_xy), stats=statistics, width=image.shape[1],
-                 height=image.shape[0], seconds=fast_s, image=f"images/{ident}.png", data=f"data/{ident}.js",
-                 detail=None, tail=None, agreement=report.agreement(fast), intensity=intensity, image_mean=image_mean,
-                 intensity_source=report.intensity_source(fast.measurements))
-    source.update(id=ident, status="ok", fast_meta=fast.meta,
-                  reference_meta=None if reference is None else reference.meta, reference_error=reference_error)
-    return entry, rows, comparisons, timing, source, samples
+    timing = dict(image=name, status="ok", read_s=read_s, measure_s=measure_s, export_s=writing_s)
+    entry = dict(id=ident, name=name, holes=len(result.seeds_xy), stats=statistics, width=image.shape[1],
+                 height=image.shape[0], seconds=measure_s, image=f"images/{ident}.png", data=f"data/{ident}.js",
+                 detail=detail, tail=tail, agreement=report.agreement(result), intensity=intensity,
+                 image_mean=image_mean, intensity_source="tail_area")
+    source.update(id=ident, status="ok", meta=result.meta)
+    return entry, rows, timing, source, samples
 
 
 def main(argv=None):
@@ -182,10 +164,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not args.folder.is_dir():
         parser.error(f"Folder not found: {args.folder}")
-    if not np.isfinite(args.match_distance) or args.match_distance < 0:
-        parser.error("--match-distance must be finite and nonnegative")
-    if args.max_difference is not None and (not np.isfinite(args.max_difference) or args.max_difference < 0):
-        parser.error("--max-difference must be finite and nonnegative")
     output = args.output or ROOT / "artifacts" / time.strftime("cd_fast_report_%Y%m%d_%H%M%S")
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         parser.error("--output must be a new or empty folder")
@@ -196,29 +174,30 @@ def main(argv=None):
         parser.error(f"No PNG images in {args.folder}")
     backend, _ = _resolve_backends(args.backend, None, "model")
     options = _settings(args, backend)
-    fast_methods = FAST_METHODS + (PIXEL_METHODS if args.include_pixel else ())
-    references = () if args.fast_only else REFERENCE_METHODS
-    methods = fast_methods + references
-    # Validate numerical options before creating a partial report on a typo.
-    measure_cds(np.zeros((8, 8), np.uint8), methods=fast_methods, **{**options, "backend": "cpu"})
+    # Validate numerical options before creating output folders.
+    try:
+        measure_cds(np.zeros((8, 8), np.uint8), methods=ALL_METHODS, **{**options, "backend": "cpu"})
+    except ValueError as error:
+        parser.error(str(error))
     for folder in ("images", "data", "arrays"):
         (output / folder).mkdir(parents=True, exist_ok=True)
-    print(f"Fast CD report: {len(images)} PNGs; {backend.upper()} device {args.device}; "
-          + ("slow references on every image." if references else "fast methods only."), flush=True)
+    print(f"CD report: {len(images)} PNGs; {len(ORIGINAL_METHODS)} original + {len(FAST_METHODS)} fast methods; "
+          f"{backend.upper()} device {args.device}.", flush=True)
     started = time.perf_counter()
-    entries, rows, comparisons, timings, sources = [], [], [], [], []
+    entries, rows, timings, sources = [], [], [], []
     samples, used = {}, set()
     rng = np.random.default_rng(0)
     with measurement_runtime(backend, args.device):
         for number, path in enumerate(images, 1):
             name = path.relative_to(args.folder).as_posix()
             ident = re.sub(r"[^A-Za-z0-9_-]", "_", str(Path(name).with_suffix(""))) or "image"
-            while ident in used:
+            while ident.casefold() in used:
                 ident += "_"
-            used.add(ident)
+            used.add(ident.casefold())
             try:
-                entry, values, changes, timing, source, values_by_layer = _process_image(
-                    path, name, ident, output, fast_methods, references, options, args.match_distance, rng)
+                entry, values, timing, source, values_by_layer = _process_image(
+                    path, name, ident, output, options, rng,
+                    hole_details=not args.no_hole_details, save_results=args.save_results)
             except Exception as error:
                 message = str(error).replace(str(path), name) or type(error).__name__
                 entries.append(dict(id=ident, name=name, error=message))
@@ -229,57 +208,40 @@ def main(argv=None):
                 continue
             entries.append(entry)
             rows.extend(values)
-            comparisons.extend(changes)
             timings.append(timing)
             sources.append(source)
             for layer, values in values_by_layer.items():
                 samples.setdefault(layer, []).append(values)
-            reference_text = ("off" if not references else "failed" if timing["reference_error"]
-                              else f"{timing['reference_s']:.2f} s")
-            print(f"[{number}/{len(images)}] {name}: fast {timing['fast_s']:.2f} s; reference {reference_text}", flush=True)
-    aggregates = aggregate_comparisons(comparisons)
-    write_csv(output / "summary.csv", rows, ("image", "status", "method"))
-    between = report.between_image_statistics(entries, methods)
+            print(f"[{number}/{len(images)}] {name}: {entry['holes']:,} holes; {timing['measure_s']:.2f} s", flush=True)
+    fields = (["image", "status", "method", "holes", "cells"]
+              + [key + suffix for suffix, _, _ in report.AXES
+                 for key in ("valid", "mean", "std", "three_sigma_pct")] + ["unit", "error"])
+    write_csv(output / "summary.csv", rows, fields)
+    between = report.between_image_statistics(entries, ALL_METHODS)
     brightness = report.brightness_between(entries)
+    fields = ["method"] + [key + suffix for suffix, _, _ in report.AXES
+                           for key in ("images", "mean_of_means", "std_of_means", "three_sigma", "three_sigma_pct")] + ["unit"]
     write_csv(output / "between_images.csv", [dict(method=m, **values, unit=args.unit) for m, values in between.items()]
-              + [dict(method=m, **values, unit="counts") for m, values in brightness.items()], ("method",))
-    write_csv(output / "comparison.csv", comparisons, ("image_id", "method_reference", "method_candidate", "axis"))
-    write_csv(output / "comparison_between_images.csv", aggregates, ("method_reference", "method_candidate", "axis"))
+              + [dict(method=m, **values, unit="counts") for m, values in brightness.items()], fields)
     write_csv(output / "timings.csv", timings, ("image", "status"))
-    plot = "comparison.png" if write_comparison_plot(output / "comparison.png", comparisons, args.unit) else None
-    extra = comparison_html(comparisons, aggregates, args.unit, max_difference=args.max_difference, plot_file=plot)
-    failures = [e for e in entries if e.get("error")]
-    reference_failures = [t for t in timings if t.get("reference_error")]
-    if reference_failures:
-        extra += "<p class='error'>Reference calculation failed: " + "; ".join(
-            html.escape(f"{t['image']}: {t['reference_error']}") for t in reference_failures) + "</p>"
-    notes = ["Fast measurements run independently of the model reference; position matches use a mutual nearest "
-             f"seed within {args.match_distance:g} px. Differences are fast minus reference in {args.unit}.",
-             "Maps show fast-method area-equivalent circles and numerical hole values. Slow reference values "
-             "are in the statistics and comparison tables. Cell intensity uses the raw-cell local tail region.",
-             "Between-image spread describes these images; repeatability interpretation requires repeated "
-             "acquisitions of the same target and settings. The paired valid-hole population can change between images."]
-    if not references:
-        notes.insert(0, "Slow references were not run (--fast-only); comparability has not been assessed by this report.")
     ranges = {}
     for layer, parts in samples.items():
         values = np.concatenate(parts)
         if len(values):
             ranges[layer] = np.quantile(values, [0.02, 0.98]).tolist()
-    page = report.write_report(output, entries, methods, notes, args.unit, ranges, extra_summary=extra)
+    page = report.write_report(output, entries, ALL_METHODS, [], args.unit, ranges)
     elapsed = time.perf_counter() - started
-    manifest = dict(schema_version=1, source_folder=str(args.folder.resolve()),
+    failures = [e for e in entries if e.get("error")]
+    manifest = dict(schema_version=2, source_folder=str(args.folder.resolve()),
                     measurement_fingerprint=measurement_fingerprint(), settings=options,
-                    fast_methods=fast_methods, reference_methods=references, max_distance_px=args.match_distance,
-                    max_difference=args.max_difference, elapsed_s=elapsed, images=sources,
+                    methods=ALL_METHODS, original_methods=ORIGINAL_METHODS, fast_methods=FAST_METHODS,
+                    elapsed_s=elapsed, images=sources,
                     successful_images=len(entries) - len(failures), failed_images=len(failures),
-                    reference_failures=len(reference_failures),
-                    note="Timings include first-use compilation; fast/reference measurement and output are separate. "
-                         "Comparison is against the selected model estimators, not physical ground truth.")
+                    note="All methods share the original model pipeline's seed/cell list. Fast methods measure "
+                         "raw cells. Full display inputs and outlines are retained; this is not a fast-only batch timing.")
     (output / "run.json").write_text(json.dumps(finite_json(manifest), indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    print(f"Report: {page} ({elapsed:.1f} s; {len(failures)} failed images, "
-          f"{len(reference_failures)} failed references).", flush=True)
-    return int(bool(failures or reference_failures))
+    print(f"Report: {page} ({elapsed:.1f} s; {len(failures)} failed images).", flush=True)
+    return int(bool(failures))
 
 
 if __name__ == "__main__":

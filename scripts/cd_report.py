@@ -312,6 +312,8 @@ def hole_data(result, layers: dict[str, np.ndarray], ident: str = "", image=None
 def _quantize(cells: np.ndarray, inside: np.ndarray) -> dict:
     """8-bit codes per cell pixel (255 = outside the cell) with each cell's offset and step, base64."""
     n = len(cells)
+    if not n:
+        return {"codes": "", "lo": "", "step": ""}
     flat = cells.reshape(n, -1).astype(float)
     inside = inside.reshape(n, -1) & np.isfinite(flat)
     lo = np.where(inside, flat, np.inf).min(axis=1)
@@ -337,8 +339,9 @@ def tail_detail(result) -> dict | None:
 def detail_data(result) -> dict:
     """What each method measured each hole on, for the click panel.
 
-    ``clean``: the cell with background and neighbours' models removed (input of every method; zero outside the
-    cell), 8-bit for display. ``prof_x``/``prof_y``: projection's column and row sums of that cell in full
+    ``clean``: the cell with background and neighbours' models removed, 8-bit for display.
+    ``local``: the fast methods' raw cells, with their own origins and dimensions.
+    ``prof_x``/``prof_y``: projection's column and row sums of its measured input in full
     precision (8-bit sums move the steepest points visibly). ``half``: half_area's local level, peak height above
     it, threshold, region centroid in the cell and its outline as distances along 32 rays (1/16 px, 8-bit).
     """
@@ -348,6 +351,20 @@ def detail_data(result) -> dict:
     if "projection" in result.measurements:
         cells = np.where(result.masks, result.rois, 0.0)
         out["prof_x"], out["prof_y"] = _b64(cells.sum(axis=1), "<f4"), _b64(cells.sum(axis=2), "<f4")
+    raw = next((m.inputs for name, m in result.measurements.items()
+                if name.startswith(("local_", "pixel_")) and "cells" in m.inputs), None)
+    if raw is not None:
+        cells, inside, origins = raw["cells"], raw["inside"], raw["origins"]
+        local = {"h": int(cells.shape[1]), "w": int(cells.shape[2]),
+                 "ox": _b64(origins[:, 0], "<i4"), "oy": _b64(origins[:, 1], "<i4"),
+                 "clean": _quantize(cells, inside)}
+        if "local_projection" in result.measurements:
+            # Inputs have signal polarity; the public background metric has image polarity.
+            level = result.measurements["local_projection"].metrics["background"] * (-1 if result.meta.get("invert") else 1)
+            cleaned = np.where(inside, cells - level[:, None, None], 0.0)
+            local["projection_level"] = _b64(level, "<f4")
+            local["prof_x"], local["prof_y"] = _b64(cleaned.sum(axis=1), "<f4"), _b64(cleaned.sum(axis=2), "<f4")
+        out["local"] = local
     out["half"] = {}
     peak_pixels = result.meta.get("half_area_peak_pixels", 4.0)
     averaged = f"mean of the brightest {peak_pixels:g} pixels' worth of the enlarged cell"
@@ -355,14 +372,20 @@ def detail_data(result) -> dict:
     corners = ("median of the farthest tenth of the hole's own area (the pixels closer to it than to any other hole), "
                "where its light has faded, on a wider window holding its share of the light; the area may reach past "
                "the cell drawn here")
-    for name, background, peak in (
+    specs = [
             ("half_area", f"median {edge}", "highest point"), ("half_area_min", f"minimum {edge}", "highest point"),
             ("half_area_min_avg", f"minimum {edge}", averaged), ("tail_area", corners, averaged),
             ("tail_area_norm", "zero: no background step; the pattern is divided by its peak and the area is where "
              "it exceeds the level", averaged),
             ("edge_area", "zero: no background step", "not used (shown for comparison: " + averaged + ")"),
             ("foot_area", "zero: no background step", "not used (shown for comparison: " + averaged + ")"),
-            ("foot_area_ratio", "zero: no background step", "not used (shown for comparison: " + averaged + ")")):
+            ("foot_area_ratio", "zero: no background step", "not used (shown for comparison: " + averaged + ")")]
+    for prefix in ("local", "pixel"):
+        peak = averaged if prefix == "local" else f"mean of the brightest {peak_pixels:g} original pixels"
+        specs.extend(((f"{prefix}_half_area", f"median {edge}", "highest point"),
+                      (f"{prefix}_half_area_min_avg", f"minimum {edge}", peak),
+                      (f"{prefix}_tail_area", f"median {edge}", peak)))
+    for name, background, peak in specs:
         if name not in result.measurements:
             continue
         measured = result.measurements[name]
@@ -374,8 +397,10 @@ def detail_data(result) -> dict:
                              "cx": _b64(geometry["center_local"][:, 0], "<f4"), "cy": _b64(geometry["center_local"][:, 1], "<f4"),
                              "rays": _b64(np.clip(np.rint(np.nan_to_num(rays) * 16), 0, 255), "u1"), "n_rays": int(rays.shape[1]),
                              "level_fraction": float(result.meta.get(
-                                 "tail_area_level" if name.startswith("tail") else "half_area_level",
-                                 0.2 if name.startswith("tail") else 0.5))}
+                                 "tail_area_level" if "tail_area" in name else "half_area_level",
+                                 0.2 if "tail_area" in name else 0.5))}
+        if name.startswith(("local_", "pixel_")):
+            out["half"][name].update(input="local", factor=1 if name.startswith("pixel_") else 4)
         if name == "foot_area":
             out["half"][name]["threshold_rule"] = ("brightness at the foot of the edge, where the falling slope bends "
                                                    "into the flat surroundings")
@@ -976,6 +1001,8 @@ function loadDetail(id){if(detailLoading===id)return;detailLoading=id;const s=do
 function prepareDetail(D){if(D.ready)return;D.ox=unpack(D.ox,Int32Array);D.oy=unpack(D.oy,Int32Array);
   const C=D.clean;C.codes=unpack(C.codes,Uint8Array);C.lo=unpack(C.lo,Float32Array);C.step=unpack(C.step,Float32Array);
   if(D.prof_x){D.prof_x=unpack(D.prof_x,Float32Array);D.prof_y=unpack(D.prof_y,Float32Array);}
+  if(D.projection_level)D.projection_level=unpack(D.projection_level,Float32Array);
+  if(D.local)prepareDetail(D.local);
   for(const F of Object.values(D.half||{})){for(const k of ["level","peak","threshold","mean","cx","cy"])F[k]=unpack(F[k],Float32Array);F.rays=unpack(F.rays,Uint8Array);}D.ready=true;}
 function cellValues(D,part,i){const n=D.h*D.w,out=new Float32Array(n);for(let p=0;p<n;p++){const c=part.codes[i*n+p];out[p]=c===255?NaN:part.lo[i]+c*part.step[i];}return out;}
 function drawCell(id,D,vals,overlay,diverging){const cv=$(id),s=Math.max(6,Math.floor(170/Math.max(D.h,D.w)));cv.width=D.w*s;cv.height=D.h*s;
@@ -1001,17 +1028,20 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
   const D=window.CD_DETAIL[curId];
   if(!ENTRIES[curId].detail){$("detail").innerHTML=out+"<p class='meta'>Cell images were not stored. Per-hole values and statuses are shown above.</p>";return;}
   if(!D){$("detail").innerHTML=out+"<p class='meta'>Loading hole details…</p>";loadDetail(curId);return;}
-  prepareDetail(D);const ox=D.ox[i],oy=D.oy[i],cx=m.x[i]-ox,cy=m.y[i]-oy,cdv=m.cd[i];
-  if(base==="projection"){const P=cur.methods.projection,px=cur.methods.projection_x.cd[i],py=cur.methods.projection_y.cd[i];
-    const pcx=P.x[i]-ox,pcy=P.y[i]-oy,vals=cellValues(D,D.clean,i);
-    const X=Array.from(D.prof_x.subarray(i*D.w,(i+1)*D.w)),Y=Array.from(D.prof_y.subarray(i*D.h,(i+1)*D.h));
-    out+=`<h3>projection</h3><p class="explain">The cell with background and neighbours removed. Each column is summed into the x profile, each row into the y profile; a smooth curve (cubic spline) goes exactly through the sums, and the width is the distance between its steepest rise and steepest fall (red). Cell outline: dark pixels are outside the cell. The dots are rarely symmetric even for a symmetric feature: its centre falls between pixels, so the two sides are sampled at different points; the ragged cell outline changes how many pixels each sum holds; and noise moves the few dots near each edge. The curve follows the dots exactly, so all three move the edges.</p>
+  prepareDetail(D);const ox=D.ox[i],oy=D.oy[i],cx=m.x[i]-ox,cy=m.y[i]-oy,cdv=cur.methods[base]?.cd[i]??m.cd[i];
+  if(base==="projection"||base==="local_projection"){const raw=base==="local_projection",G=raw?D.local:D;
+    const P=cur.methods[base],px=cur.methods[base+"_x"].cd[i],py=cur.methods[base+"_y"].cd[i];
+    const pcx=P.x[i]-G.ox[i],pcy=P.y[i]-G.oy[i],vals=cellValues(G,G.clean,i);
+    if(raw)for(let p=0;p<vals.length;p++)vals[p]-=G.projection_level[i];
+    const X=Array.from(G.prof_x.subarray(i*G.w,(i+1)*G.w)),Y=Array.from(G.prof_y.subarray(i*G.h,(i+1)*G.h));
+    const inputNote=raw?"The raw cell after subtracting its median edge level; neighbour light remains.":"The cell with background and neighbours removed.";
+    out+=`<h3>${base}</h3><p class="explain">${inputNote} Each column is summed into the x profile, each row into the y profile; a smooth curve (cubic spline) goes exactly through the sums, and the width is the distance between its steepest rise and steepest fall (red). Cell outline: dark pixels are outside the cell. The dots are rarely symmetric even for a symmetric feature: its centre falls between pixels, so the two sides are sampled at different points; the ragged cell outline changes how many pixels each sum holds; and noise moves the few dots near each edge. The curve follows the dots exactly, so all three move the edges.</p>
       <div class="cells"><figure><canvas id="dc-a"></canvas>cell and the x/y widths</figure></div>
       <canvas class="plot" id="pp-x-v" style="height:150px"></canvas><canvas class="plot" id="pp-x-s" style="height:90px"></canvas>
       <canvas class="plot" id="pp-y-v" style="height:150px"></canvas><canvas class="plot" id="pp-y-s" style="height:90px"></canvas>`;
-    $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(pcx,pcy,px/2,py/2,"#e03b3b"));
+    $("detail").innerHTML=out;drawCell("dc-a",G,vals,outline(pcx,pcy,px/2,py/2,"#e03b3b"));
     profilePlots("pp-x",X,[pcx-px/2,pcx+px/2],"x profile (column sums)");profilePlots("pp-y",Y,[pcy-py/2,pcy+py/2],"y profile (row sums)");return;}
-  if(D.half&&D.half[base]){const F=D.half[base],b=F.level[i],pk=F.peak[i],t=F.threshold[i];let G=D,vals=cellValues(D,D.clean,i),hx=F.cx[i],hy=F.cy[i],old=null;
+  if(D.half&&D.half[base]){const F=D.half[base],b=F.level[i],pk=F.peak[i],t=F.threshold[i];let G=F.input==="local"?D.local:D,vals=cellValues(G,G.clean,i),hx=F.cx[i],hy=F.cy[i],old=null;
     if((base.startsWith("tail_area")||base==="edge_area"||base.startsWith("foot_area"))&&ENTRIES[curId].tail){const T=window.CD_TAIL[curId];
       if(!T){$("detail").innerHTML=out+"<p class='meta'>Loading the wider window…</p>";loadTail(curId);return;}
       if(!T.ready){T.ox=unpack(T.ox,Int32Array);T.oy=unpack(T.oy,Int32Array);const C=T.cells;C.codes=unpack(C.codes,Uint8Array);
@@ -1021,14 +1051,16 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
     for(let r=0;r<nr;r++){const a=2*Math.PI*r/nr,q=F.rays[i*nr+r]/16;pts.push([hx+q*Math.cos(a),hy+q*Math.sin(a)]);}
     const poly=(g,s)=>{if(old)old(g,s);if(!fin(hx))return;g.strokeStyle=COLORS[base];g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
     const wideNote=old?"<p class='meta'>Shown: the wider window this method measures on, holding this hole's share of the light (each pixel's light shared among the holes in proportion to their fitted models). Dashed: the hole's ordinary cell, which the other methods are limited to; the region may reach past it.</p>":"";
-    out+=`<h3>${base}</h3><p class="explain">The cell with background and neighbours removed. Its local level b is the ${F.background}; its peak is the ${F.peak_rule}. The cell is enlarged 4× by smooth (cubic spline) interpolation; the region is the connected area around the peak brighter than the threshold ${F.threshold_rule?"= the "+F.threshold_rule+"; the peak is not used":"b + "+F.level_fraction+" × (peak − b)"}. CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
+    const inputNote=F.input==="local"?"The raw cell; fitted background and neighbours have not been removed.":"The cell with background and neighbours removed.";
+    const gridNote=F.factor===1?"The region is counted on the original pixels, without enlargement":"The cell is enlarged 4x by smooth (cubic spline) interpolation";
+    out+=`<h3>${base}</h3><p class="explain">${inputNote} Its local level b is the ${F.background}; its peak is the ${F.peak_rule}. ${gridNote}; the region is the connected area around the peak brighter than the threshold ${F.threshold_rule?"= the "+F.threshold_rule+"; the peak is not used":"b + "+F.level_fraction+" × (peak − b)"}. CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
       ${wideNote}<div class="cells"><figure><canvas id="dc-a"></canvas>${old?"wider window":"cell"} and region outline</figure><figure><canvas id="dc-b"></canvas>original pixels above the threshold (red)</figure></div>
       <table><tr><td>local level b</td><td>${fin(b)?b.toPrecision(4):"–"}</td></tr><tr><td>peak height above b (${F.peak_rule})</td><td>${fin(pk)?pk.toPrecision(4):"–"}</td></tr>
       <tr><td>threshold = ${F.threshold_rule?(base.startsWith("foot_area")?"brightness at the foot of the edge":"steepness-weighted mean brightness"):"b + "+F.level_fraction+" × height"}</td><td>${fin(t)?t.toPrecision(4):"–"}</td></tr>
       <tr><td>mean light above b in the region${base==="tail_area"?" (cell intensity)":""}</td><td>${fin(F.mean[i])?F.mean[i].toPrecision(4):"–"}</td></tr>
       <tr><td>region area</td><td>${fin(cdv)?(Math.PI*cdv*cdv/4).toFixed(2)+" px²":"–"}</td></tr>
       <tr><td>CD = 2 √(area / π)</td><td>${fin(cdv)?cdv.toFixed(3)+" px = "+(cdv*cur.scale).toFixed(2)+" "+cur.unit:"–"}</td></tr></table>
-      <p class="meta">The outline is drawn from 32 directions around the region's centre, so it is approximate for very irregular shapes; the area itself is counted pixel by pixel on the enlarged cell.</p>`;
+      <p class="meta">The outline is drawn from 32 directions around the region's centre, so it is approximate for very irregular shapes; the area itself is counted pixel by pixel on ${F.factor===1?"the original pixels":"the enlarged cell"}.</p>`;
     $("detail").innerHTML=out;drawCell("dc-a",G,vals,poly);drawCell("dc-b",G,above,poly,true);return;}
   const vals=cellValues(D,D.clean,i);
   out+=`<h3>${k}</h3><p class="explain">The cell this method measured (background and neighbours removed; dark pixels are outside the cell), with its outline at the CD.</p><div class="cells"><figure><canvas id="dc-a"></canvas>cell and outline</figure></div>`;

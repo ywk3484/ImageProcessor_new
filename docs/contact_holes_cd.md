@@ -30,70 +30,63 @@ For real data on a Windows server, follow the
 [short run guide](remote_server.md) for the command, input parameters, image
 loading, and output files.
 
-## Fast PNG-folder report and comparison with the previous methods
+## PNG-folder report with all original and fast methods
 
 ```powershell
-python scripts\cd_fast_report.py D:\data\png_images --output D:\results\fast_report --pixel-size 21 --unit nm
+python scripts\cd_fast_report.py D:\data\png_images --pixel-size 21 --unit nm
 ```
 
-Use your image calibration for `--pixel-size` and `--unit`. Open the resulting
-`index.html` directly in a browser. Every PNG in the folder is processed;
-`--recursive` also includes subfolders. The output folder must be new or empty.
-Unreadable images and failed reference calculations are listed while the other
-images finish.
+Use your image calibration for `--pixel-size` and `--unit`. The command prints
+its output path; open `index.html` directly in a browser. Every PNG in the
+folder is processed, including upper-case `.PNG` extensions. `--recursive`
+also includes subfolders. Use `--output D:\results\report` to choose a new or
+empty output folder. Unreadable images are listed while the remaining images
+finish.
 
-The default fast methods are `local_half_area`, `local_half_area_min_avg` and
-`local_tail_area`, using the fused GPU implementation with the 4x cubic grid.
-The report retains CD maps, per-hole numerical values/statuses, band profiles,
-histograms, within-image mean/standard deviation/3-sigma percent, and the
-between-image statistics of the previous report. All CD statistics include
-equivalent diameter, x width and y width. Maps display area-equivalent circles;
-cell stacks and measured outlines are omitted to keep the fused path active.
+The report uses the previous report format: a summary tab followed by one tab
+per image, CD maps with measured outlines, clickable hole measurements and
+cell images, band profiles, image statistics, the original per-hole correlation
+table and CD histograms. Mean, standard deviation and 3-sigma statistics are
+shown for CD, x width and y width, within each image and between images. Cell
+intensity again comes from the original `tail_area` region, and the band-profile
+spot peak is the fitted Gaussian amplitude.
 
-For this validation report, the corresponding original `half_area`,
-`half_area_min_avg` and `tail_area` methods run **separately on every PNG** with
-the same detection and calibration settings. Fast seeds are not supplied by
-the slow deblend. Mutual nearest seed matches within `--match-distance`
-(default 1 px) identify comparable holes; the report shows unmatched and invalid
-counts as well as paired coverage. It reports bias (fast minus reference), MAE,
-RMSE, the 95th percentile absolute difference, correlation and descriptive
-agreement limits. Reference convergence and iteration counts remain visible.
+All 17 methods run by default. The ten original methods retain their names:
+`gaussian`, `projection`, `half_area`, `half_area_min`, `half_area_min_avg`,
+`tail_area`, `tail_area_norm`, `edge_area`, `foot_area` and `foot_area_ratio`.
+The seven additional methods are `local_projection`, `local_half_area`,
+`local_half_area_min_avg`, `local_tail_area`, `pixel_half_area`,
+`pixel_half_area_min_avg` and `pixel_tail_area`. Every method appears in the
+same statistics, map selector, histograms and hole-value panel. `--include-pixel`
+is still accepted for older commands, but is unnecessary because pixel methods
+are always included.
 
-The comparison summary uses one equally weighted paired mean per image and
-shows both methods' between-image 3-sigma percent on those populations. The
-ordinary statistics also retain each method's own valid population. These
-statistics describe repeatability only when the inputs are repeated acquisitions
-of the same target/settings; changing valid-hole populations can affect them.
-`--max-difference 0.5`, for example, checks whether the per-image paired-hole
-95th percentile difference is at most 0.5 in `--unit`. Without a supplied limit,
-the report gives the differences without declaring equivalence.
+The original and fast methods share the original pipeline's final hole list
+and cell partition, keeping hole IDs consistent throughout the viewer. The
+fast methods measure raw cells; the original methods use the model-corrected
+inputs. A standalone fast-only batch can detect a different hole list because
+it skips the model's seed revision. The full report also computes measured
+outlines and cell inputs, so its total time includes both the original methods
+and display-data generation.
 
-`--include-pixel` additionally compares the three native-pixel estimators.
-They are opt-in here because counting original pixels can change both values
-and coverage substantially. On a synthetic narrow-hole image, the original
-half-area mean was 3.00761 px, local 4x was 3.00604 px and native-pixel counting
-was 3.19497 px, with all 2,805 holes valid. Local 4x also differs from deblended
-measurements under strong neighbour overlap, especially for tail area, which
-uses a different window. Neither fast variant is assumed interchangeable with
-the original methods on real images.
+There are no added fast-versus-original comparison plots, difference tables,
+coverage tables, rankings or acceptance checks. The former comparison CSVs and
+PNG are no longer generated.
 
-After checking your data, `--fast-only` generates just the fast report without
-rerunning slow references. The initial validation report deliberately includes
-their cost; `timings.csv` separates fast measurement, reference measurement,
-loading and export (first-use compilation is included).
+Outputs:
 
-Additional outputs:
-
-- `summary.csv`, `between_images.csv`: the original style of image statistics.
-- `comparison.csv`: paired-hole statistics for every image, method and axis.
-- `comparison_between_images.csv`: equally weighted paired-image statistics;
-  separately named `pooled_hole_*` fields describe hole-weighted differences.
-- `comparison.png`: candidate versus reference paired image means with equality lines.
-- `arrays/*.fast.npz`, `arrays/*.reference.npz`: per-hole numerical arrays for
-  independent analysis, without display geometry; these are not `CDResult` exports.
+- `index.html`, `images/`, `data/`: the offline report, source-image previews,
+  measured outlines and hole-detail data.
+- `summary.csv`, `between_images.csv`: the original style of image statistics,
+  with all 17 methods.
+- `arrays/*.npz`: per-hole numerical arrays for all methods, in pixels with
+  calibration metadata; these are not full `CDResult` exports.
+- `timings.csv`: per-image loading, measurement and export times.
 - `run.json`: settings, input checksums, measurement implementation fingerprint,
   per-image metadata, failures and total report time.
 
+As in the previous report, `--no-hole-details` omits the cell-detail files and
+`--save-results` additionally writes full reloadable results under `results/`.
 `scripts/cd_report.py` continues to generate the original ten-method report.
 
 ## Fast page averages and an actual batch timing

@@ -541,6 +541,8 @@ def _size_buckets(masks, step: int = 4) -> list[tuple[np.ndarray, int, int]]:
     if _BUCKETS and _BUCKETS[0][0] is masks and _BUCKETS[0][1] == step:
         return _BUCKETS[0][2]
     n, h, w = masks.shape
+    if not n:
+        return []
     rows_any, cols_any = _to_numpy(masks.any(axis=2)), _to_numpy(masks.any(axis=1))
     hb = np.where(rows_any.any(axis=1), h - np.argmax(rows_any[:, ::-1], axis=1), 1)
     wb = np.where(cols_any.any(axis=1), w - np.argmax(cols_any[:, ::-1], axis=1), 1)
@@ -865,6 +867,10 @@ def _wide_cells(signal: np.ndarray, state, masks: np.ndarray, origins: np.ndarra
     radius = int(np.ceil(radius_pitches * pitch))
     size = 2 * radius + 1
     win_origins = np.rint(centers).astype(np.int64) - radius
+    if not len(rows_rep):
+        shape = (0, size, size)
+        return (np.empty(shape, np.float32), np.empty(shape, bool), np.empty(shape, bool),
+                np.empty(shape, bool), win_origins.astype(float))
     k = min(9, n_all)
     neighbours = cKDTree(centers_all).query(centers, k=k)[1].reshape(len(centers), k)
     neighbours[:, 0] = rows_rep  # itself first, even when two holes share a centre
