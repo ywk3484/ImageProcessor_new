@@ -37,14 +37,17 @@ __device__ __forceinline__ double warp_largest(double x) {
     for (int o = 16; o > 0; o >>= 1) x = fmax(x, __shfl_xor_sync(0xffffffffu, x, o));
     return x;
 }
-__device__ double cost(const double* c, const double* d, const unsigned char* m, int P, int w, int lane) {
+__device__ double cost(const double* c, const double* d, const unsigned char* m, int P, int w, int lane,
+                       double* shape_cache) {
     const double e1 = exp(c[3]), u2 = c[4], e3 = exp(c[5]);
     double acc = 0;
     for (int k = lane; k < P; k += 32) {
         if (!m[k]) continue;
         const double dx = (double)(k % w) - c[1], dy = (double)(k / w) - c[2];
         const double a = e1 * dx + u2 * dy, b = e3 * dy;
-        const double r = d[k] - c[0] * exp(-0.5 * (a * a + b * b));
+        const double shape = exp(-0.5 * (a * a + b * b));
+        if (shape_cache) shape_cache[k] = shape;
+        const double r = d[k] - c[0] * shape;
         acc += r * r;
     }
     return warp_total(acc);
@@ -57,10 +60,18 @@ extern "C" __global__ void lm_fit(
     const long long cell = (long long)blockIdx.x * (blockDim.x >> 5) + warp;
     if (cell >= n) return;  // the whole warp
     const int P = h * w;
+    double* current_shape = nullptr;
+    double* trial_shape = nullptr;
 #ifdef CELL_IN_SHARED
     extern __shared__ double cell_mem[];
     double* d = cell_mem + (size_t)warp * P;
+#ifdef CACHE_SHAPES
+    current_shape = cell_mem + (size_t)(blockDim.x >> 5) * P + (size_t)warp * P;
+    trial_shape = current_shape + (size_t)(blockDim.x >> 5) * P;
+    unsigned char* m = (unsigned char*)(cell_mem + 3 * (size_t)(blockDim.x >> 5) * P) + (size_t)warp * P;
+#else
     unsigned char* m = (unsigned char*)(cell_mem + (size_t)(blockDim.x >> 5) * P) + (size_t)warp * P;
+#endif
     for (int k = lane; k < P; k += 32) { d[k] = data[cell * P + k]; m[k] = mask[cell * P + k]; }
     __syncwarp();
 #else
@@ -73,7 +84,7 @@ extern "C" __global__ void lm_fit(
     for (int k = lane; k < P; k += 32) if (m[k]) { count += 1; peak = fmax(peak, fabs(d[k])); }
     const double cap = fmax(1.0, sqrt(warp_total(count) / 3.141592653589793));
     const double amp_cap = 3 * fmax(warp_largest(peak), 1e-12);
-    double s_cost = cost(q, d, m, P, w, lane);
+    double s_cost = cost(q, d, m, P, w, lane, current_shape);
     double lam = 1e-3;
     bool go = isfinite(s_cost);
     for (int it = 0; it < max_iter && go; ++it) {
@@ -84,7 +95,7 @@ extern "C" __global__ void lm_fit(
             if (!m[k]) continue;
             const double dx = (double)(k % w) - x0, dy = (double)(k / w) - y0;
             const double a = e1 * dx + u2 * dy, b = e3 * dy;
-            const double shape = exp(-0.5 * (a * a + b * b));
+            const double shape = current_shape ? current_shape[k] : exp(-0.5 * (a * a + b * b));
             const double model = A * shape, half = -0.5 * model;
             const double J[6] = {shape, half * (-2 * a * e1), half * (-2 * a * u2 - 2 * b * e3),
                                  half * (2 * a * e1 * dx), half * (2 * a * dy), half * (2 * b * e3 * dy)};
@@ -126,9 +137,13 @@ extern "C" __global__ void lm_fit(
         trial[0] = clip(trial[0], 0.0, amp_cap);
         trial[3] = clip(trial[3], low, high);
         trial[5] = clip(trial[5], low, high);
-        const double new_cost = cost(trial, d, m, P, w, lane);
+        const double new_cost = cost(trial, d, m, P, w, lane, trial_shape);
         const bool better = isfinite(new_cost) && new_cost <= s_cost;
-        if (better) { for (int i = 0; i < 6; ++i) q[i] = trial[i]; lam /= 3; } else { lam *= 4; }
+        if (better) {
+            for (int i = 0; i < 6; ++i) q[i] = trial[i];
+            double* previous = current_shape; current_shape = trial_shape; trial_shape = previous;
+            lam /= 3;
+        } else { lam *= 4; }
         const bool done = (better && s_cost - new_cost <= 1e-12 * fmax(s_cost, 1e-300)) || largest < 1e-7;
         if (better) s_cost = new_cost;
         go = !(done || lam > 1e12);
@@ -225,15 +240,24 @@ def _cell_parts(masks) -> list[tuple[np.ndarray, int, int]]:
     return parts
 
 
-def _fit_device(data, masks, init: np.ndarray, *, max_iter: int) -> np.ndarray:
-    """LM params for device cell stacks (N, h, w) data/uint8 masks from host ``init``."""
+def _fit_device(data, masks, init, *, max_iter: int, _download: bool = True, _cache_shapes: bool = True):
+    """LM params for device cell stacks; optionally keep the parameters on device.
+
+    Small cells reuse the exact Gaussian values from the accepted cost when
+    forming the next Jacobian. Larger cells keep the original storage layout
+    so caching does not reduce occupancy or the maximum supported cell size.
+    """
     n, h, w = data.shape
-    params = cp.asarray(init, dtype=cp.float64)
+    params = cp.array(init, dtype=cp.float64, copy=True)
     if n == 0:
-        return cp.asnumpy(params)
+        return cp.asnumpy(params) if _download else params
+    cache_shapes = _cache_shapes and h * w <= 256
     shared = _WARPS * h * w * 9
     if shared <= min(optin_shared_bytes(), 96 * 1024):
-        fit = kernel(_LM_SRC, "lm_fit", defines=("CELL_IN_SHARED",))
+        if cache_shapes:
+            shared = _WARPS * h * w * 25
+        fit = kernel(_LM_SRC, "lm_fit", defines=("CELL_IN_SHARED", "CACHE_SHAPES") if cache_shapes
+                     else ("CELL_IN_SHARED",))
         if shared > 48 * 1024:
             fit.max_dynamic_shared_size_bytes = shared
     else:
@@ -241,7 +265,7 @@ def _fit_device(data, masks, init: np.ndarray, *, max_iter: int) -> np.ndarray:
     fit((-(-n // _WARPS),), (32 * _WARPS,), (cp.ascontiguousarray(data), cp.ascontiguousarray(masks), params,
                                              np.int32(n), np.int32(h), np.int32(w), np.int32(max_iter),
                                              np.float64(cpu._SIGMA_MIN)), shared_mem=shared)
-    return cp.asnumpy(params)
+    return cp.asnumpy(params) if _download else params
 
 
 def fit_gaussians_batch(
@@ -465,9 +489,8 @@ def deblend(
     usable_d = cp.ones(shape, bool) if exclude is None else cp.asarray(~np.asarray(exclude, bool))
     part_masks = [cp.asarray(masks[:, :h, :w][rows], dtype=cp.uint8) for rows, h, w in parts]
     part_origins = [cp.asarray(origins[rows]) for rows, _, _ in parts]
-    pixels = np.empty(n)
-    for part, (rows, _, _) in enumerate(parts):
-        pixels[rows] = cp.asnumpy(part_masks[part].reshape(len(rows), -1).sum(axis=1))
+    part_rows = [cp.asarray(rows) for rows, _, _ in parts]
+    pixels = masks.sum(axis=(1, 2))
     caps = np.maximum(1.0, np.sqrt(pixels / np.pi))  # cpu.sigma_caps(masks)
     known = {}  # sigma_major of the current parameters: render radii and the background's FWHM
 
@@ -506,16 +529,19 @@ def deblend(
         return out
 
     def fit(data_of, p):
-        fitted = p.copy()
+        fitted_d = cp.empty((n, 6), dtype=cp.float64)
+        params_d = cp.asarray(p)
         for part, (rows, _, _) in enumerate(parts):
-            fitted[rows] = _fit_device(data_of(part), part_masks[part], p[rows], max_iter=max_iter)
-        status = np.full(n, "ok", dtype="U32")
-        cpu.fit_status(fitted, masks, caps, status, sigma=_sigma_major(fitted))
-        return fitted, status
+            indices = part_rows[part]
+            fitted_d[indices] = _fit_device(data_of(part), part_masks[part], params_d[indices],
+                                            max_iter=max_iter, _download=False)
+        # Status is evaluated below after relaxation; the unrelaxed status
+        # was overwritten before being read by the iteration.
+        return cp.asnumpy(fitted_d)
 
     if init is None:
         # Initialize from the cell-border background; the iterations replace it.
-        params = np.empty((n, 6))
+        params_d = cp.empty((n, 6), dtype=cp.float64)
         for part, (rows, h, w) in enumerate(parts):
             cells = part_masks[part].astype(bool)
             border = cells & ~binary_erosion(cells, structure=cp.ones((1, 3, 3), bool), border_value=0)
@@ -524,8 +550,10 @@ def deblend(
             if background_level is not None:
                 bg0[:] = background_level
             data = cp.where(cells, raw - bg0[:, None, None], 0.0)
-            start = cp.asnumpy(_initial_params(data, cells, cp.asarray(seeds_xy[rows] - origins[rows])))
-            params[rows] = _fit_device(data, part_masks[part], start, max_iter=max_iter)
+            start = _initial_params(data, cells, cp.asarray(seeds_xy[rows] - origins[rows]))
+            params_d[part_rows[part]] = _fit_device(data, part_masks[part], start, max_iter=max_iter,
+                                                   _download=False)
+        params = cp.asnumpy(params_d)
         status = np.full(n, "ok", dtype="U32")
         cpu.fit_status(params, masks, caps, status, sigma=_sigma_major(params))
     else:
@@ -536,7 +564,7 @@ def deblend(
     used, converged = 0, False
     for used in range(1, int(iterations) + 1):
         background_d, info = background_of(model_d, params, status)
-        fitted, status = fit(lambda part: clean(params, background_d, model_d, part), params)
+        fitted = fit(lambda part: clean(params, background_d, model_d, part), params)
         # All cells update at once against last iteration's neighbours, damped (see the CPU module).
         step = np.where(np.isfinite(fitted), fitted - params, 0.0)
         params = params + relaxation * step

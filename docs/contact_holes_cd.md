@@ -6,13 +6,33 @@ several edge definitions, and export spatial maps, contours, and numerical data.
 The reusable API is `measure_cds`, `plot_cd_map`, `save_cd_results`, and
 `save_cd_viewer`.
 
-For fast experimental comparisons, `measure_cds(..., methods=("local_half_area",
+To retain the original calculation while omitting display work, use
+`measure_cds(..., methods=("half_area", "half_area_min_avg", "tail_area"),
+metrics_only=True)`. These original methods retain Gaussian deblending,
+background correction, 4x cubic interpolation, connected-region measurement
+and their original validity rules. The GPU backend accelerates the computation;
+selecting a different measurement definition is not required.
+
+The GPU implementation evaluates the complete cubic operators in shared memory,
+reuses Gaussian values already evaluated at the same fit parameters, and batches
+result transfers. It keeps FP64 arithmetic, the full interpolation grid, all
+deblend iterations and stopping rules, and the original threshold and validity
+definitions. Oversized cells retain the original implementation. These changes
+also apply automatically to the original method names in both report commands.
+Regression tests cover all ten original methods, full report data and numerical
+summaries; discrete areas and statuses must match exactly, with floating-point
+rounding tolerances for other values. GPU stage timing now records the final
+combined area-result transfer and wait separately as `area_download`.
+
+The experimental `measure_cds(..., methods=("local_half_area",
 "local_half_area_min_avg", "local_tail_area"), metrics_only=True)` measures raw
 Voronoi cells without Gaussian deblending. The minimum-level variant uses an
 averaged peak; local tail area uses the cell-edge median and the low threshold
 inside that cell. Neighbour overlap is uncorrected, and border-touching regions
-are invalid. These are additional estimators, not replacements for existing
-methods. Fixed-territory gain/offset invariance does not imply end-to-end
+are invalid. These are different estimators, not equivalent accelerated versions
+of the original methods. The `local_*` area methods retain 4x cubic interpolation;
+the `pixel_*` variants omit it and count native pixels. Fixed-territory
+gain/offset invariance does not imply end-to-end
 invariance when detection changes. `local_projection` is also available but can
 switch edges on concave shapes. See the remote guide's comparison command for
 timing, coverage, stability and per-hole outputs.
@@ -61,10 +81,13 @@ same statistics, map selector, histograms and hole-value panel. `--include-pixel
 is still accepted for older commands, but is unnecessary because pixel methods
 are always included.
 
-The original and fast methods share the original pipeline's final hole list
+The original and experimental methods share the original pipeline's final hole list
 and cell partition, keeping hole IDs consistent throughout the viewer. The
-fast methods measure raw cells; the original methods use the model-corrected
-inputs. A standalone fast-only batch can detect a different hole list because
+`local_*` and `pixel_*` methods measure raw cells; the original methods use
+the model-corrected inputs. They remain included to preserve the requested
+all-method report. They are not the quality-preserving acceleration path:
+that uses the original method names and calculations. A standalone local-only
+or pixel-only batch can detect a different hole list because
 it skips the model's seed revision. The full report also computes measured
 outlines and cell inputs, so its total time includes both the original methods
 and display-data generation.
@@ -89,7 +112,7 @@ As in the previous report, `--no-hole-details` omits the cell-detail files and
 `--save-results` additionally writes full reloadable results under `results/`.
 `scripts/cd_report.py` continues to generate the original ten-method report.
 
-## Fast page averages and an actual batch timing
+## Original-method page averages and an actual batch timing
 
 For a quick throughput check on the remote PC, reuse an existing batch run's
 settings and one of its TIFFs:
@@ -98,31 +121,28 @@ settings and one of its TIFFs:
 python scripts\cd_speed.py D:\results\trial_w1 D:\data\scan.tif
 ```
 
-This runs `cd_batch` once with the three `pixel_*` methods below, using all
-visible GPUs and one worker per GPU. It reuses the saved detection, calibration,
-threshold and hole-screen settings, including the raw screen of older runs.
+This runs `cd_batch` once with the original `half_area`, `half_area_min_avg`
+and `tail_area` methods, using all visible GPUs and one worker per GPU.
+Gaussian deblending, seed revision, background correction and 4x cubic
+interpolation remain enabled. It reuses the saved detection, calibration,
+threshold, tail-window, deblend iteration limit, convergence tolerance and
+hole-screen settings, including the raw screen of older runs.
 The automatic sample contains up to 512 consecutive pages with the most
 previously accepted pages; `--pages 0:1500` selects a whole 1,500-page TIFF.
 `--output` selects a new results folder; the default is a timestamped folder
 inside the prior run. The original results are retained.
 
-| Method | Level and peak used for the threshold |
-|---|---|
-| `pixel_half_area` | Median cell-edge level and maximum peak, at `--half-level` (default 0.5). |
-| `pixel_half_area_min_avg` | Minimum cell-edge level and averaged brightest pixels, at `--half-level`. |
-| `pixel_tail_area` | Median cell-edge level and averaged brightest pixels, at `--tail-level` (default 0.2). |
-
-These methods count the region connected to the peak directly on original
-pixels, skipping Gaussian deblending and the 4x cubic enlargement used by
-`local_*` area methods. Areas have integer-pixel increments and border-touching
-regions are rejected, so valid counts can differ, especially for tail area.
+`--methods` selects other original report methods when needed. Experimental
+`local_*` and `pixel_*` methods remain available only when explicitly selected;
+they change the measurement definition and are not used by this command's
+default quality-preserving path.
 
 The batch uses `summary_only=True`: `measure_cds` returns a lightweight
 `CDSummary` containing seeds, per-method numerical arrays, calibration and
 metadata, without image or label-map copies or full-cell intensity statistics.
 Page averages and valid counts are still written to `pages.csv`.
-GPU work is asynchronous: the `local_fused` stage can include pending Voronoi
-work. Use total page or batch time when comparing throughput.
+GPU work is asynchronous, so use total page or batch time when assessing
+throughput.
 
 The final lines report measured pages/s and projected time for 1,500 pages and
 1,000 such TIFFs; details are saved in `speed.json`. Timing includes reference
@@ -132,12 +152,7 @@ mix and comparable I/O. Startup is included, making the projection conservative
 relative to an otherwise identical long run; disk cache state is uncontrolled.
 Failed or interrupted trials receive no dataset projection.
 
-Local verification on an RTX 4060 Ti: a synthetic 1378 x 2048 page with 39,042
-holes took about 0.075 s for the three pixel methods, compared with about
-0.43 s for the prior local implementation. A spawned batch of 48 synthetic
-pages completed in 6.0 s (8.03 pages/s, 40 accepted, eight rejected, no failures),
-including startup and I/O; cache state was unknown. The command above measures
-the remote PC's actual throughput on its own data.
+The command above measures the remote PC's actual throughput on its own data.
 
 ## Run the pipeline
 

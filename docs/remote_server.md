@@ -1,6 +1,6 @@
 # Run the contact-hole CD pipeline
 
-## Test throughput with the native-pixel methods
+## Test throughput while retaining the original calculations
 
 For the large-dataset speed trial, use the same two paths as `cd_compare.py`:
 
@@ -9,17 +9,21 @@ python scripts\cd_speed.py D:\results\trial_w1 D:\data\dataset1\stripe_001\scan_
 ```
 
 This measures up to 512 consecutive pages with all visible GPUs, one worker
-each, using the new `pixel_half_area`, `pixel_half_area_min_avg` and
-`pixel_tail_area` methods. They measure connected areas at original pixel
-resolution and skip the 4x enlargement. The command reports actual pages/s,
+each, using the original `half_area`, `half_area_min_avg` and `tail_area`
+methods. Gaussian deblending, seed revision, background correction, 4x cubic
+interpolation and connected-region measurement are retained. The command reports actual pages/s,
 including startup and I/O, and conditional dataset-time estimates. It reuses
 the prior run's numerical and screening settings and creates a fresh output
-folder. See [method definitions and local timing](contact_holes_cd.md#fast-page-averages-and-an-actual-batch-timing).
+folder. See [batch timing details](contact_holes_cd.md#original-method-page-averages-and-an-actual-batch-timing).
 
 For a full dataset, use these three names in `cd_batch.py --methods`, retain
 your other input/calibration/screening options, and choose a new output folder.
 
-## Compare the faster experimental methods on your existing trial
+## Optional experiments with different measurement definitions
+
+The `local_*` and `pixel_*` methods below are experimental estimators. They
+are not equivalent accelerated implementations of the original measurements.
+Use the original-method command above when the calculation must be preserved.
 
 The goal is to compare speed, coverage and CD changes before another whole-dataset run. From the repository root
 in the remote PC's Python environment, run one command with the previous trial folder and its TIFF:
@@ -71,8 +75,8 @@ python scripts\cd_batch.py D:\data\dataset1 --reference D:\data\reference.tif --
 ```
 
 Existing method names and the batch's default ten methods remain available. Mixing local and model methods in
-one call aligns them to the model's final seed list but still performs deblending; use local-only methods for the
-fast path. Local-only `cell_intensity` is blank because that existing column belongs to model `tail_area`.
+one call aligns them to the model's final seed list but still performs deblending. Local-only methods are a
+different estimator that omits deblending. Local-only `cell_intensity` is blank because that existing column belongs to model `tail_area`.
 
 New batch outputs include `deblend_converged`, `deblend_iterations` (total over all passes) and `deblend_passes`.
 Local-only rows have blank convergence and zero rounds. Unconverged model rows remain available, explicitly

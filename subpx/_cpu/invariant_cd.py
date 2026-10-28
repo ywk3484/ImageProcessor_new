@@ -87,6 +87,7 @@ _HALF_AREA = {"half_area": ("median", False), "half_area_min": ("min", False), "
 AIRY_K = 1.0290  # FWHM of the incoherent Airy pattern = AIRY_K / cutoff frequency
 _CHUNK = 4096    # holes per batched fit step: (chunk, K) arrays stay ~10 MB each
 _GPU_CHUNK_BYTES = 256 * 2**20  # one chunk's enlarged cells on the GPU
+_GPU_RESULT_BYTES = 64 * 2**20  # pending numerical values and display outlines before one download
 _CALIBRATION_HOLES = 2000
 
 
@@ -561,6 +562,7 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
     (the methods without one share it) and its averaged peak taken once per enlargement. ``enlarged`` (CuPy): a dict
     keeping those shared enlargements for a later call on the same cells, while they fit in GPU memory.
     ``seconds``: per method, the time of its own work; a shared step counts for the first method that needs it.
+    GPU results are downloaded together after scheduling the chunks; that final wait and copy is ``area_download``.
     ``rectangles``: (n, 4) rows r0, r1 and columns c0, c1 when every mask is that rectangle of ones (CuPy then
     enlarges a cell with a local level from the shared enlargement, to rounding).
 
@@ -586,6 +588,7 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
     iy, ix = xp.asarray(near_y)[:, None], xp.asarray(near_x)[None, :]
     gpu = xp is not np
     if gpu:  # one kernel per chunk after the enlargement (subpx._gpu.regions.measure_regions)
+        from .._gpu.interpolate import enlarge_cells
         from .._gpu.regions import measure_regions, top_mean_masked
         iy1, ix1 = iy[:, 0].astype(xp.int32), ix[0].astype(xp.int32)
         if enlarged is not None and n * H * W * 8 > min(4 * 2**30, xp.cuda.Device().mem_info[0] // 4):
@@ -598,6 +601,47 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
     status = {name: np.full(n, "no_signal", dtype="U32") for name in results}
     centers = {name: np.full((n, 2), np.nan) for name in results}
     edges = {name: np.full((n, n_angles), np.nan) for name in results} if outlines else {}
+    pending = []
+    pending_bytes = 0
+
+    def store_values(name, rows, out):
+        signal = (out["peak"] > 0) & np.isfinite(out["cut"]) & (out["cut"] < out["peak"])
+        m = results[name].metrics
+        m["local_level"][rows] = out["b"]
+        m["peak_signal"][rows] = np.where(signal, out["peak"], np.nan)
+        m["threshold"][rows] = np.where(signal, out["b"] + out["cut"], np.nan)
+        m["mean_signal"][rows] = np.where(signal, out["mean_signal"], np.nan)
+        if "steepest" in out:
+            m["steepest_level"][rows] = np.where(signal, out["steepest"], np.nan)
+        m["area_px2"][rows] = np.where(signal, out["area"], np.nan)
+        m["cd_x_px"][rows] = np.where(signal, out["ex"], np.nan)
+        m["cd_y_px"][rows] = np.where(signal, out["ey"], np.nan)
+        status[name][rows] = np.where(~signal, "no_signal",
+                                     np.where(out["touches"], "region_at_cell_border", "ok"))
+        centers[name][rows] = np.column_stack((out["cx"], out["cy"]))
+        if outlines:
+            edges[name][rows] = out["edge"]
+
+    def download_pending():
+        nonlocal pending_bytes
+        if not pending:
+            return
+        started = time.perf_counter()
+        host = _to_numpy(xp.concatenate([part[3] for part in pending]))
+        offset = 0
+        for name, rows, shapes, _ in pending:
+            out = {}
+            for key, shape in shapes:
+                size = int(np.prod(shape))
+                out[key] = host[offset:offset + size].reshape(shape)
+                offset += size
+            out["touches"] = out["touches"] != 0
+            store_values(name, rows, out)
+        pending.clear()
+        pending_bytes = 0
+        if seconds is not None:
+            seconds["area_download"] = seconds.get("area_download", 0.0) + time.perf_counter() - started
+
     buckets = _size_buckets(masks) if gpu else [(np.arange(n), h, w)]
     for bucket, (members, hb, wb) in enumerate(buckets):
         Yb, Xb = int(np.searchsorted(near_y, hb)), int(np.searchsorted(near_x, wb))  # enlarged rows / columns
@@ -656,7 +700,9 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
                         shared["big", kind] = enlargement("zero", xp.zeros(k)) - ry[:, :, None] * rx[:, None, :]
                     else:
                         mask, cell = cells()
-                        shared["big", kind] = zy_b[None] @ xp.where(mask, cell - b[:, None, None], 0.0) @ zx_b.T[None]
+                        centered = xp.where(mask, cell - b[:, None, None], 0.0)
+                        shared["big", kind] = (enlarge_cells(centered, zy_b, zx_b) if gpu
+                                               else zy_b[None] @ centered @ zx_b.T[None])
                         if enlarged is not None and kind == "zero":
                             enlarged[bucket, start] = shared["big", kind]
                 return shared["big", kind]
@@ -709,6 +755,8 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
                 values = [("b", b), ("peak", peak), ("cut", cut), ("mean_signal", mean_signal),
                           ("area", count * (sx * sy)), ("ex", extent_x), ("ey", extent_y), ("touches", touches),
                           ("cx", cx * sx - shift), ("cy", cy * sy - shift)]
+                if background == "foot":
+                    values.append(("steepest", steepest))
                 if outlines:
                     # Contour for display: the region's last pixel along each ray from its centroid. Rays stop just
                     # beyond the farthest region pixel of the chunk (a few px), not at the cell diagonal; pixels past
@@ -724,33 +772,20 @@ def _half_areas(cleaned, masks, origins, n_angles: int, specs: list[dict], *, fa
                     hit = xp.take_along_axis(region.reshape(k, -1), index, axis=1).reshape(px.shape) & inside
                     first_out = xp.where(hit.all(axis=2), len(steps), xp.argmin(hit, axis=2))
                     values.append(("edge", steps[xp.maximum(first_out - 1, 0)] + 0.0625))
-                if gpu:  # one transfer for all per-cell numbers
-                    numbers = [(key, v) for key, v in values if key != "edge"]
-                    host = _to_numpy(xp.stack([xp.asarray(v, dtype=float) for _, v in numbers]))
-                    out = {key: host[i] for i, (key, _) in enumerate(numbers)}
-                    out["touches"] = out["touches"] != 0
-                    if outlines:
-                        out["edge"] = _to_numpy(values[-1][1])
+                if gpu:
+                    # Only small result vectors survive this chunk, not enlarged cells or regions.
+                    # One download after all methods avoids synchronizing the device for every bucket.
+                    shapes = [(key, value.shape) for key, value in values]
+                    packed = xp.concatenate([xp.asarray(value, dtype=float).ravel() for _, value in values])
+                    pending.append((name, rows, shapes, packed))
+                    pending_bytes += packed.nbytes
                 else:
-                    out = {key: _to_numpy(v) for key, v in values}
-                signal = (out["peak"] > 0) & np.isfinite(out["cut"]) & (out["cut"] < out["peak"])
-                m = results[name].metrics
-                m["local_level"][rows] = out["b"]
-                m["peak_signal"][rows] = np.where(signal, out["peak"], np.nan)
-                m["threshold"][rows] = np.where(signal, out["b"] + out["cut"], np.nan)
-                m["mean_signal"][rows] = np.where(signal, out["mean_signal"], np.nan)
-                if background == "foot":
-                    m["steepest_level"][rows] = np.where(signal, _to_numpy(steepest), np.nan)
-                m["area_px2"][rows] = np.where(signal, out["area"], np.nan)
-                m["cd_x_px"][rows] = np.where(signal, out["ex"], np.nan)
-                m["cd_y_px"][rows] = np.where(signal, out["ey"], np.nan)
-                status[name][rows] = np.where(~signal, "no_signal",
-                                              np.where(out["touches"], "region_at_cell_border", "ok"))
-                centers[name][rows] = np.column_stack((out["cx"], out["cy"]))
-                if outlines:
-                    edges[name][rows] = out["edge"]
+                    store_values(name, rows, {key: _to_numpy(v) for key, v in values})
                 if seconds is not None:
-                    seconds[name] = seconds.get(name, 0.0) + time.perf_counter() - started  # results are on the host
+                    seconds[name] = seconds.get(name, 0.0) + time.perf_counter() - started
+                if pending_bytes >= _GPU_RESULT_BYTES:
+                    download_pending()
+    download_pending()
     for name, result in results.items():
         m = result.metrics
         m["cd_equivalent_px"][:] = 2 * np.sqrt(m["area_px2"] / np.pi)

@@ -173,3 +173,39 @@ def test_measure_cds_with_kernels_matches_the_array_code(monkeypatch):
     # foot_area_ratio alone computes foot_area without reporting it: the same numbers.
     alone = measure_cds(image, **dict(kw, methods=("foot_area_ratio",))).measurements
     _compare({"foot_area_ratio": alone["foot_area_ratio"]}, {"foot_area_ratio": fused["foot_area_ratio"]})
+
+
+@pytest.mark.parametrize("outlines", [False, True])
+def test_batched_download_preserves_all_rows_and_methods(monkeypatch, outlines):
+    """Deferred copies retain every number and outline across differently sized cells and chunks."""
+    from subpx._cpu import invariant_cd
+    from subpx._gpu import interpolate
+
+    cells, masks = _cells(np.random.default_rng(42), 530, 13, 12)
+    masks[::3, 8:] = False
+    masks[1::3, :, 8:] = False
+    specs = [{"name": background, "level": 0.35, "background": background,
+              "peak_pixels": None if background == "median" else 4.0,
+              "cuts": np.linspace(-5, 60, len(cells)) if background == "given" else None}
+             for background in ("median", "min", "zero", "edge", "foot", "given")]
+    origins = np.column_stack((np.arange(len(cells)), np.arange(len(cells)) * 2)).astype(float)
+    monkeypatch.setattr(invariant_cd, "_GPU_CHUNK_BYTES", 1)  # exercise several bounded chunks
+    copied = []
+    original_copy = invariant_cd._to_numpy
+
+    def copy(value):
+        if isinstance(value, cp.ndarray):
+            copied.append(value.size)
+        return original_copy(value)
+
+    monkeypatch.setattr(invariant_cd, "_to_numpy", copy)
+    run = lambda: invariant_cd._half_areas(cells, masks, origins, 16, specs, zone_masks=masks,
+                                           outlines=outlines, xp=cp)
+    batched = run()
+    assert len(copied) == 1  # masks are already on the host; one copy includes all methods and outlines
+    with monkeypatch.context() as m:
+        m.setattr(invariant_cd, "_GPU_RESULT_BYTES", 1)  # eager copy after every individual chunk and method
+        m.setattr(interpolate, "enlarge_cells", lambda cell, zy, zx: zy[None] @ cell @ zx.T[None])
+        eager = run()
+    assert len(copied) > 10
+    _compare(batched, eager)

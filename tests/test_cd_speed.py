@@ -29,9 +29,10 @@ def test_window_is_contiguous_and_contains_the_most_prior_accepted_pages():
 
 def test_old_run_preserves_raw_screen_and_numerical_settings(tmp_path):
     args = argparse.Namespace(tiff=tmp_path / "input.tif", backend="gpu", workers_per_gpu=1, workers=1,
-                              methods=cd_speed.PIXEL_METHODS, gpus=["1", "3"])
+                              methods=cd_speed.DEFAULT_METHODS, gpus=["1", "3"])
     measure = {"methods": ["gaussian"], "invert": True, "half_area_level": 0.45, "half_area_peak_pixels": 3,
                "tail_area_level": 0.25, "pixel_size": 21, "unit": "nm", "seeds": "peaks",
+               "deblend_iterations": 47, "deblend_tolerance": 2e-5, "tail_window": 1.7,
                "n_angles": 16, "outlines": False, "metrics_only": True, "summary_only": True}
     check = {"reference": str(tmp_path / "ref.tif"), "reference_page": 12, "max_error": 0.27,
              "error_function": "D:/custom/screen.py:classify"}
@@ -40,9 +41,10 @@ def test_old_run_preserves_raw_screen_and_numerical_settings(tmp_path):
     parsed = cd_batch.argument_parser().parse_args(command)
     assert parsed.hole_check_mode == "raw" and parsed.max_error == 0.27
     assert parsed.reference_page == 12 and parsed.error_function == check["error_function"]
-    assert parsed.methods == list(cd_speed.PIXEL_METHODS) and parsed.gpus == ["1", "3"]
+    assert parsed.methods == list(cd_speed.DEFAULT_METHODS) and parsed.gpus == ["1", "3"]
     assert parsed.pixel_size == 21 and parsed.unit == "nm" and parsed.seeds == "peaks" and parsed.invert
     assert parsed.half_level == 0.45 and parsed.peak_pixels == 3 and parsed.tail_level == 0.25
+    assert parsed.deblend_iterations == 47 and parsed.deblend_tolerance == 2e-5 and parsed.tail_window == 1.7
     assert parsed.pages == "10:138" and parsed.workers_per_gpu == 1
     settings["hole_check"] = dict(check, mode="centered", max_error=0.7)
     parsed = cd_batch.argument_parser().parse_args(cd_speed.batch_arguments(args, settings, tmp_path, (0, 1)))
@@ -79,7 +81,8 @@ def test_complete_cpu_trial_uses_real_batch_and_saves_end_to_end_timing(tmp_path
     run.mkdir()
     settings = {"measure": {"methods": ["gaussian"], "area_min": 3, "area_max": 200,
                              "pixel_size": 21.0, "unit": "nm", "half_area_level": 0.45,
-                             "half_area_peak_pixels": 3.0, "tail_area_level": 0.25},
+                             "half_area_peak_pixels": 3.0, "tail_area_level": 0.25,
+                             "deblend_iterations": 30, "deblend_tolerance": 1e-4},
                 "hole_check": {"reference": str(tiff), "reference_page": 0, "max_error": 0.3,
                                "error_function": None}}
     (run / "run.json").write_text(json.dumps({"settings": settings, "git_commit": "prior"}), encoding="utf-8")
@@ -98,12 +101,13 @@ def test_complete_cpu_trial_uses_real_batch_and_saves_end_to_end_timing(tmp_path
     assert result["pages_per_s"] == 3 / result["elapsed_s"]
     assert current["settings"]["hole_check"]["mode"] == "raw"
     measured = current["settings"]["measure"]
-    assert measured["methods"] == list(cd_speed.PIXEL_METHODS)
+    assert measured["methods"] == ["half_area", "half_area_min_avg", "tail_area"]
     assert measured["half_area_level"] == 0.45 and measured["tail_area_level"] == 0.25
+    assert measured["deblend_iterations"] == 30 and measured["deblend_tolerance"] == 1e-4
     with (output / "pages.csv").open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert [row["status"] for row in rows] == ["ok", "ok", "no_holes"]
-    assert all(not row["deblend_iterations"] or int(row["deblend_iterations"]) == 0 for row in rows)
+    assert all(int(row["deblend_iterations"]) > 0 for row in rows if row["status"] == "ok")
     text = capsys.readouterr().out
     assert "pages/s" in text and "1,000 such TIFFs" in text and "cache state unknown" in text
     with pytest.raises(SystemExit):

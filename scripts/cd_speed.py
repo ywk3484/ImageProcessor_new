@@ -1,12 +1,13 @@
-"""Measure actual pixel-method batch throughput using an earlier run's settings.
+"""Measure original CD-method batch throughput using an earlier run's settings.
 
     python scripts/cd_speed.py D:\\results\\trial D:\\data\\scan.tif
 
-Runs the three native-pixel area methods once through cd_batch, on all visible GPUs
-with one worker each. By default it selects up to 512 consecutive pages with
+Runs half_area, half_area_min_avg and tail_area once through cd_batch, retaining
+Gaussian deblending, background correction and 4x cubic interpolation. Uses all
+visible GPUs with one worker each. By default it selects up to 512 consecutive pages with
 the most previously accepted hole pages. --pages A:B selects another interval.
 The timer includes reference reading, worker startup, TIFF reading, screening,
-measurement and output. No warm-up or model/stability measurements are run.
+measurement and output. No separate warm-up or stability measurements are run.
 Disk cache state is uncontrolled; dataset projections assume the measured mix
 of accepted/rejected pages and comparable I/O, and include this trial's startup.
 """
@@ -26,7 +27,9 @@ if str(ROOT) not in sys.path:
 
 from scripts import cd_batch
 from scripts.cd_compare import rows_for
-from subpx.cd import LOCAL_METHODS, PIXEL_METHODS
+from subpx.cd import LOCAL_METHODS
+
+DEFAULT_METHODS = ("half_area", "half_area_min_avg", "tail_area")
 
 MEASURE_FLAGS = {
     "seeds": "--seeds", "area_min": "--area-min", "area_max": "--area-max",
@@ -112,7 +115,9 @@ def main(argv=None):
     parser.add_argument("--pages", help="Consecutive page range A:B (B excluded)")
     parser.add_argument("--count", type=int, default=512, help="Automatic window size (default: 512 pages)")
     parser.add_argument("--file-key", help="Exact prior CSV file column if basenames are ambiguous")
-    parser.add_argument("--methods", nargs="+", choices=LOCAL_METHODS, default=PIXEL_METHODS)
+    parser.add_argument("--methods", nargs="+", choices=(*cd_batch.ALL_METHODS, *LOCAL_METHODS),
+                        default=DEFAULT_METHODS,
+                        help="Default: half_area half_area_min_avg tail_area (deblended, 4x cubic)")
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--gpus", nargs="+", help="Default: all visible GPUs")
     parser.add_argument("--workers-per-gpu", type=int, default=1)
@@ -134,7 +139,8 @@ def main(argv=None):
         command = batch_arguments(args, previous["settings"], output, pages)
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.error(str(error))
-    print(f"Pixel batch throughput: pages {pages[0]}:{pages[1]}; startup and I/O included; cache state unknown.",
+    print(f"CD batch throughput ({', '.join(args.methods)}): pages {pages[0]}:{pages[1]}; "
+          "startup and I/O included; cache state unknown.",
           flush=True)
     started = time.perf_counter()
     code = cd_batch.main(command)
