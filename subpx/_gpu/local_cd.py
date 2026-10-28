@@ -2,8 +2,9 @@
 
 Factor 4 retains the cubic grid of ``_cpu.local_cd``; factor 1 counts native
 pixels without interpolation. Local levels, connected regions and validity
-rules match the corresponding reference. One block holds a cell's working
-arrays in shared memory; no enlarged stack or mask crosses the host.
+rules match the corresponding reference. One block holds a cell's small
+working arrays in shared memory. Enlarged cells use bounded device
+scratch storage; no enlarged stack or mask crosses the host.
 """
 
 from __future__ import annotations
@@ -12,17 +13,87 @@ import numpy as np
 
 from ._cuda import REDUCE_SRC, cp, kernel, optin_shared_bytes, require_cupy
 from .regions import _GROW_STEP_SRC, _TOP_SRC
+from .spline import CUBIC_SRC
 
 
 AREA_METHODS = ("local_half_area", "local_half_area_min_avg", "local_tail_area")
-_OPERATORS = {}  # small spline matrices cached per CUDA device and cell size
+_WORK_BYTES = 128 * 2**20
 
-_SOURCE = REDUCE_SRC + _GROW_STEP_SRC + _TOP_SRC + r"""
+_PEAK_SORT_SRC = r"""
+__device__ double peak_exchange(double value, double other, bool low, bool ascending) {
+    const double lower = low ? value : other, upper = low ? other : value;
+    const bool exchange = ascending ? lower > upper : lower < upper;
+    return exchange ? other : value;
+}
+__device__ void sort_peak(double* values, int n, int capacity) {
+    const int tid = threadIdx.x, lane = tid & 31;
+    if (n <= 8) {
+        if (tid == 0) {
+            for (int j = 1; j < n; ++j) {
+                const double value = values[j]; int k = j;
+                while (k > 0 && values[k - 1] > value) { values[k] = values[k - 1]; --k; }
+                values[k] = value;
+            }
+        }
+    } else {
+        if (n != capacity) {
+            for (int j = n + tid; j < capacity; j += blockDim.x)
+                values[j] = __longlong_as_double(0x7FF0000000000000ll);
+            __syncthreads();
+        }
+        if (capacity <= 64) {
+            if (tid < 32) {
+                double a = values[lane];
+                double b = capacity == 64 ? values[lane + 32] : 0.0;
+                for (int length = 2; length <= 32; length <<= 1) {
+                    for (int stride = length >> 1; stride; stride >>= 1) {
+                        const double other_a = __shfl_xor_sync(0xffffffffu, a, stride);
+                        a = peak_exchange(a, other_a, (lane & stride) == 0, (lane & length) == 0);
+                        if (capacity == 64) {
+                            const double other_b = __shfl_xor_sync(0xffffffffu, b, stride);
+                            b = peak_exchange(b, other_b, (lane & stride) == 0, ((lane + 32) & length) == 0);
+                        }
+                    }
+                }
+                if (capacity == 64) {
+                    const double old_a = a;
+                    a = peak_exchange(a, b, true, true);
+                    b = peak_exchange(b, old_a, false, true);
+                    for (int stride = 16; stride; stride >>= 1) {
+                        const double other_a = __shfl_xor_sync(0xffffffffu, a, stride);
+                        const double other_b = __shfl_xor_sync(0xffffffffu, b, stride);
+                        a = peak_exchange(a, other_a, (lane & stride) == 0, true);
+                        b = peak_exchange(b, other_b, (lane & stride) == 0, true);
+                    }
+                    values[lane + 32] = b;
+                }
+                values[lane] = a;
+            }
+        } else {
+            for (int length = 2; length <= capacity; length <<= 1) {
+                for (int stride = length >> 1; stride; stride >>= 1) {
+                    for (int i = tid; i < capacity; i += blockDim.x) {
+                        const int j = i ^ stride;
+                        if (j > i) {
+                            const double a = values[i], b = values[j];
+                            if (((i & length) == 0) ? a > b : a < b) { values[i] = b; values[j] = a; }
+                        }
+                    }
+                    __syncthreads();
+                }
+            }
+        }
+    }
+    __syncthreads();
+}
+"""
+
+_SOURCE = REDUCE_SRC + _GROW_STEP_SRC + _TOP_SRC + CUBIC_SRC + _PEAK_SORT_SRC + r"""
 extern "C" __global__ void local_areas(
     const double* image, const int* labels, const long long* metadata,
     const double* zy, const double* zx, double* output,
     const int image_h, const int image_w, const int h, const int w, const int sort_length,
-    const int n_top, const int methods, const double half_level, const double tail_level)
+    const int n_top, const int methods, const double half_level, const double tail_level, double* enlarged)
 {
     const int tid = threadIdx.x, bd = blockDim.x, cell = blockIdx.x;
     const int F = LOCAL_FACTOR, H = F * h, W = F * w, raw_n = h * w, big_n = H * W;
@@ -30,10 +101,16 @@ extern "C" __global__ void local_areas(
     extern __shared__ double smem[];
     double* raw = smem;
     double* intermediate = raw + raw_n;
+#if LOCAL_FACTOR > 1
+    double* big = enlarged + (long long)cell * big_n;
+    double* sorted = intermediate + H * w;
+#else
     double* big = intermediate + H * w;
     double* sorted = big + big_n;
+#endif
     double* picked = sorted + sort_length;
-    unsigned int* M = (unsigned int*)(picked + n_top);
+    const int top_capacity = n_top <= 8 ? n_top : (1 << (32 - __clz((unsigned int)max(32, n_top) - 1)));
+    unsigned int* M = (unsigned int*)(picked + top_capacity);
     unsigned int* A = M + words_n;
     unsigned int* C0 = A + words_n;
     unsigned int* N0 = C0 + words_n;
@@ -97,18 +174,9 @@ extern "C" __global__ void local_areas(
     for (int level_kind = 0; level_kind < 2; ++level_kind) {
         if (level_kind == 0 ? !(methods & 5) : !(methods & 2)) continue;
         const double baseline = local_levels[level_kind];
-        // Separable cubic enlargement, using the same zero-padded operators.
+        // Complete zero-extended cubic spline on the same 4x sample grid.
 #if LOCAL_FACTOR > 1
-        for (int i = tid; i < H * w; i += bd) {
-            const int Y = i / w, x = i % w;
-            double sum = 0;
-            for (int y = 0; y < h; ++y) {
-                const int j = y * w + x;
-                sum += zy[Y * h + y] * (mask[j] ? raw[j] - baseline : 0.0);
-            }
-            intermediate[i] = sum;
-        }
-        __syncthreads();
+        prepare_cubic_rows(raw, mask, baseline, h, w, intermediate, big);
 #endif
         double bv = -INF;
         long long bi = 0x7FFFFFFFFFFFFFFFll;
@@ -116,7 +184,7 @@ extern "C" __global__ void local_areas(
             const int Y = i / W, X = i % W;
             double sum = 0;
 #if LOCAL_FACTOR > 1
-            for (int x = 0; x < w; ++x) sum += intermediate[Y * w + x] * zx[X * w + x];
+            sum = cubic_sample4(intermediate + Y * w, w, 1, X);
 #else
             sum = raw[i] - baseline;
 #endif
@@ -174,14 +242,9 @@ extern "C" __global__ void local_areas(
 #endif
             select_top(Plain{big}, big_n, n_top, picked);
             __syncthreads();  // select_top finishes with writes from every warp
-            // The selected values are deterministic as a multiset. Sorting this
-            // small tail makes the accumulation independent of atomic order.
+            // Preserve the same ascending FP64 sum after parallel sorting.
+            sort_peak(picked, n_top, top_capacity);
             if (tid == 0) {
-                for (int j = 1; j < n_top; ++j) {
-                    const double value = picked[j]; int k = j;
-                    while (k > 0 && picked[k - 1] > value) { picked[k] = picked[k - 1]; --k; }
-                    picked[k] = value;
-                }
                 double sum = 0;
                 for (int j = 0; j < n_top; ++j) sum += picked[j];
                 average_peak = isfinite(sum) ? sum / n_top : -1.0;
@@ -207,7 +270,7 @@ extern "C" __global__ void local_areas(
             }
             __syncthreads();
             unsigned int* C = grow(C0, N0, A, H, WW, H * W);
-            double sums[6] = {0, 0, 0, 0, 0, 0};
+            double sums[7] = {0, 0, 0, 0, 0, 0, 0};
             const unsigned int last_valid = (W & 31) ? ((1u << (W & 31)) - 1u) : 0xffffffffu;
             for (int i = tid; i < words_n; i += bd) {
                 const int y = i / WW, j = i % WW;
@@ -222,25 +285,23 @@ extern "C" __global__ void local_areas(
                 const int y = i / W, x = i % W;
                 if ((C[y * WW + x / 32] >> (x & 31)) & 1u) {
                     sums[0] += 1; sums[1] += x; sums[2] += y; sums[3] += big[i];
+                    sums[4] += (double)(x * x); sums[6] += (double)(y * y);
                 }
             }
-            block_sum(sums, 6, total, partial);
+            block_sum(sums, 7, total, partial);
             const double count = total[0], weight = fmax(count, 1.0), cx = total[1] / weight, cy = total[2] / weight;
             const double mean_signal = total[3] / weight, touch = total[5];
-            sums[0] = 0; sums[1] = 0;
-            for (int i = tid; i < big_n; i += bd) {
-                const int y = i / W, x = i % W;
-                if ((C[y * WW + x / 32] >> (x & 31)) & 1u) {
-                    const double dx = x - cx, dy = y - cy;
-                    sums[0] += dx * dx; sums[1] += dy * dy;
-                }
-            }
-            block_sum(sums, 2, total, partial);
             if (tid == 0) {
                 double* o = output + ((long long)cell * 3 + method) * 10;
                 const double area = count / (F * F);
-                const double ratio = sqrt(sqrt(fmax(total[0] / weight / (F * F), 1e-12) /
-                                                fmax(total[1] / weight / (F * F), 1e-12)));
+                // Exact integer raw moments avoid a second scan and cancellation
+                // in the central moments. Supported cell sizes fit in 64 bits.
+                const unsigned long long n = (unsigned long long)count;
+                const unsigned long long x = (unsigned long long)total[1], y = (unsigned long long)total[2];
+                const unsigned long long xx = (unsigned long long)total[4], yy = (unsigned long long)total[6];
+                const double denominator = weight * weight * (F * F);
+                const double ratio = sqrt(sqrt(fmax((double)(n * xx - x * x) / denominator, 1e-12) /
+                                                fmax((double)(n * yy - y * y) / denominator, 1e-12)));
                 const double cd = 2 * sqrt(area / 3.141592653589793);
                 o[0] = baseline; o[1] = peak; o[2] = baseline + cut; o[3] = mean_signal;
                 o[4] = area; o[5] = cd * ratio; o[6] = cd / ratio;
@@ -258,7 +319,9 @@ extern "C" __global__ void local_areas(
 def _shared_bytes(h, w, n_top, factor=4):
     sort_length = 1 << max(0, (h * w - 1).bit_length())
     words = factor * h * ((factor * w + 31) // 32)
-    return 8 * (h * w + factor * h * w + factor * factor * h * w + sort_length + n_top) + 16 * words + h * w
+    peak_capacity = n_top if n_top <= 8 else 1 << (max(32, n_top) - 1).bit_length()
+    enlarged = factor * factor * h * w if factor == 1 else 0
+    return 8 * (h * w + factor * h * w + enlarged + sort_length + peak_capacity) + 16 * words + h * w
 
 
 def measure_local_areas(signal, labels, origins, sizes, report, *, methods, n_angles=16,
@@ -271,7 +334,7 @@ def measure_local_areas(signal, labels, origins, sizes, report, *, methods, n_an
     ``factor=1`` is a distinct pixel-count estimator; ``factor=4`` keeps the
     established cubic grid. Method names here are the canonical local names.
     """
-    from .._cpu.invariant_cd import _empty, _zoom_operators
+    from .._cpu.invariant_cd import _empty
 
     require_cupy()
     if any(name not in AREA_METHODS for name in methods):
@@ -300,14 +363,15 @@ def measure_local_areas(signal, labels, origins, sizes, report, *, methods, n_an
     boundaries = np.concatenate(([0], np.bincount(groups).cumsum()))
     metadata = cp.asarray(np.column_stack((origins, sizes, report))[indices], dtype=cp.int64)
     out = cp.empty((count, 3, 10), dtype=cp.float64)
-
-    def operator(size):
-        key = (cp.cuda.Device().id, size, factor)
-        if key not in _OPERATORS:
-            if len(_OPERATORS) >= 64:
-                _OPERATORS.clear()
-            _OPERATORS[key] = cp.asarray(_zoom_operators(size, factor)[0])
-        return _OPERATORS[key]
+    if factor > 1:
+        # Reuse one allocation across every bucket, including shape changes.
+        # Allocating a replacement before releasing the previous bucket would
+        # transiently double the scratch budget.
+        work_cells = factor * factor * shapes[:, 0] * shapes[:, 1]
+        work_counts = np.minimum(np.diff(boundaries), np.maximum(1, _WORK_BYTES // (8 * work_cells)))
+        scratch = cp.empty(int(np.max(work_counts * work_cells)), dtype=cp.float64)
+    else:
+        scratch = image_d  # unused by the native-pixel kernel
 
     for group, (hb, wb) in enumerate(shapes):
         h, w = int(hb), int(wb)
@@ -316,12 +380,14 @@ def measure_local_areas(signal, labels, origins, sizes, report, *, methods, n_an
         shared = _shared_bytes(h, w, n_top, factor)
         if shared + 3072 > 48 * 1024:
             execute.max_dynamic_shared_size_bytes = shared
-        zy, zx = (operator(h), operator(w)) if factor > 1 else (image_d, image_d)  # unused by the native kernel
-        execute((int(stop - start),), (128,), (
-            image_d, labels_d, metadata[start:stop], zy, zx, out[start:stop],
-            np.int32(signal.shape[0]), np.int32(signal.shape[1]),
-            np.int32(h), np.int32(w), np.int32(1 << max(0, (h * w - 1).bit_length())), np.int32(n_top),
-            np.int32(bits), np.float64(half_area_level), np.float64(tail_area_level)), shared_mem=shared)
+        chunk = max(1, _WORK_BYTES // (factor * factor * h * w * 8)) if factor > 1 else int(stop - start)
+        for begin in range(int(start), int(stop), chunk):
+            end = min(begin + chunk, int(stop))
+            execute((end - begin,), (128,), (
+                image_d, labels_d, metadata[begin:end], image_d, image_d, out[begin:end],
+                np.int32(signal.shape[0]), np.int32(signal.shape[1]),
+                np.int32(h), np.int32(w), np.int32(1 << max(0, (h * w - 1).bit_length())), np.int32(n_top),
+                np.int32(bits), np.float64(half_area_level), np.float64(tail_area_level), scratch), shared_mem=shared)
     host = cp.asnumpy(out)  # one synchronization and download for every bucket and method
     for name, result in found.items():
         numbers = host[:, AREA_METHODS.index(name)]

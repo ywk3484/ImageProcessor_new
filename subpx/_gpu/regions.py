@@ -111,10 +111,11 @@ template <class Value> __device__ void select_top(const Value value, const long 
 {
     __shared__ unsigned int hist[256];
     __shared__ unsigned long long s_prefix;
-    __shared__ int s_need;
+    __shared__ int s_need, s_complete;
     __shared__ unsigned int s_count;
     unsigned long long prefix = 0ull, known = 0ull;
     int need = n;  // how many of the values matching the prefix belong to the n largest
+    bool complete = false;
     for (int shift = 56; shift >= 0; shift -= 8) {
         for (int i = threadIdx.x; i < 256; i += blockDim.x) hist[i] = 0u;
         __syncthreads();
@@ -135,23 +136,32 @@ template <class Value> __device__ void select_top(const Value value, const long 
             while (d > 0 && (int)hist[d] < left) { left -= (int)hist[d]; --d; }
             s_prefix = prefix | ((unsigned long long)d << shift);
             s_need = left;
+            // The whole boundary bin belongs to the answer. Its lower key
+            // bits cannot change which n values are selected.
+            s_complete = (int)hist[d] == left;
         }
         __syncthreads();
         prefix = s_prefix;
         need = s_need;
+        complete = s_complete != 0;
         known |= 255ull << shift;
         __syncthreads();
+        if (complete) break;
     }
-    // prefix is now the key of the n-th largest value; `need` of the values equal to it are among the n largest.
+    // Complete bin: include every key at or above its lower bound. Otherwise
+    // prefix is the exact n-th key; fill the required duplicates after it.
     if (threadIdx.x == 0) s_count = 0u;
     __syncthreads();
     for (long long i = threadIdx.x; i < L; i += blockDim.x) {
         const double v = value(i);
-        if (order_key(v) > prefix) o[atomicAdd(&s_count, 1u)] = v;
+        const unsigned long long k = order_key(v);
+        if (k > prefix || (complete && k == prefix)) o[atomicAdd(&s_count, 1u)] = v;
     }
     __syncthreads();
-    const double kth = key_value(prefix);
-    for (int j = (int)s_count + threadIdx.x; j < n; j += blockDim.x) o[j] = kth;
+    if (!complete) {
+        const double kth = key_value(prefix);
+        for (int j = (int)s_count + threadIdx.x; j < n; j += blockDim.x) o[j] = kth;
+    }
 }
 extern "C" __global__ void top_values(const double* __restrict__ x, const long long L, const int n,
                                       double* __restrict__ out)

@@ -1,10 +1,13 @@
-"""Measure original CD-method batch throughput using an earlier run's settings.
+"""Measure interpolated local CD throughput using an earlier run's settings.
 
     python scripts/cd_speed.py D:\\results\\trial D:\\data\\scan.tif
 
-Runs half_area, half_area_min_avg and tail_area once through cd_batch, retaining
-Gaussian deblending, background correction and 4x cubic interpolation. Uses all
-visible GPUs with one worker each. By default it selects up to 512 consecutive pages with
+Runs local_half_area, local_half_area_min_avg and local_tail_area once through
+cd_batch, retaining their full 4x cubic interpolation and local threshold rules.
+These local estimators omit Gaussian deblending. Uses all visible GPUs with two
+workers each; --workers-per-gpu 1 selects a single-worker trial or limits
+concurrency when explicitly selecting the original deblended methods.
+By default it selects up to 512 consecutive pages with
 the most previously accepted hole pages. --pages A:B selects another interval.
 The timer includes reference reading, worker startup, TIFF reading, screening,
 measurement and output. No separate warm-up or stability measurements are run.
@@ -29,7 +32,7 @@ from scripts import cd_batch
 from scripts.cd_compare import rows_for
 from subpx.cd import LOCAL_METHODS
 
-DEFAULT_METHODS = ("half_area", "half_area_min_avg", "tail_area")
+DEFAULT_METHODS = ("local_half_area", "local_half_area_min_avg", "local_tail_area")
 
 MEASURE_FLAGS = {
     "seeds": "--seeds", "area_min": "--area-min", "area_max": "--area-max",
@@ -117,10 +120,11 @@ def main(argv=None):
     parser.add_argument("--file-key", help="Exact prior CSV file column if basenames are ambiguous")
     parser.add_argument("--methods", nargs="+", choices=(*cd_batch.ALL_METHODS, *LOCAL_METHODS),
                         default=DEFAULT_METHODS,
-                        help="Default: half_area half_area_min_avg tail_area (deblended, 4x cubic)")
+                        help="Default: local_half_area local_half_area_min_avg local_tail_area (4x cubic, no deblending)")
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--gpus", nargs="+", help="Default: all visible GPUs")
-    parser.add_argument("--workers-per-gpu", type=int, default=1)
+    parser.add_argument("--workers-per-gpu", type=int, default=2,
+                        help="Workers on each GPU (default: 2); use 1 for a single-worker trial or original methods")
     parser.add_argument("--workers", type=int, default=1, help="CPU workers (with --backend cpu)")
     args = parser.parse_args(argv)
     if args.workers_per_gpu < 1 or args.workers < 1:

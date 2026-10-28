@@ -70,8 +70,11 @@ def test_projection_uses_completed_pages_and_is_withheld_for_failures_or_interru
     assert cd_speed.result_summary(tmp_path, 4.0, invocation)["seconds_per_1500_pages"] is None
 
 
-def test_complete_cpu_trial_uses_real_batch_and_saves_end_to_end_timing(tmp_path, capsys):
+@pytest.mark.parametrize("explicit_methods", [None, ("half_area", "half_area_min_avg", "tail_area")],
+                         ids=["interpolated_local_default", "explicit_original"])
+def test_complete_cpu_trial_uses_real_batch_and_saves_end_to_end_timing(tmp_path, capsys, explicit_methods):
     import tifffile
+    from subpx import measure_cds
 
     images = [lattice((64, 96), 10.0, 4.4, 30.0, seed=seed)[0] for seed in (1, 2)]
     images.append(np.full_like(images[0], 40))
@@ -90,6 +93,9 @@ def test_complete_cpu_trial_uses_real_batch_and_saves_end_to_end_timing(tmp_path
                                     encoding="utf-8")
     output = tmp_path / "speed"
     command = [str(run), str(tiff), "--output", str(output), "--backend", "cpu"]
+    methods = explicit_methods or ("local_half_area", "local_half_area_min_avg", "local_tail_area")
+    if explicit_methods:
+        command += ["--methods", *explicit_methods, "--workers-per-gpu", "1"]
     assert cd_speed.main(command) == 0
     result = json.loads((output / "speed.json").read_text(encoding="utf-8"))
     current = json.loads((output / "run.json").read_text(encoding="utf-8"))
@@ -97,17 +103,36 @@ def test_complete_cpu_trial_uses_real_batch_and_saves_end_to_end_timing(tmp_path
     assert result["complete"] and result["completed_pages"] == 3
     assert result["accepted_pages"] == 2 and result["rejected_pages"] == 1 and result["failed_pages"] == 0
     assert result["pages"] == [0, 3] and result["source_git_commit"] == "prior"
+    assert result["workers_per_gpu"] == (1 if explicit_methods else 2)
+    assert result["workers"] == 1  # the GPU concurrency default does not change CPU workers
     assert result["elapsed_s"] >= invocation["elapsed_s"] > 0
     assert result["pages_per_s"] == 3 / result["elapsed_s"]
     assert current["settings"]["hole_check"]["mode"] == "raw"
     measured = current["settings"]["measure"]
-    assert measured["methods"] == ["half_area", "half_area_min_avg", "tail_area"]
+    assert measured["methods"] == list(methods)
     assert measured["half_area_level"] == 0.45 and measured["tail_area_level"] == 0.25
     assert measured["deblend_iterations"] == 30 and measured["deblend_tolerance"] == 1e-4
     with (output / "pages.csv").open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert [row["status"] for row in rows] == ["ok", "ok", "no_holes"]
-    assert all(int(row["deblend_iterations"]) > 0 for row in rows if row["status"] == "ok")
+    accepted = [row for row in rows if row["status"] == "ok"]
+    if explicit_methods:
+        assert all(int(row["deblend_iterations"]) > 0 for row in accepted)
+    else:
+        assert all(int(row["deblend_iterations"]) == 0 for row in accepted)
+        assert all(int(row["deblend_passes"]) == 0 for row in accepted)
+        # Match the complete local calculation, including its subpixel grid.
+        # Fractional areas ensure this fixture would detect native-pixel routing.
+        expected = measure_cds(images[0], methods=methods, backend="cpu", pixel_size=21.0, unit="nm",
+                               half_area_level=0.45, half_area_peak_pixels=3.0, tail_area_level=0.25,
+                               summary_only=True)
+        areas = expected.measurements[methods[0]].metrics["area_px2"]
+        assert np.any(np.isfinite(areas) & (areas != np.rint(areas)))
+        values = cd_batch.page_values(expected, images[0], methods)
+        for name in methods:
+            assert int(rows[0][f"{name}_valid"]) == values[f"{name}_valid"]
+            for key in ("cd", "cd_x", "cd_y"):
+                assert float(rows[0][f"{name}_{key}"]) == pytest.approx(values[f"{name}_{key}"], abs=1e-12)
     text = capsys.readouterr().out
     assert "pages/s" in text and "1,000 such TIFFs" in text and "cache state unknown" in text
     with pytest.raises(SystemExit):

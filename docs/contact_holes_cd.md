@@ -6,14 +6,32 @@ several edge definitions, and export spatial maps, contours, and numerical data.
 The reusable API is `measure_cds`, `plot_cd_map`, `save_cd_results`, and
 `save_cd_viewer`.
 
-To retain the original calculation while omitting display work, use
+The fast local path uses
+`measure_cds(..., methods=("local_half_area", "local_half_area_min_avg",
+"local_tail_area"), summary_only=True)`. It retains full 4x cubic interpolation,
+the same local levels and peaks, connected regions, and validity rules. These
+local estimators measure raw Voronoi cells and omit Gaussian deblending.
+`scripts/cd_speed.py` selects these three interpolated local methods by default.
+
+The numerical local GPU path evaluates the full cubic spline with FP64
+recurrences along each axis, including the complete zero-extension tails.
+It preserves the quarter-pixel sample grid. Parallel peak selection and sorting
+retain the requested brightest samples, including ties, and their ascending
+FP64 average. Thresholds, connected-region growth and validity rules are
+unchanged. One reusable device scratch buffer is bounded to 128 MiB, in addition
+to image and result storage; only oversized cell-size groups use the fallback.
+The changed arithmetic order can produce FP64 roundoff differences, including
+decisions exactly at a threshold, so universal bit identity is not promised.
+The report format and its existing methods and statistics remain unchanged.
+
+To run the original deblended calculation while omitting display work, use
 `measure_cds(..., methods=("half_area", "half_area_min_avg", "tail_area"),
 metrics_only=True)`. These original methods retain Gaussian deblending,
 background correction, 4x cubic interpolation, connected-region measurement
 and their original validity rules. The GPU backend accelerates the computation;
 selecting a different measurement definition is not required.
 
-The GPU implementation evaluates the complete cubic operators in shared memory,
+For the original methods, the GPU evaluates the complete cubic operators in shared memory,
 reuses Gaussian values already evaluated at the same fit parameters, and batches
 result transfers. It keeps FP64 arithmetic, the full interpolation grid, all
 deblend iterations and stopping rules, and the original threshold and validity
@@ -85,8 +103,9 @@ The original and experimental methods share the original pipeline's final hole l
 and cell partition, keeping hole IDs consistent throughout the viewer. The
 `local_*` and `pixel_*` methods measure raw cells; the original methods use
 the model-corrected inputs. They remain included to preserve the requested
-all-method report. They are not the quality-preserving acceleration path:
-that uses the original method names and calculations. A standalone local-only
+all-method report. Local acceleration preserves the interpolated local
+calculation; it does not make that estimator equivalent to the deblended
+methods. A standalone local-only
 or pixel-only batch can detect a different hole list because
 it skips the model's seed revision. The full report also computes measured
 outlines and cell inputs, so its total time includes both the original methods
@@ -112,7 +131,7 @@ As in the previous report, `--no-hole-details` omits the cell-detail files and
 `--save-results` additionally writes full reloadable results under `results/`.
 `scripts/cd_report.py` continues to generate the original ten-method report.
 
-## Original-method page averages and an actual batch timing
+## Interpolated local page averages and an actual batch timing
 
 For a quick throughput check on the remote PC, reuse an existing batch run's
 settings and one of its TIFFs:
@@ -121,21 +140,24 @@ settings and one of its TIFFs:
 python scripts\cd_speed.py D:\results\trial_w1 D:\data\scan.tif
 ```
 
-This runs `cd_batch` once with the original `half_area`, `half_area_min_avg`
-and `tail_area` methods, using all visible GPUs and one worker per GPU.
-Gaussian deblending, seed revision, background correction and 4x cubic
-interpolation remain enabled. It reuses the saved detection, calibration,
-threshold, tail-window, deblend iteration limit, convergence tolerance and
-hole-screen settings, including the raw screen of older runs.
+This runs `cd_batch` once with `local_half_area`, `local_half_area_min_avg`
+and `local_tail_area`, using all visible GPUs and two workers per GPU. The full
+4x cubic interpolation, local levels and peaks, connected-region measurement
+and local validity rules are retained. These local methods omit Gaussian
+deblending and its seed revision. The command reuses saved detection,
+calibration, threshold and hole-screen settings, including the raw screen of
+older runs. Saved model settings are also retained if model methods are selected.
 The automatic sample contains up to 512 consecutive pages with the most
 previously accepted pages; `--pages 0:1500` selects a whole 1,500-page TIFF.
 `--output` selects a new results folder; the default is a timestamped folder
 inside the prior run. The original results are retained.
 
-`--methods` selects other original report methods when needed. Experimental
-`local_*` and `pixel_*` methods remain available only when explicitly selected;
-they change the measurement definition and are not used by this command's
-default quality-preserving path.
+Use `--workers-per-gpu 1` for a single-worker timing or to limit concurrent
+memory use when selecting the original deblended methods with
+`--methods half_area half_area_min_avg tail_area`. Other report methods remain
+available through `--methods`.
+The `pixel_*` variants require explicit selection and use native-pixel counts;
+they are not part of the default interpolated path.
 
 The batch uses `summary_only=True`: `measure_cds` returns a lightweight
 `CDSummary` containing seeds, per-method numerical arrays, calibration and
@@ -153,6 +175,26 @@ relative to an otherwise identical long run; disk cache state is uncontrolled.
 Failed or interrupted trials receive no dataset projection.
 
 The command above measures the remote PC's actual throughput on its own data.
+
+Local validation on one RTX 4060 Ti used 1378 x 2048 synthetic pages and all
+three interpolated local area methods. The warmed median measurement time
+fell from 0.19467 to 0.10829 s/page. On the 39,042-hole validation page, areas
+and statuses matched the previous interpolated implementation exactly;
+the largest x/y CD difference was 1.8e-15 px. Each worker uses at most 128 MiB
+for the reusable interpolation scratch buffer.
+
+A separate 512-page batch repeated the 48-page synthetic fixture; both runs
+accepted 428 pages, rejected 84 and had zero failures:
+
+| Workers on one GPU | Total batch time | Completed pages/s |
+|---|---:|---:|
+| 1 | 53.817 s | 9.514 |
+| 2 | 42.475 s | 12.054 |
+
+These batch times include startup, TIFF reading, screening, measurement and
+output. Disk cache state was uncontrolled. Repeated synthetic pages establish
+local throughput, not the remote PC's speed on real data; use the command above
+for that measurement. The report contains no added comparison tables or figures.
 
 ## Run the pipeline
 

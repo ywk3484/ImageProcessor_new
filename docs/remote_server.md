@@ -1,6 +1,6 @@
 # Run the contact-hole CD pipeline
 
-## Test throughput while retaining the original calculations
+## Test throughput with the interpolated local methods
 
 For the large-dataset speed trial, use the same two paths as `cd_compare.py`:
 
@@ -8,22 +8,28 @@ For the large-dataset speed trial, use the same two paths as `cd_compare.py`:
 python scripts\cd_speed.py D:\results\trial_w1 D:\data\dataset1\stripe_001\scan_001.tif
 ```
 
-This measures up to 512 consecutive pages with all visible GPUs, one worker
-each, using the original `half_area`, `half_area_min_avg` and `tail_area`
-methods. Gaussian deblending, seed revision, background correction, 4x cubic
-interpolation and connected-region measurement are retained. The command reports actual pages/s,
+This measures up to 512 consecutive pages with all visible GPUs, two workers
+each, using `local_half_area`, `local_half_area_min_avg` and `local_tail_area`.
+Their full 4x cubic interpolation, local levels and peaks, connected regions
+and validity rules are retained. These local estimators omit Gaussian
+deblending. The command reports actual pages/s,
 including startup and I/O, and conditional dataset-time estimates. It reuses
 the prior run's numerical and screening settings and creates a fresh output
-folder. See [batch timing details](contact_holes_cd.md#original-method-page-averages-and-an-actual-batch-timing).
+folder. See [batch timing details](contact_holes_cd.md#interpolated-local-page-averages-and-an-actual-batch-timing).
 
 For a full dataset, use these three names in `cd_batch.py --methods`, retain
 your other input/calibration/screening options, and choose a new output folder.
+To select the original deblended methods instead, append
+`--methods half_area half_area_min_avg tail_area --workers-per-gpu 1` to the
+speed command. `--workers-per-gpu 1` also provides a single-worker local timing;
+the default of two overlaps CPU and GPU work with bounded local scratch memory.
 
 ## Optional experiments with different measurement definitions
 
 The `local_*` and `pixel_*` methods below are experimental estimators. They
 are not equivalent accelerated implementations of the original measurements.
-Use the original-method command above when the calculation must be preserved.
+The speed command preserves the interpolated local calculation. Select the
+original method names explicitly when Gaussian deblending is required.
 
 The goal is to compare speed, coverage and CD changes before another whole-dataset run. From the repository root
 in the remote PC's Python environment, run one command with the previous trial folder and its TIFF:
@@ -71,7 +77,7 @@ arrays; the larger gain comes from bypassing deblending. Real remote gains must 
 After inspecting the pilot, run the local candidates through the normal multi-GPU batch tool into a **new** folder:
 
 ```powershell
-python scripts\cd_batch.py D:\data\dataset1 --reference D:\data\reference.tif --reference-page 12 --output D:\results\dataset1_local --pixel-size 21 --unit nm --workers-per-gpu 1 --methods local_half_area local_half_area_min_avg local_tail_area
+python scripts\cd_batch.py D:\data\dataset1 --reference D:\data\reference.tif --reference-page 12 --output D:\results\dataset1_local --pixel-size 21 --unit nm --workers-per-gpu 2 --methods local_half_area local_half_area_min_avg local_tail_area
 ```
 
 Existing method names and the batch's default ten methods remain available. Mixing local and model methods in
@@ -227,7 +233,9 @@ Measuring is the slower part: on an RTX 4060 Ti a synthetic 2048 x 1378 page wit
 slower: on 4 x RTX 6000 Ada a real page with holes took 3.5 s per GPU (2026-10-26); `scripts/cd_diagnose.py` (below)
 finds out why on your machine. Workers that share a GPU take turns on it (Windows has no
 NVIDIA multi-process service to let them run together), so a second worker helps only by doing its CPU part while
-another uses the GPU; on this Windows PC it did not help. The trials decide: take the worker count after which the
+another uses the GPU. Earlier deblended trials on this Windows PC did not benefit; the interpolated local path
+does benefit in the [512-page synthetic batch test](contact_holes_cd.md#interpolated-local-page-averages-and-an-actual-batch-timing).
+The trials decide: take the worker count after which the
 pages per second stop rising, or the disk's speed is reached (its MB/s divided by 2.8 MB per page).
 
 | Parameter | Default | Meaning |
