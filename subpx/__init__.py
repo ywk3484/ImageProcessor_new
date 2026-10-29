@@ -23,6 +23,8 @@ from .legacy import detect_centers_tiled, detect_centers_tiled_global_otsu
 from .cd import load_cd_results, measure_cds, plot_cd_map, save_cd_results, save_cd_viewer
 from .components import connected_components_stats
 from .pitch import estimate_pitch, estimate_pitch_lines, pitch_residuals
+from .pattern import analyze_pitch
+from ._pattern_report import plot_pitch_report, save_pitch_report
 from .registration import estimate_shift, apply_shift, crop_overlap
 from .spectra import (
     fft_pitch_error,
@@ -78,6 +80,9 @@ __all__ = [
     "estimate_pitch",
     "estimate_pitch_lines",
     "pitch_residuals",
+    "analyze_pitch",
+    "plot_pitch_report",
+    "save_pitch_report",
     "estimate_shift",
     "apply_shift",
     "crop_overlap",

@@ -1,6 +1,9 @@
 
 # Pitch Estimation
 
+For CD-method centers, square/staggered arrays, selectable averaging bands,
+and cumulative registration profiles, see the [pattern report pipeline](pattern_report.md).
+
 ## Global pitch
 The current stable global estimator uses nearest-neighbor vectors.
 For each point, the nearest neighbor vectors are examined and classified as:

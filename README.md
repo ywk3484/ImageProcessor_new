@@ -50,6 +50,21 @@ for physical calibration, other images, notebook usage, and accuracy measurement
 For your own images on a remote Windows server, see the
 [remote pipeline guide](docs/remote_server.md).
 
+### Pattern pitch and registration report
+
+Measure centers with the CD methods and inspect averaged x/y pitch and cumulative
+placement error for square or staggered arrays:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/pitch_report.py image.tif --average-rows 5 --average-columns 7 --backend auto
+```
+
+The offline HTML report lets you choose the method, averaging counts, and
+reference hole, with the selected regions highlighted on the image. It includes
+registration error obtained by integrating pitch minus the measured mean,
+and CSV/PNG exports. See the [pattern report guide](docs/pattern_report.md) for
+calibration, nominal pitch, batch input, and reuse of saved CD results.
+
 ## Quick start
 
 ```python

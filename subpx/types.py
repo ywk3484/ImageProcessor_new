@@ -23,6 +23,51 @@ class PitchResult:
 
 
 @dataclass
+class PitchProfile:
+    """Averaged adjacent-hole pitch and its discrete integral, in ``unit``.
+
+    Node arrays have length M; interval arrays (pitch, std, counts) have M-1
+    entries. ``pairs`` contains original hole indices for the selected band.
+    Missing intervals are NaN and interrupt integration from the reference.
+    """
+
+    axis: str
+    indices: np.ndarray
+    position: np.ndarray
+    pitch: np.ndarray
+    std: np.ndarray
+    counts: np.ndarray
+    distance: np.ndarray
+    registration: np.ndarray
+    selected_indices: np.ndarray
+    pairs: np.ndarray
+    nominal_pitch: float
+    reference_node: int
+
+
+@dataclass
+class PatternPitchResult:
+    """Pitch from one CD method; coordinates and lattice pitch remain in pixels.
+
+    Profiles contain calibrated lengths. Lattice indices are [row, column],
+    independent of which CD fits succeeded. Invalid fits never become seeds.
+    """
+
+    method: str
+    centers_xy: np.ndarray
+    valid: np.ndarray
+    indices_rc: np.ndarray
+    layout: str
+    stagger_axis: str
+    lattice_pitch_xy: np.ndarray
+    reference_index: int
+    profiles: dict[str, PitchProfile]
+    pixel_size: float = 1.0
+    unit: str = "px"
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ShiftResult:
     shift_yx: np.ndarray
     error: float | None = None
