@@ -27,6 +27,25 @@ click a hole to move the reference. The highlighted regions and all four curves
 update immediately using the measured centers. The **Download current CSV**
 button exports the displayed selection.
 
+Use **+** / **−**, the mouse wheel over the image, or the **1:1 pixels** button
+to inspect individual holes. Wheel zoom stays anchored at the pointer; drag
+to pan and use **Fit image** to restore the full view. Changing the method,
+reference, or averaging counts preserves the zoom and pan. With the image
+focused, `+` / `−` zoom and `F` / `0` fit the image.
+
+Green crosshairs mark every valid measured center for the selected method,
+including centers outside the averaging bands. Hover over a marker to see its
+hole and lattice indices, measured `[x, y]` coordinates to four decimal places
+in pixels, and whether it contributes to the current x/y pitch pairs. Integer
+image coordinates identify pixel centers. Amber crosses show invalid fits at
+their detection seeds; red crosses show unindexed detections. These seed
+markers do not represent measured centers and are excluded from pitch.
+Toggle **Show measured centers** or **Show averaging bands** to inspect the
+underlying image. The purple ring identifies the reference, and the status
+line gives its measured center or explicitly labels its seed when the fit is invalid.
+
+![Zoomed report showing measured center crosshairs and the coordinate readout](images/pattern_pitch_zoom.png)
+
 The default includes all 17 methods in `cd_fast_report.py`: ten original methods,
 four raw-cell methods, and three native-pixel methods. To run a smaller set:
 
@@ -206,6 +225,14 @@ CD centers on synthetic Gaussian images (pitch tolerance 0.08 px), and CPU/GPU
 pitch parity (2e-5 px tolerance). Node.js, when available, executes the offline
 viewer and compares six changed selections to Python to 1e-9 in calibrated
 units. GPU and Node tests skip with explicit reasons when unavailable.
+
+The viewer diagnostic also checks zoom and pan, pointer-anchored wheel zoom,
+reference selection after zooming, pixel-center alignment, markers for valid
+and invalid fits, coordinate readouts, overlay toggles, and resizing. The
+zoom/center update passed all 39 report/pattern tests and browser interaction
+checks at desktop and narrow viewport sizes. Broader pitch tests passed 12
+additional checks, skipped the missing-CuPy case because CUDA is available,
+and reproduced the existing CPU-default expectation failure with GPU auto-selection.
 
 Local validation on 2026-10-29: all 23 new tests passed, including GPU parity
 and the Node viewer checks. The full suite returned 455 passed, 1 skipped, and

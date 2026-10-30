@@ -10,7 +10,12 @@ h1{font-size:25px}h2{font-size:18px}p{line-height:1.5}label{display:inline-flex;
 select,input,button{font:inherit;padding:7px;border:1px solid #aebdcc;border-radius:5px;background:white}input{width:105px}
 .controls{display:flex;align-items:end;flex-wrap:wrap;gap:12px;padding:16px;background:white;border-radius:8px;position:sticky;top:0;z-index:1}
 .panel{background:white;padding:16px;border-radius:8px;margin-top:16px}.plots{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-svg{width:100%;height:auto}canvas{display:block;max-width:100%;margin:auto;cursor:crosshair}small{color:#465b70}
+svg{width:100%;height:auto}small{color:#465b70}
+.image-tools{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0}.image-tools label{flex-direction:row;align-items:center}
+.image-tools input{width:auto}.image-tools output{min-width:70px;font-variant-numeric:tabular-nums}
+.image-view{height:clamp(300px,50vh,600px);background:#172536;overflow:hidden;border-radius:5px}
+canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}canvas:focus-visible{outline:3px solid #1469b8;outline-offset:-3px}
+.center{color:#087b62}.invalid{color:#986600}#inspection{min-height:3em;font-variant-numeric:tabular-nums}
 .legend{display:flex;gap:20px;flex-wrap:wrap}.x{color:#c15c00}.y{color:#1469b8}.ref{color:#9828b9}
 @media(max-width:800px){.plots{grid-template-columns:1fr}.controls{position:static}}
 </style>
@@ -26,7 +31,17 @@ svg{width:100%;height:auto}canvas{display:block;max-width:100%;margin:auto;curso
 <p><small>Click a hole in the image to move the reference and averaging bands. Leave nominal pitches blank to use the
 selected pairs' mean for each method. Pitch and registration error use <span id="unit"></span>; image coordinates use pixels.</small></p>
 <div class="panel"><div class="legend"><span class="x">Orange: rows averaged for x</span><span class="y">Blue: columns averaged for y</span>
-<span class="ref">Purple: reference</span><span>Red crosses: unindexed detections</span></div><p id="status"></p><canvas id="image"></canvas></div>
+<span class="center">Green crosshairs: measured centers</span><span class="ref">Purple: reference</span>
+<span class="invalid">Amber crosses: invalid fits (at seeds)</span><span>Red crosses: unindexed detections</span></div><p id="status"></p>
+<div class="image-tools" role="group" aria-label="Image view controls">
+<button id="zoom-out" aria-label="Zoom out">−</button><output id="zoom-level" aria-label="Image zoom"></output>
+<button id="zoom-in" aria-label="Zoom in">+</button><button id="fit-image">Fit image</button><button id="actual-size">1:1 pixels</button>
+<label><input id="show-centers" type="checkbox" checked>Show measured centers</label>
+<label><input id="show-bands" type="checkbox" checked>Show averaging bands</label></div>
+<p><small>Scroll over the image to zoom at the pointer; drag to pan. Hover over a marker for its measured [x, y] coordinates in pixels.
+Click a hole to select the reference. Fit image restores the full view. Image pixel centers have integer coordinates.</small></p>
+<div id="image-view" class="image-view"><canvas id="image" tabindex="0" aria-label="Pitch image with measured centers; scroll to zoom, drag to pan, click to select a reference"></canvas></div>
+<p id="inspection" aria-live="polite">Hover over a center to inspect its coordinates.</p></div>
 <div class="panel plots"><div><h2>x pitch averaged over rows</h2><div id="xp"></div></div>
 <div><h2>y pitch averaged over columns</h2><div id="yp"></div></div>
 <div><h2>x registration error</h2><div id="xr"></div></div><div><h2>y registration error</h2><div id="yr"></div></div></div>
@@ -40,7 +55,8 @@ offset and therefore shows relative distortion, not absolute placement against a
 <script src="data.js"></script><script>
 "use strict";
 const D=window.PITCH_DATA, $=id=>document.getElementById(id), finite=Number.isFinite;
-let reference=D.reference, current;
+let reference=D.reference, current, hovered=null, drag=null;
+const view={scale:0,x:0,y:0,width:0,height:0,fit:0};
 const mean=a=>a.length?a.reduce((s,v)=>s+v,0)/a.length:NaN;
 const minimum=a=>a.reduce((v,x)=>Math.min(v,x),Infinity),maximum=a=>a.reduce((v,x)=>Math.max(v,x),-Infinity);
 function band(count,ref,size){const start=Math.min(Math.max(ref-Math.floor((count-1)/2),0),size-count);return [start,start+count-1];}
@@ -78,22 +94,67 @@ function svgPlot(id,x,y,color,xlabel,ylabel,baseline){
  for(const p of good)s+=`<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="2" fill="${color}"><title>${fmt(p[0])}, ${fmt(p[1])}</title></circle>`;
  s+=`<text x="${(l+w-r)/2}" y="${h-8}" text-anchor="middle">${xlabel}</text><text transform="translate(16 ${(t+h-b)/2}) rotate(-90)" text-anchor="middle">${ylabel}</text></g></svg>`;$(id).innerHTML=s;
 }
-const image=new Image();image.src='image.png';image.onload=()=>drawImage();
-function drawImage(){if(!current||!image.complete)return;const canvas=$('image'),ctx=canvas.getContext('2d');
- const scale=Math.min(1,1200/D.width,600/D.height);canvas.width=Math.round(D.width*scale);canvas.height=Math.round(D.height*scale);
- ctx.setTransform(canvas.width/D.width,0,0,canvas.height/D.height,0,0);ctx.drawImage(image,0,0,D.width,D.height);
- ctx.strokeStyle='#ff4949';ctx.lineWidth=1.5/scale;ctx.beginPath();D.indices.forEach((rc,i)=>{if(rc[0]>=0)return;const [x,y]=D.seeds[i],s=3/scale;ctx.moveTo(x-s,y-s);ctx.lineTo(x+s,y+s);ctx.moveTo(x-s,y+s);ctx.lineTo(x+s,y-s);});ctx.stroke();
+// View offsets are in CSS pixels; image coordinates identify pixel centers.
+const image=new Image();image.onload=()=>drawImage();image.src='image.png';
+const imagePoint=p=>[(p[0]-view.x)/view.scale-.5,(p[1]-view.y)/view.scale-.5];
+const screenPoint=p=>[(p[0]+.5)*view.scale+view.x,(p[1]+.5)*view.scale+view.y];
+function pointerPoint(e){const box=$('image').getBoundingClientRect();
+ return [(e.clientX-box.left)*view.width/box.width,(e.clientY-box.top)*view.height/box.height];}
+function resizeImage(){const box=$('image').getBoundingClientRect();if(!box.width||!box.height)return;
+ const w=box.width,h=box.height;if(w===view.width&&h===view.height)return;
+ const center=view.scale?imagePoint([view.width/2,view.height/2]):[(D.width-1)/2,(D.height-1)/2];
+ const fit=Math.min(w/D.width,h/D.height),wasFit=!view.scale||Math.abs(view.scale-view.fit)<1e-9;
+ view.scale=wasFit?fit:view.scale;view.fit=fit;view.width=w;view.height=h;
+ view.x=w/2-(center[0]+.5)*view.scale;view.y=h/2-(center[1]+.5)*view.scale;
+ const ratio=window.devicePixelRatio||1;$('image').width=Math.round(w*ratio);$('image').height=Math.round(h*ratio);
+}
+function inspect(point){const m=D.methods[$('method').value];
+ const coord=p=>'['+p.map(v=>v.toFixed(4)).join(', ')+'] px';
+ let text=point?'Pointer '+coord(point)+'. ':'Hover over a center to inspect its coordinates.';
+ if(hovered!==null){const i=hovered,rc=D.indices[i];text+=`Hole ${i} [row ${rc[0]}, column ${rc[1]}]. `;
+  if(m.valid[i]){const used=['x','y'].filter(axis=>current[axis].pairs.some(pair=>pair.includes(i)));
+   text+='Measured center '+coord(m.centers[i])+'. '+(used.length?'Used in '+used.join(' and ')+' pitch pairs.':'Outside the current pitch pairs.');}
+  else text+=(rc[0]<0?'Unindexed detection':'No valid measured center for this method')+'; seed '+coord(D.seeds[i])+' (excluded from pitch).';
+ }$('inspection').textContent=text;
+}
+function nearestHole(point,indexedOnly=false,maxDistance=Infinity){const m=D.methods[$('method').value];let best=maxDistance**2,index=null;
+ D.seeds.forEach((seed,i)=>{if(indexedOnly&&D.indices[i][0]<0)return;const p=m.valid[i]?m.centers[i]:seed;
+  const d=(p[0]-point[0])**2+(p[1]-point[1])**2;if(d<=best){best=d;index=i;}});return index;}
+function zoomImage(scale,anchor=[view.width/2,view.height/2]){if(!view.scale)return;
+ const point=imagePoint(anchor);view.scale=Math.max(Math.min(1,view.fit*.1),Math.min(Math.max(32,view.fit*32),scale));
+ view.x=anchor[0]-(point[0]+.5)*view.scale;view.y=anchor[1]-(point[1]+.5)*view.scale;
+ hovered=null;inspect();drawImage();
+}
+function fitImage(){resizeImage();view.scale=view.fit;view.x=(view.width-D.width*view.scale)/2;view.y=(view.height-D.height*view.scale)/2;
+ hovered=null;inspect();drawImage();}
+function drawImage(){resizeImage();$('zoom-level').textContent=(view.scale*100).toFixed(1)+'%';
+ if(!current||!image.complete||!image.naturalWidth||!view.scale)return;
+ const canvas=$('image'),ctx=canvas.getContext('2d'),scale=view.scale,rx=canvas.width/view.width,ry=canvas.height/view.height;
+ ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,canvas.width,canvas.height);ctx.imageSmoothingEnabled=false;
+ ctx.setTransform(rx*scale,0,0,ry*scale,rx*(view.x+scale/2),ry*(view.y+scale/2));
+ // Drawing at -0.5 aligns integer [x, y] coordinates with image pixel centers.
+ ctx.drawImage(image,-.5,-.5,D.width,D.height);
  const m=D.methods[$('method').value];
- for(const [axis,color] of [['x','#ff9b32'],['y','#4aaeff']]){const p=current[axis];ctx.strokeStyle=color;ctx.lineWidth=1/scale;
-  // Draw every selected measured pair and outline the selected seed area.
-  ctx.beginPath();for(const [i,j] of p.pairs){ctx.moveTo(...m.centers[i]);ctx.lineTo(...m.centers[j]);}ctx.stroke();
+ if($('show-bands').checked)for(const [axis,color] of [['x','#ff9b32'],['y','#4aaeff']]){const p=current[axis];ctx.strokeStyle=color;ctx.lineWidth=1/scale;
   if(p.selected.length){const xs=p.selected.map(i=>D.seeds[i][0]),ys=p.selected.map(i=>D.seeds[i][1]);const x0=minimum(xs)-D.pitch_xy[0]*.35,y0=minimum(ys)-D.pitch_xy[1]*.35;
    const w=maximum(xs)-x0+D.pitch_xy[0]*.35,h=maximum(ys)-y0+D.pitch_xy[1]*.35;
    ctx.globalAlpha=.12;ctx.fillStyle=color;ctx.fillRect(x0,y0,w,h);ctx.globalAlpha=1;ctx.strokeRect(x0,y0,w,h);}
+  ctx.beginPath();for(const [i,j] of p.pairs){ctx.moveTo(...m.centers[i]);ctx.lineTo(...m.centers[j]);}ctx.stroke();
  }
- // Mark actual method centers; no substitution for failed fits.
- ctx.fillStyle='#fff';for(const i of new Set([...current.x.selected,...current.y.selected]))if(m.valid[i]){ctx.beginPath();ctx.arc(...m.centers[i],1.6/scale,0,2*Math.PI);ctx.fill();}
- const point=m.valid[reference]?m.centers[reference]:D.seeds[reference];ctx.strokeStyle='#d445ff';ctx.lineWidth=2/scale;ctx.beginPath();ctx.arc(...point,6/scale,0,2*Math.PI);ctx.stroke();
+ function cross(p,s,diagonal){const [x,y]=p;s/=scale;
+  ctx.moveTo(x-s,y-(diagonal?s:0));ctx.lineTo(x+s,y+(diagonal?s:0));
+  ctx.moveTo(x-(diagonal?s:0),y+s);ctx.lineTo(x+(diagonal?s:0),y-s);}
+ if($('show-centers').checked){
+  // Every valid center of the selected method, including outside the bands.
+  ctx.beginPath();m.centers.forEach((p,i)=>{if(m.valid[i])cross(p,4,false);});
+  ctx.strokeStyle='#102d28';ctx.lineWidth=3/scale;ctx.stroke();ctx.strokeStyle='#58ffd1';ctx.lineWidth=1.2/scale;ctx.stroke();
+ }
+ for(const [unindexed,color] of [[false,'#ffc247'],[true,'#ff4949']]){ctx.beginPath();D.seeds.forEach((p,i)=>{
+   if(!m.valid[i]&&(D.indices[i][0]<0)===unindexed)cross(p,4,true);});
+  ctx.strokeStyle='#172536';ctx.lineWidth=3/scale;ctx.stroke();ctx.strokeStyle=color;ctx.lineWidth=1.5/scale;ctx.stroke();}
+ const point=m.valid[reference]?m.centers[reference]:D.seeds[reference];ctx.strokeStyle='#d445ff';ctx.lineWidth=2/scale;ctx.beginPath();ctx.arc(...point,7/scale,0,2*Math.PI);ctx.stroke();
+ if(hovered!==null){const p=m.valid[hovered]?m.centers[hovered]:D.seeds[hovered];ctx.strokeStyle='#fff';ctx.lineWidth=1.5/scale;
+  ctx.beginPath();ctx.arc(...p,9/scale,0,2*Math.PI);ctx.stroke();}
 }
 function update(){
  for(const [id,max] of [['rows',D.shape[0]],['columns',D.shape[1]]]){$(id).value=Math.max(1,Math.min(max,Math.floor(Number($(id).value)||1)));}
@@ -105,15 +166,40 @@ function update(){
   svgPlot(axis+'r',p.position,p.registration,color,`${axis} position (${D.unit})`,`registration error (${D.unit})`,0);}
  const stats=axis=>{const p=current[axis],c=p.counts;return `${axis}: ${c.reduce((s,n)=>s+n,0)} pairs, ${minimum(c)}–${maximum(c)} per interval; baseline ${p.nominal.toPrecision(7)} ${D.unit}`;};
  const skipped=D.indices.filter(rc=>rc[0]<0).length;
- $('status').textContent=`${D.layout}${D.layout==='staggered'?' ('+D.stagger_axis+' offsets)':''}; ${skipped} unindexed detections; reference hole ${reference} [row ${rc[0]}, column ${rc[1]}], image [${D.seeds[reference].map(v=>v.toFixed(2)).join(', ')}] px${m.valid[reference]?'':' (this method has no valid reference center)'}. ${stats('x')}. ${stats('y')}.`;
- drawImage();
+ const location=m.valid[reference]?`measured center [${m.centers[reference].map(v=>v.toFixed(4)).join(', ')}] px`:
+  `seed [${D.seeds[reference].map(v=>v.toFixed(4)).join(', ')}] px (no valid measured reference center)`;
+ $('status').textContent=`${D.layout}${D.layout==='staggered'?' ('+D.stagger_axis+' offsets)':''}; ${skipped} unindexed detections; reference hole ${reference} [row ${rc[0]}, column ${rc[1]}], ${location}. ${stats('x')}. ${stats('y')}.`;
+ hovered=null;inspect();drawImage();
 }
 function csvRows(){const rows=[['method','axis','node','position','pitch_to_next','sample_std','pairs','distance','registration','nominal_pitch','unit','reference_hole','average_rows','average_columns']];
  for(const axis of ['x','y']){const p=current[axis];for(let i=0;i<p.position.length;i++)rows.push([$('method').value,axis,i,p.position[i],p.pitch[i],p.std[i],p.counts[i],p.distance[i],p.registration[i],p.nominal,D.unit,reference,$('rows').value,$('columns').value]);}return rows;}
 $('download').onclick=()=>{const csv=csvRows().map(row=>row.map(v=>typeof v==='number'&&!finite(v)||v===undefined?'':'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\n');
  const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='pitch_selection.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
-$('image').onclick=e=>{const box=$('image').getBoundingClientRect(),x=(e.clientX-box.left)/box.width*D.width,y=(e.clientY-box.top)/box.height*D.height;
- let best=Infinity;D.seeds.forEach((p,i)=>{if(D.indices[i][0]<0)return;const d=(p[0]-x)**2+(p[1]-y)**2;if(d<best){best=d;reference=i;}});update();};
+$('zoom-in').onclick=()=>zoomImage(view.scale*1.5);
+$('zoom-out').onclick=()=>zoomImage(view.scale/1.5);
+$('fit-image').onclick=fitImage;$('actual-size').onclick=()=>zoomImage(1);
+for(const id of ['show-centers','show-bands'])$(id).addEventListener('change',drawImage);
+const canvas=$('image');
+canvas.addEventListener('wheel',e=>{e.preventDefault();const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?view.height:1);
+ zoomImage(view.scale*Math.exp(Math.max(-.5,Math.min(.5,-delta*.002))),pointerPoint(e));},{passive:false});
+canvas.addEventListener('pointerdown',e=>{if(e.button!==0||drag)return;const p=pointerPoint(e);
+ drag={id:e.pointerId,start:p,x:view.x,y:view.y,moved:false};canvas.setPointerCapture(e.pointerId);});
+canvas.addEventListener('pointermove',e=>{const p=pointerPoint(e);
+ if(drag){if(e.pointerId!==drag.id)return;const dx=p[0]-drag.start[0],dy=p[1]-drag.start[1];
+  if(Math.hypot(dx,dy)>4)drag.moved=true;
+  if(drag.moved){view.x=drag.x+dx;view.y=drag.y+dy;hovered=null;canvas.style.cursor='grabbing';inspect(imagePoint(p));drawImage();}return;}
+ const point=imagePoint(p);hovered=nearestHole(point,false,12/view.scale);inspect(point);drawImage();});
+canvas.addEventListener('pointerup',e=>{if(!drag||e.pointerId!==drag.id)return;const moved=drag.moved;drag=null;
+ if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);canvas.style.cursor='grab';
+ if(!moved){const point=imagePoint(pointerPoint(e));if(point[0]<-.5||point[0]>D.width-.5||point[1]<-.5||point[1]>D.height-.5)return;
+  const i=nearestHole(point,true);if(i!==null){reference=i;update();}}
+});
+function cancelDrag(){drag=null;canvas.style.cursor='grab';}
+canvas.addEventListener('pointercancel',cancelDrag);canvas.addEventListener('lostpointercapture',cancelDrag);
+canvas.addEventListener('pointerleave',()=>{if(!drag){hovered=null;inspect();drawImage();}});
+canvas.addEventListener('keydown',e=>{if(['+','=','-','0','f','F'].includes(e.key)){e.preventDefault();
+ if(e.key==='0'||e.key.toLowerCase()==='f')fitImage();else zoomImage(view.scale*(e.key==='-'?1/1.5:1.5));}});
+window.addEventListener('resize',()=>{hovered=null;inspect();drawImage();});
 $('reset').onclick=()=>{reference=D.first_reference;update();};
 for(const id of ['method','rows','columns','nx','ny'])$(id).addEventListener('change',update);
 for(const [key,m] of Object.entries(D.methods)){const option=document.createElement('option');option.value=key;option.textContent=key+' — '+m.label;$('method').appendChild(option);}
