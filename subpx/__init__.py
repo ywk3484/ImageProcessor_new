@@ -56,7 +56,16 @@ from .mosaic import (
     process_stripe_board,
 )
 
+
+def launch_workbench(image=None, *, name="Array image", block=None):
+    """Open the optional PyQt6/pyqtgraph inspection UI (see ``subpx.workbench``)."""
+    from .workbench import launch_workbench as launch
+
+    return launch(image, name=name, block=block)
+
+
 __all__ = [
+    "launch_workbench",
     "imshow",
     "imshow_huge",
     "show_image",

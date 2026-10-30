@@ -30,6 +30,9 @@ viewer = ["PyQt6>=6.7", "pyqtgraph>=0.13.7", "PyOpenGL>=3.1.7", "matplotlib>=3.9
 notebook = ["jupyterlab>=4.2", "ipykernel>=6.29"]
 dev = ["pytest>=8"]
 
+[project.gui-scripts]
+subpx-workbench = "subpx.workbench:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["subpx*"]
