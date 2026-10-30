@@ -45,7 +45,7 @@ def main(argv=None):
     parser.add_argument("--reference", type=float, nargs=2, metavar=("X_PX", "Y_PX"))
     parser.add_argument("--nominal-pitch", type=float, nargs=2, metavar=("X", "Y"), help="Nominal pitches in --unit; default: measured means")
     parser.add_argument("--pitch-hint", type=float, nargs=2, metavar=("X_PX", "Y_PX"))
-    parser.add_argument("--line-tolerance", type=float, help="Grouping tolerance in pixels")
+    parser.add_argument("--line-tolerance", type=float, help="Local neighbour displacement tolerance in pixels (automatic by default)")
     parser.add_argument("--pixel-size", type=float, default=1.0)
     parser.add_argument("--unit", default="px")
     parser.add_argument("--backend", choices=("cpu", "gpu", "auto"), default="auto")

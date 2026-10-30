@@ -109,6 +109,71 @@ def test_noisy_seed_grid_and_edge_clamped_band():
     np.testing.assert_allclose(result.profiles["y"].pitch, 9, atol=0.1)
 
 
+@pytest.mark.parametrize("layout", ["square", "staggered"])
+@pytest.mark.parametrize("stagger_axis", ["row", "column"])
+def test_tilted_bowed_rows_preserve_lattice_and_measured_pitch(layout, stagger_axis):
+    seeds, rc = lattice(rows=14, columns=90, layout=layout, stagger_axis=stagger_axis, pitch=(8, 9))
+    along, perpendicular = (0, 1) if stagger_axis == "row" else (1, 0)
+    u = seeds[:, along].copy()
+    seeds[:, perpendicular] += 0.025 * u + 2.0 * np.sin(2 * np.pi * u / np.ptp(u))
+    seeds += np.random.default_rng(17).normal(0, 0.08, seeds.shape)
+    order = np.random.default_rng(18).permutation(len(seeds))
+    result = analyze_pitch(summary(seeds[order]), stagger_axis=stagger_axis, average_rows=5, average_columns=7)["test"]
+    np.testing.assert_array_equal(result.indices_rc, rc[order])
+    assert result.layout == layout
+    assert result.meta["unindexed_seeds"] == 0
+    # Expected projected separations come from the original logical neighbours,
+    # including the true stagger-induced transverse drift, without rectifying it.
+    for axis, p in result.profiles.items():
+        dim = 1 if axis == "x" else 0
+        coordinate = 0 if axis == "x" else 1
+        for index in range(len(p.pitch)):
+            pairs = p.pairs[rc[order][p.pairs[:, 0], dim] == index]
+            expected = np.mean(seeds[order][pairs[:, 1], coordinate] - seeds[order][pairs[:, 0], coordinate])
+            np.testing.assert_allclose(p.pitch[index], expected, atol=1e-12)
+
+
+@pytest.mark.parametrize("layout", ["square", "staggered"])
+def test_row_step_and_cumulative_pitch_drift_do_not_fragment_rows(layout):
+    seeds, rc = lattice(rows=24, columns=65, layout=layout, pitch=(8, 9))
+    r, c = rc.T
+    seeds[:, 1] += (c >= 30) * 2.5 + 0.025 * r**2
+    seeds[:, 0] += 0.002 * c**2 + 0.07 * r
+    result = analyze_pitch(summary(seeds), average_rows=5, average_columns=7)["test"]
+    np.testing.assert_array_equal(result.indices_rc, rc)
+    np.testing.assert_allclose(result.profiles["x"].pitch, 8 + 0.002 * (2 * np.arange(64) + 1), atol=1e-12)
+    np.testing.assert_allclose(result.profiles["y"].pitch, 9 + 0.025 * (2 * np.arange(23) + 1), atol=1e-12)
+
+
+def test_off_lattice_detection_is_marked_and_cannot_be_reference_or_pitch_endpoint():
+    seeds, rc = lattice(rows=12, columns=20, layout="staggered")
+    seeds = np.vstack(([18.3, 20.3], seeds))
+    result = analyze_pitch(summary(seeds), reference_xy=seeds[0])["test"]
+    np.testing.assert_array_equal(result.indices_rc[0], [-1, -1])
+    np.testing.assert_array_equal(result.indices_rc[1:], rc)
+    assert result.meta["unindexed_seeds"] == 1
+    assert result.reference_index != 0
+    assert not result.valid[0]
+    assert np.all(result.profiles["x"].pairs != 0)
+    assert np.all(result.profiles["y"].pairs != 0)
+
+
+@pytest.mark.parametrize("layout", ["square", "staggered"])
+@pytest.mark.parametrize("stagger_axis,pitch", [("row", (40, 8)), ("row", (8, 40)),
+                                               ("column", (40, 8)), ("column", (8, 40))])
+def test_sparse_tilted_unequal_pitch_grids_do_not_select_diagonal_as_row(layout, stagger_axis, pitch):
+    points, rc = lattice(rows=16, columns=35, layout=layout, stagger_axis=stagger_axis, pitch=pitch)
+    theta = np.deg2rad(2.5)
+    points = points @ np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]).T
+    rng = np.random.default_rng(191)
+    points += rng.normal(0, 0.02 * min(pitch), points.shape)
+    keep = rng.random(len(points)) > 0.15
+    keep[0] = keep[-1] = True
+    result = analyze_pitch(summary(points[keep]), stagger_axis=stagger_axis)["test"]
+    np.testing.assert_array_equal(result.indices_rc, rc[keep])
+    assert result.layout == layout
+
+
 @pytest.mark.parametrize("options,match", [
     ({"average_rows": 0}, "average_rows"), ({"average_columns": 9}, "average_columns"),
     ({"average_rows": 2.5}, "average_rows"), ({"nominal_pitch_xy": (1, 0)}, "nominal_pitch_xy"),

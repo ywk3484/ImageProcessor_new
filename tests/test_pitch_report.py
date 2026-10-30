@@ -113,3 +113,30 @@ def test_cli_batch_and_saved_cd_reuse(source, tmp_path):
     reused = tmp_path / "reuse"
     assert main([str(tmp_path / "cd"), "--from-cd", "--output", str(reused)]) == 0
     assert set(json.loads((reused / "data.json").read_text())["methods"]) == {"gaussian", "projection"}
+
+
+def test_cli_default_methods_and_five_by_seven_bands_handle_tilted_bowed_image(tmp_path):
+    from PIL import Image
+    from scipy.spatial import cKDTree
+    from scripts.pitch_report import DEFAULT_METHODS, main
+
+    r, c = np.mgrid[:9, :34]
+    truth = np.column_stack((20 + c.ravel() * 10 + (r.ravel() % 2) * 5, 20 + r.ravel() * 10)).astype(float)
+    u = truth[:, 0].copy()
+    truth[:, 1] += 0.035 * u + 1.5 * np.sin(2 * np.pi * u / np.ptp(u))
+    yy, xx = np.mgrid[:140, :380]
+    image = np.full(xx.shape, 8.0)
+    for x, y in truth:
+        image += 130 * np.exp(-((xx - x)**2 + (yy - y)**2) / (2 * 1.3**2))
+    path = tmp_path / "bowed.png"
+    Image.fromarray(image.astype(np.uint8)).save(path)
+    output = tmp_path / "report"
+    assert main([str(path), "--output", str(output), "--backend", "cpu",
+                 "--average-rows", "5", "--average-columns", "7"]) == 0
+    data = json.loads((output / "data.json").read_text(encoding="utf-8"))
+    assert set(data["methods"]) == set(DEFAULT_METHODS)
+    assert len(data["seeds"]) == len(truth)
+    _, nearest = cKDTree(truth).query(data["seeds"])
+    np.testing.assert_array_equal(data["indices"], np.column_stack((r.ravel(), c.ravel()))[nearest])
+    assert data["resolved_settings"]["unindexed_seeds"] == 0
+    assert data["shape"] == [9, 34]

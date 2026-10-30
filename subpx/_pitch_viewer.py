@@ -26,7 +26,7 @@ svg{width:100%;height:auto}canvas{display:block;max-width:100%;margin:auto;curso
 <p><small>Click a hole in the image to move the reference and averaging bands. Leave nominal pitches blank to use the
 selected pairs' mean for each method. Pitch and registration error use <span id="unit"></span>; image coordinates use pixels.</small></p>
 <div class="panel"><div class="legend"><span class="x">Orange: rows averaged for x</span><span class="y">Blue: columns averaged for y</span>
-<span class="ref">Purple: reference</span></div><p id="status"></p><canvas id="image"></canvas></div>
+<span class="ref">Purple: reference</span><span>Red crosses: unindexed detections</span></div><p id="status"></p><canvas id="image"></canvas></div>
 <div class="panel plots"><div><h2>x pitch averaged over rows</h2><div id="xp"></div></div>
 <div><h2>y pitch averaged over columns</h2><div id="yp"></div></div>
 <div><h2>x registration error</h2><div id="xr"></div></div><div><h2>y registration error</h2><div id="yr"></div></div></div>
@@ -82,6 +82,7 @@ const image=new Image();image.src='image.png';image.onload=()=>drawImage();
 function drawImage(){if(!current||!image.complete)return;const canvas=$('image'),ctx=canvas.getContext('2d');
  const scale=Math.min(1,1200/D.width,600/D.height);canvas.width=Math.round(D.width*scale);canvas.height=Math.round(D.height*scale);
  ctx.setTransform(canvas.width/D.width,0,0,canvas.height/D.height,0,0);ctx.drawImage(image,0,0,D.width,D.height);
+ ctx.strokeStyle='#ff4949';ctx.lineWidth=1.5/scale;ctx.beginPath();D.indices.forEach((rc,i)=>{if(rc[0]>=0)return;const [x,y]=D.seeds[i],s=3/scale;ctx.moveTo(x-s,y-s);ctx.lineTo(x+s,y+s);ctx.moveTo(x-s,y+s);ctx.lineTo(x+s,y-s);});ctx.stroke();
  const m=D.methods[$('method').value];
  for(const [axis,color] of [['x','#ff9b32'],['y','#4aaeff']]){const p=current[axis];ctx.strokeStyle=color;ctx.lineWidth=1/scale;
   // Draw every selected measured pair and outline the selected seed area.
@@ -103,7 +104,8 @@ function update(){
   svgPlot(axis+'p',mid,p.pitch,color,`${axis} position (${D.unit})`,`pitch (${D.unit})`,p.nominal);
   svgPlot(axis+'r',p.position,p.registration,color,`${axis} position (${D.unit})`,`registration error (${D.unit})`,0);}
  const stats=axis=>{const p=current[axis],c=p.counts;return `${axis}: ${c.reduce((s,n)=>s+n,0)} pairs, ${minimum(c)}–${maximum(c)} per interval; baseline ${p.nominal.toPrecision(7)} ${D.unit}`;};
- $('status').textContent=`${D.layout}${D.layout==='staggered'?' ('+D.stagger_axis+' offsets)':''}; reference hole ${reference} [row ${rc[0]}, column ${rc[1]}], image [${D.seeds[reference].map(v=>v.toFixed(2)).join(', ')}] px${m.valid[reference]?'':' (this method has no valid reference center)'}. ${stats('x')}. ${stats('y')}.`;
+ const skipped=D.indices.filter(rc=>rc[0]<0).length;
+ $('status').textContent=`${D.layout}${D.layout==='staggered'?' ('+D.stagger_axis+' offsets)':''}; ${skipped} unindexed detections; reference hole ${reference} [row ${rc[0]}, column ${rc[1]}], image [${D.seeds[reference].map(v=>v.toFixed(2)).join(', ')}] px${m.valid[reference]?'':' (this method has no valid reference center)'}. ${stats('x')}. ${stats('y')}.`;
  drawImage();
 }
 function csvRows(){const rows=[['method','axis','node','position','pitch_to_next','sample_std','pairs','distance','registration','nominal_pitch','unit','reference_hole','average_rows','average_columns']];
@@ -111,7 +113,7 @@ function csvRows(){const rows=[['method','axis','node','position','pitch_to_next
 $('download').onclick=()=>{const csv=csvRows().map(row=>row.map(v=>typeof v==='number'&&!finite(v)||v===undefined?'':'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\n');
  const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='pitch_selection.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 $('image').onclick=e=>{const box=$('image').getBoundingClientRect(),x=(e.clientX-box.left)/box.width*D.width,y=(e.clientY-box.top)/box.height*D.height;
- let best=Infinity;D.seeds.forEach((p,i)=>{const d=(p[0]-x)**2+(p[1]-y)**2;if(d<best){best=d;reference=i;}});update();};
+ let best=Infinity;D.seeds.forEach((p,i)=>{if(D.indices[i][0]<0)return;const d=(p[0]-x)**2+(p[1]-y)**2;if(d<best){best=d;reference=i;}});update();};
 $('reset').onclick=()=>{reference=D.first_reference;update();};
 for(const id of ['method','rows','columns','nx','ny'])$(id).addEventListener('change',update);
 for(const [key,m] of Object.entries(D.methods)){const option=document.createElement('option');option.value=key;option.textContent=key+' — '+m.label;$('method').appendChild(option);}

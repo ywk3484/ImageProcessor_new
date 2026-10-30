@@ -28,6 +28,9 @@ def plot_pitch_report(image, result: PatternPitchResult):
     image_ax = fig.add_subplot(grid[0, :])
     image_ax.imshow(image, cmap="gray", interpolation="nearest")
     centers = result.centers_xy
+    unindexed = (result.indices_rc < 0).any(axis=1) & np.isfinite(centers).all(axis=1)
+    if np.any(unindexed):
+        image_ax.scatter(*centers[unindexed].T, s=12, c="red", marker="x")
     for axis, color in (("x", "#c15c00"), ("y", "#1469b8")):
         profile = result.profiles[axis]
         selected = profile.selected_indices
@@ -138,11 +141,13 @@ def save_pitch_report(result, output, *, title="Pattern pitch and registration",
                                 unit=result.unit, layout=m.layout, stagger_axis=m.stagger_axis))
     _write_csv(output / "summary.csv", summary, tuple(summary[0]))
     height, width = result.image.shape
+    indexed = np.flatnonzero((first.indices_rc >= 0).all(axis=1))
+    first_reference = indexed[np.lexsort((first.indices_rc[indexed, 1], first.indices_rc[indexed, 0]))[0]]
     data = dict(schema_version=1, title=title, width=width, height=height, seeds=result.seeds_xy,
                 indices=first.indices_rc, shape=first.indices_rc.max(axis=0) + 1,
                 layout=first.layout, stagger_axis=first.stagger_axis, pitch_xy=first.lattice_pitch_xy,
                 reference=first.reference_index,
-                first_reference=int(np.lexsort((first.indices_rc[:, 1], first.indices_rc[:, 0]))[0]),
+                first_reference=int(first_reference),
                 pixel_size=result.pixel_size, unit=result.unit,
                 average_rows=first.meta["average_rows"], average_columns=first.meta["average_columns"],
                 nominal=analysis_options.get("nominal_pitch_xy"), settings=analysis_options,

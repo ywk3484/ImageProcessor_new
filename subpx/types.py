@@ -50,7 +50,8 @@ class PatternPitchResult:
     """Pitch from one CD method; coordinates and lattice pitch remain in pixels.
 
     Profiles contain calibrated lengths. Lattice indices are [row, column],
-    independent of which CD fits succeeded. Invalid fits never become seeds.
+    independent of which CD fits succeeded. Unindexed detections retain [-1, -1]
+    indices and are excluded from ``valid``. Invalid fits never become seeds.
     """
 
     method: str

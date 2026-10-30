@@ -61,7 +61,11 @@ are read directly from `CDMethodResult.centers_xy`. Invalid CD measurements
 and nonfinite centers are excluded, with no replacement by segmentation seeds.
 
 A single lattice is indexed from the shared detection seeds and reused across
-methods. `--layout auto` distinguishes rectangular/square and half-pitch
+methods. Local neighbour displacements establish row/column steps, so tilt,
+row bow and accumulated drift do not split one physical row into several
+groups. The coordinate frame used for indexing does not rotate or rectify the
+measured centers: pitch is still measured along the original image x/y axes.
+`--layout auto` distinguishes rectangular/square and half-pitch
 staggered arrays. With the default `--stagger-axis row`, alternate rows shift
 in x by half a pitch. Use `--stagger-axis column` when alternate columns shift
 in y. `square` allows unequal x/y spacings.
@@ -91,6 +95,9 @@ corresponding definition for `Px`.
 - Each interval reports its actual valid pair count and sample standard
   deviation. Missing/invalid holes reduce counts. A missing lattice neighbour
   never generates a doubled pitch. Zero-pair intervals are unavailable.
+- Isolated off-lattice detections are retained with `[-1, -1]` lattice indices,
+  excluded from averaging/reference selection, and marked by red crosses in the
+  interactive image. The report states the number of unindexed detections.
 
 Profile positions are the mean measured x or y coordinate of the selected
 holes at each lattice node; interval points are plotted halfway between nodes.
@@ -155,6 +162,8 @@ one entry per interval. `pairs` stores original hole indices for the selected
 valid pairs. `PatternPitchResult.indices_rc` stores `[row, column]` lattice
 indices; `centers_xy` and `lattice_pitch_xy` remain in pixels. The raw cumulative
 `distance` field is retained in Python and CSV exports, but is not plotted.
+`valid` also excludes unindexed detections; their count is recorded as
+`meta['unindexed_seeds']`.
 
 Each image report contains:
 
@@ -172,10 +181,12 @@ artifacts; export the current CSV for a changed selection.
 
 ## Scope and validation
 
-The indexer targets nearly axis-aligned regular arrays with small drift. It
-does not estimate rotation, arbitrary oblique lattices, or non-half-pitch row
-offsets. Grouping tolerance defaults to 20% of the typical nearest seed spacing;
-adjust `--line-tolerance` in pixels if needed. With missing entire lines or
+The indexer targets regular arrays with modest rotation and smooth distortion.
+It estimates the local row direction automatically and checks the consistency
+of neighbour links. It does not target arbitrary oblique lattices or
+non-half-pitch staggering. `--line-tolerance` is an optional tolerance on local
+neighbour displacements in pixels (default: 35% of the smaller estimated pitch);
+it no longer limits the total span of a tilted or bowed row. With missing entire lines or
 uncertain spacing, use `--pitch-hint X_PX Y_PX` to preserve skipped lattice indices.
 Severely sparse or ambiguous arrays require an explicit hint or correction of
 the detection settings. Lattice indexing and aggregation run on the CPU;
@@ -189,6 +200,8 @@ Run the deterministic numerical and report tests with:
 
 The tests check both stagger orientations, square layouts, analytic variable
 pitch and cumulative error, calibrated units, band edges, missing fits/lines,
+tilted/bowed rows, abrupt row shifts, sparse grids with unequal pitches,
+unindexed detections, the default 17-method CLI with 5/7 averaging bands,
 CD centers on synthetic Gaussian images (pitch tolerance 0.08 px), and CPU/GPU
 pitch parity (2e-5 px tolerance). Node.js, when available, executes the offline
 viewer and compares six changed selections to Python to 1e-9 in calibrated
@@ -208,3 +221,15 @@ The largest selected mean-pitch deviation from the sample's nominal 8 px was
 0.00191 px across the methods and axes. This is an end-to-end sample check,
 not an accuracy guarantee for experimental images. Browser interaction and
 the exported PNG were visually checked.
+
+The 2026-10-30 indexing fix reproduces the original "Rows overlap in lattice
+indexing" failure on a 1,260-hole tilted/bowed staggered grid, then recovers
+every ground-truth lattice index with automatic settings. All 39 focused tests
+pass, including CPU/GPU and browser calculation checks. The full suite returns
+471 passed, 1 skipped and the same 9 pre-existing failures listed above.
+A 100,000-hole distorted
+lattice also retains every ground-truth index: 3.88 s with allocation tracing
+enabled, 126 MiB peak traced Python/NumPy allocation. This measures indexing
+only, not CD fitting or report export.
+
+![Report tracking tilted and bowed rows with 5 rows and 7 columns averaged](images/pattern_pitch_bowed.png)
