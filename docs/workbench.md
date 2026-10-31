@@ -18,7 +18,7 @@ python -m pip install -e ".[analysis,viewer]"
 subpx-workbench
 ```
 
-![Workbench with the image and default CD contours](images/workbench.png)
+![Workbench with the CD color map, its scale and the holes table](images/workbench.png)
 
 Choose a task tab: **Find features**, **Measure CD**, **Pitch + placement** or
 **Align images**. Its controls and named action stay beside the image; results
@@ -46,13 +46,18 @@ above; the image and results stay.
 
 The line above the image always lists the **failed holes of every method**
 (e.g. "Failed: Projection 2,048 (5 %) · Foot area 471 (1 %)"), not only of the
-method shown. The **Results** table lists the holes. Click a row, or move with
-the arrow and Page keys, to select its hole; the table stays, and the image pans
-(keeping the zoom) when the hole is outside the view. Click another method's CD
-column to show that method. Clicking a hole on the image opens the **Selected
-feature** tab with its original pixels, method input, contours and profile. No
-hole is selected until you click one. **Metrics and notes** contains all
-numerical diagnostics; **Method definition** explains assumptions.
+method shown. The **Results** table lists the holes. Its columns keep one order:
+ID, x, y, status, CD x and CD y of the shown method, then the CD of every method
+in the preset's order (the shown one in bold). Columns are as wide as their
+names and can be widened by dragging. A sort (click a header) stays when the
+method or the filter changes, and the selected hole keeps its row. Click a row,
+or move with the arrow and Page keys, to select its hole; the table stays, and
+the image pans (keeping the zoom) when the hole is outside the view. Click
+another method's CD column to show that method. Clicking a hole on the image
+opens the **Selected feature** tab with its original pixels, method input,
+contours and profile. No hole is selected until you click one. **Metrics and
+notes** contains all numerical diagnostics; **Method definition** explains
+assumptions.
 
 Errors appear as one plain line in a red banner over the results, which stay
 visible; **Details** opens the full message in **Activity**. Unexpected errors in
@@ -77,22 +82,31 @@ it.
   space between them, rather than concatenated into one measurement image.
   Analysis, regions, feature selection, registration and export use the active
   page only. Overlays appear on that page. Hover reports the page number and
-  coordinates local to that page. The image axes show the stacked layout's
-  coordinates. **Fit image** fits all displayed pages.
-- Stacking loads all pages in a background worker and caches them until another
-  file is opened. Turning it off returns to the active page without discarding
-  its measurements. Returning to a measured page restores its analysis. An
-  alignment result resets when the reference page changes; the moving image stays.
-  For files too large to hold all pages in memory, use individual-page mode.
-  A multidimensional array within a single TIFF page must first be reduced to
-  a two-dimensional or RGB(A) image.
+  coordinates local to that page (the pixel value when that page is in memory).
+  The image axes show the stacked layout's coordinates. **F** fits the active
+  page, **Shift+F** the whole stack. Page labels appear while at most 12 pages
+  are in view.
+- Turning the stack on reads only the page sizes; the file then stays open.
+  Pages are decoded when they come into view, nearest the middle of the view
+  first, a page at a time between other events, so the window stays responsive.
+  Zoomed out (3 or more image pixels per screen pixel) a page is drawn from a
+  preview at most 256 pixels wide (block means); zoomed in, from the full page.
+  Previews are kept for every page seen (about 44 kB for a 2048 x 1378 8-bit
+  page, 2 MB for 48 pages); full pages are kept up to 128 MB, the least recently
+  used dropped first. Pages out of view are not drawn. Turning it off returns to
+  the active page without discarding its measurements; turning it on again
+  needs no reading. Returning to a measured page restores its analysis. An
+  alignment result resets when the reference page changes; the moving image
+  stays. A multidimensional array within a single TIFF page must first be
+  reduced to a two-dimensional or RGB(A) image.
 
 - Grayscale data retain their original precision. RGB is converted to luminance
   with `0.2126 R + 0.7152 G + 0.0722 B`; alpha is ignored. The conversion is
   displayed beside the image name. Nonfinite and complex images are rejected.
   Boolean arrays are converted to uint8 with their 0/1 intensities preserved.
-- Wheel to zoom, drag to pan, press **F** to fit and **Z** to zoom to the selected
-  feature. Hover reports image coordinates and the original pixel intensity.
+- Wheel to zoom, drag to pan, press **F** to fit the page (**Shift+F**: the
+  whole stack) and **Z** to zoom to the selected feature. Hover reports image
+  coordinates and the original pixel intensity.
   The histogram adjusts display levels without changing data or measurements.
   Layer toggles preserve the chosen contrast.
 - Toggle **Analysis region**, then move or resize the gold rectangle. The next
@@ -103,7 +117,7 @@ it.
   measurement. The UI displays calibrated lengths and areas; original result arrays
   retain pixel units. Auto (the default) uses the GPU when available, as the batch.
 
-![TIFF pages stacked vertically with an outlined active page](images/workbench_stack.png)
+![TIFF pages stacked vertically: the active page outlined, the pages around it decoded as they come into view](images/workbench_stack.png)
 
 ## Find patterns
 
@@ -131,11 +145,25 @@ without discarding the previous results. Local-only methods bypass deblending.
 The detection refinement control applies to **Find features**; CD independently
 constructs its own seed list using its selected threshold or peak pipeline.
 
-Use **Contours**, **Voronoi edges**, **CD colors**, and the stage selector to
-review the measurements on the image. Boundaries come from the actual raster
-cell labels. CD colors run from the displayed purple minimum to yellow maximum
-of the selected method's valid equivalent CDs. Red crosses identify failed
-measurements at their seed positions; they remain selectable.
+Use **Centers**, **Contours**, **Failed cells**, **Voronoi edges**, **CD
+colors**, and the stage selector to review the measurements on the image.
+Boundaries come from the actual raster cell labels.
+
+The image shows pages of 40,000 holes without slowing down:
+
+- **Raster maps** are drawn at every zoom and made once per result and method:
+  **CD colors** fills each Voronoi cell with its hole's CD (failed holes stay
+  clear), **Failed cells** (on by default) tints the cells of the holes the
+  shown method failed on in red, **Voronoi edges** draws the cell boundaries.
+- **Centers, contours, pitch pairs and rejected boxes** are drawn for the holes
+  in view only, and only while at most 2,000 holes are in view; farther out the
+  line above the image says "zoom in to see centers and contours". Red crosses
+  mark failed measurements at their seed positions; they remain selectable.
+- Selecting a hole moves only its white ring; nothing else is redrawn.
+- The **CD color scale** beside the image runs over 1-99 % of the shown
+  method's valid CDs, so one outlier does not wash out the rest. Drag its ends to
+  set a range; tick **Lock** under it to keep that range for every method and
+  page.
 
 The inspector compares calibrated CD and status across methods. It also shows
 the selected method's metrics, full cell area and mean original cell intensity.
@@ -240,12 +268,14 @@ Loading, measurement, registration and exports run in a single background Qt
 worker. Image zooming, panning and diagnostics remain available while a job runs;
 input changes and new jobs are disabled until it finishes. Closing waits for
 completion by keeping the window open; there is no forced worker termination.
-Individual-page mode loads the current page and retains completed task/page
-analyses in memory. Stacked mode additionally retains all decoded pages; returning to page mode keeps this
-cache for navigation until another file is opened. Decoded pixel memory is the
-sum of each page's `image.nbytes`, plus display buffers and retained diagnostics;
-there is no additional combined image array. It uses pyqtgraph display
-downsampling, not the huge-image viewer's tiled storage path.
+
+Results are kept for the open page and the most recent other pages: at most 3
+pages and 3 GB together (one 39,042-hole page measured with the ten batch
+methods holds about 1.25 GB, so then the open page and the one before). Older
+pages' results are dropped, with a line in **Activity**; measure the page again
+to see them. Memory therefore stops growing after a few pages. The stack's page
+memory is described above; there is no combined image array, and the
+huge-image viewer's tiled storage path is not used.
 
 Changes to parameters are labelled as pending until the next run. Results on
 screen continue to describe the last completed calculation. Switching tasks and
@@ -274,11 +304,21 @@ $env:QT_QPA_PLATFORM = "offscreen"
 ```
 
 The tests use their own settings file, never your saved settings.
-`scripts/workbench_timing.py` times clicks, method switches and repaints on a
-page of your size (default: `artifacts/cd_test/data/stripe1_board1.tif`).
+`scripts/workbench_timing.py` times clicks, method switches, layer toggles and
+repaints on a page of your size (default: `artifacts/cd_test/data/stripe1_board1.tif`),
+the memory over the following pages, and the stack of that 48-page file.
+On this PC (RTX 4060 Ti, 39,042 holes, ten methods) after the speed work: click
+0.03-0.06 s, method switch 0.05-0.11 s, layer toggle 0.01-0.05 s, repaint 0.004 s
+at full view and 0.02 s zoomed in with 1,551 holes drawn; memory 1.9 -> 3.0 ->
+4.2 -> 4.4 -> 4.4 GB over five measured pages; the 48-page stack fills its view
+in 0.3-1.2 s (file cached or not), repaints in 0.004 s and holds 5 MB of page images.
 
 Tests cover the batch defaults, remembered settings, disabled styles and Run
 reasons, Page keys scoped to the image, table keyboard selection and panning,
+the CD map, its scale and lock, the selection redrawing nothing else, centers
+and contours for the holes in view only, the table's fixed columns and kept
+sort, results kept for the last pages only, stack previews, full pages in view
+and their memory cap, F / Shift+F,
 per-method failure counts, the state kept across pages, the batch's hole check,
 the error banner, scientific image precision, mixed-size/mixed-dtype TIFF pages,
 page navigation and vertical stacking, page-local overlays/crops/exports,

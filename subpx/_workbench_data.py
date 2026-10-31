@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import csv
 import json
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from time import perf_counter
 
@@ -148,6 +149,85 @@ def load_pages(path):
         first = load_image(path)
         frames = [first] + [load_image(path, page) for page in range(1, first.pages)]
     return frames
+
+
+class PageReader:
+    """One multipage file kept open: page sizes read once, pages decoded on demand (the stacked page view).
+
+    TIFF pages are decoded from the open file; other formats are reopened per page. ``read`` may be called
+    from the worker thread and the window at the same time, so it holds a lock.
+    """
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self._lock = threading.Lock()
+        self._tif = None
+        if self.path.suffix.lower() in (".tif", ".tiff"):
+            import tifffile
+
+            self._tif = tifffile.TiffFile(self.path)
+            self.shapes = [(int(page.imagelength), int(page.imagewidth)) for page in self._tif.pages]
+        else:
+            first = load_image(self.path)
+            self.shapes = [first.image.shape] + [load_image(self.path, page).image.shape
+                                                 for page in range(1, first.pages)]
+
+    def read(self, page):
+        if self._tif is None:
+            return load_image(self.path, page)
+        with self._lock:
+            data = self._tif.pages[page].asarray()
+        data, conversion = grayscale(data)
+        return LoadedImage(data, self.path.name, str(self.path.resolve()), page, len(self.shapes), conversion)
+
+    def close(self):
+        if self._tif is not None:
+            with self._lock:
+                self._tif.close()
+
+
+def page_preview(image, width=256):
+    """Block-mean copy at most ``width`` pixels wide and its reduction factor (pages drawn small).
+
+    The preview covers the page's first ``shape * factor`` pixels; the last partial block is left out.
+    """
+    factor = max(1, int(np.ceil(image.shape[1] / width)))
+    if factor == 1:
+        return image, 1
+    h, w = image.shape[0] // factor * factor, image.shape[1] // factor * factor
+    blocks = image[:h, :w].reshape(h // factor, factor, w // factor, factor).mean(axis=(1, 3))
+    return (np.rint(blocks).astype(image.dtype) if image.dtype.kind in "biu" else blocks.astype(np.float32)), factor
+
+
+def cell_values_map(cell_labels, values):
+    """Each cell's value at its pixels (float32), NaN outside the cells: the CD color map."""
+    lookup = np.append(np.asarray(values, np.float32), np.float32(np.nan))
+    return lookup[cell_labels]  # label -1 (no cell) picks the NaN
+
+
+def cell_mask_map(cell_labels, selected):
+    """1 at the pixels of the selected cells, 0 elsewhere (uint8): e.g. the failed cells."""
+    lookup = np.append(np.asarray(selected, bool), False).astype(np.uint8)
+    return lookup[cell_labels]
+
+
+def array_bytes(*objects):
+    """Memory held by the NumPy arrays in results (dataclasses, dicts, lists), each array counted once."""
+    seen, total, stack = set(), 0, list(objects)
+    while stack:
+        value = stack.pop()
+        if value is None or id(value) in seen:
+            continue
+        seen.add(id(value))
+        if isinstance(value, np.ndarray):
+            total += value.nbytes
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            stack.extend(value)
+        elif is_dataclass(value):
+            stack.extend(getattr(value, item.name, None) for item in fields(value))
+    return total
 
 
 def crop_image(image, bounds=None):

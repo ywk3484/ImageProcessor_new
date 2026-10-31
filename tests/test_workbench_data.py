@@ -194,3 +194,30 @@ def test_hole_check_is_the_batch_hole_check():
     assert HOLE_CHECK_MAX_ERROR == {"centered": 0.8, "raw": 0.3}  # the batch's --max-error defaults
     review = register_images(reference, shifted)
     assert review.hole_check_mode == "centered" and review.hole_check_error < 0.1
+
+
+def test_page_reader_previews_cell_maps_and_result_memory(tmp_path):
+    import tifffile
+    from subpx._workbench_data import PageReader, array_bytes, cell_mask_map, cell_values_map, page_preview
+
+    path = tmp_path / "pages.tif"
+    with tifffile.TiffWriter(path) as writer:
+        writer.write(np.zeros((20, 30), np.uint16))
+        writer.write(np.full((10, 12), 7, np.uint16))
+    reader = PageReader(path)
+    try:
+        assert reader.shapes == [(20, 30), (10, 12)]
+        page = reader.read(1)
+        assert page.page == 1 and page.pages == 2 and (page.image == 7).all()
+    finally:
+        reader.close()
+    image = np.arange(10 * 12, dtype=np.uint8).reshape(10, 12)
+    preview, factor = page_preview(image, width=4)
+    assert factor == 3 and preview.shape == (3, 4) and preview.dtype == np.uint8
+    assert preview[1, 2] == np.rint(image[3:6, 6:9].mean())
+    labels = np.array([[0, 1], [-1, 1]])
+    values = cell_values_map(labels, [2.5, 4.0])
+    assert values.dtype == np.float32 and values[0, 0] == 2.5 and values[1, 1] == 4 and np.isnan(values[1, 0])
+    np.testing.assert_array_equal(cell_mask_map(labels, [False, True]), [[0, 1], [0, 1]])
+    shared = np.zeros(100)
+    assert array_bytes({"a": shared, "b": [shared, np.zeros(10)]}) == 880

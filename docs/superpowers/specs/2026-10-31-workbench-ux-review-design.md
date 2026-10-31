@@ -512,11 +512,11 @@ failed counts shown, zoom and region survive a page change, settings survive a n
 `cd_batch`).
 
 **P1. Speed and memory at 40k holes**
-- [ ] B2 selection marker separate from the overlays; overlays cached per result, method and layer
-- [ ] B1 / B3 raster maps far out, visible-holes-only vectors close in; F5 colorbar and range
-- [ ] B4 NumPy-backed table model built once per result; filters and sort by index arrays; F2 sort kept
-- [ ] B6 results kept for the last few pages only
-- [ ] G1 Stack vertically: pages decoded when in view, reduced resolution when zoomed out, memory cap; F / Shift+F
+- [x] B2 selection marker separate from the overlays; overlays cached per result, method and layer
+- [x] B1 / B3 raster maps far out, visible-holes-only vectors close in; F5 colorbar and range
+- [x] B4 NumPy-backed table model built once per result; filters and sort by index arrays; F2 sort kept
+- [x] B6 results kept for the last few pages only
+- [x] G1 Stack vertically: pages decoded when in view, reduced resolution when zoomed out, memory cap; F / Shift+F
 
 Done when, on the 39,042-hole page: click < 0.1 s, method switch < 0.2 s, layer toggle < 0.2 s, full-view repaint
 < 0.05 s, memory stops growing after the page limit, and the full-view screenshot shows the image with a CD map

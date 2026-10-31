@@ -256,11 +256,12 @@ def test_measurement_recipes_comparison_and_calibration_guidance(window):
     widget.run_button.click()
     wait_for_job(widget, app)
     assert tuple(widget.review.measurements) == ("gaussian", "logquad", "gradient", "halfmax")
+    # Fixed order: ID, x, y, status, CD x, CD y of the shown method, then one CD per method in Setup order.
     assert widget.table_model.columnCount() == 10
-    assert widget.table_model.extra_methods == ["logquad", "gradient", "halfmax"]
+    assert widget.table_model.cd_methods == ["gaussian", "logquad", "gradient", "halfmax"]
     index = widget.table_model.index(0, 7)
-    value = widget.review.measurements["logquad"].metrics["cd_equivalent_px"][0]
-    assert widget.table_model.rows[0][7] == pytest.approx(value)
+    value = widget.review.measurements["logquad"].metrics["cd_equivalent_px"][widget.table_model.hole_at(0)]
+    assert widget.table_model.value(0, 7) == pytest.approx(value)
     assert "Gaussian FWHM" in widget.table_model.data(index, QtCore.Qt.ItemDataRole.ToolTipRole)
     widget._select_table(widget.table_model.index(3, 8))
     assert widget.method.currentData() == "gradient" and widget.selected == 3
@@ -342,24 +343,26 @@ def test_stack_navigation_analysis_roi_and_export(window, tmp_path, monkeypatch)
     widget.stack_pages.setChecked(True)
     assert widget.busy and not widget.page_bar.isEnabled()
     wait_for_job(widget, app)
-    assert len(widget._pages) == 3
+    stack = widget.stack
+    assert len(stack.shapes) == 3
     assert widget.review is review
-    offset = widget._page_offsets[1]
+    offset = stack.offsets[1]
     assert offset > image.shape[0]
     assert widget._bounds() == [8, 8, 88, 72]
     np.testing.assert_allclose(widget.canvas.image_item.getLevels(), [15, 150])
-    assert len(widget.canvas.context_images) == 2
-    assert widget.canvas._image_bounds.bottom() == widget._page_offsets[-1] + 60 - .5
-    assert widget.canvas._image_bounds.top() < -.5  # Reserve room for the first page label.
+    drain_stack(widget, app)
+    assert sorted(stack.items) == [0, 2]  # the other pages; the active page is the canvas's image
+    assert stack.bounds().bottom() == stack.offsets[-1] + 60 - .5
+    assert stack.bounds().top() < -.5  # Reserve room for the first page label.
     point = review.seeds_xy[3]
     widget._select_at(point[0], point[1] + offset)
     assert widget.selected == 3
-    np.testing.assert_allclose(widget.canvas.overlays["selected"].getData()[1], [point[1] + offset])
+    np.testing.assert_allclose(widget.layers.selection.getData()[1], [point[1] + offset])
     widget._hover_image(2, offset + 3)
     assert "Page 1" in widget.hover_label.text()
     assert "pixel [3, 2]" in widget.hover_label.text()
     widget.canvas.histogram.setLevels(20, 130)
-    for item in widget.canvas.context_images:
+    for item in stack.items.values():
         np.testing.assert_allclose(item.getLevels(), [20, 130])
 
     # A stack is a display layout; crop coordinates and exports stay page-local.
@@ -378,7 +381,7 @@ def test_stack_navigation_analysis_roi_and_export(window, tmp_path, monkeypatch)
     wait_for_job(widget, app)
     review = widget.review
     contours = review.measurements[widget.method.currentData()].contours_xy
-    xs, ys = widget.canvas.overlays["contours"].getData()
+    xs, ys = widget.layers.contours.getData()
     first = np.column_stack((xs, ys))[:contours.shape[1]]
     np.testing.assert_allclose(first, contours[0] + review.origin_xy + [0, offset], equal_nan=True)
     widget.layer_checks["Voronoi edges"].setChecked(True)
@@ -395,11 +398,12 @@ def test_stack_navigation_analysis_roi_and_export(window, tmp_path, monkeypatch)
 
     widget.stack_pages.setChecked(False)
     assert widget._bounds() == [8, 8, 88, 72]
-    assert not widget.canvas.context_images
+    assert not stack.items
     widget.stack_pages.setChecked(True)
-    assert not widget.busy  # Already decoded; toggling does not reload the file.
+    assert not widget.busy  # The file stays open; toggling does not reload it.
+    drain_stack(widget, app)
     view_range = widget.canvas.plot.getViewBox().viewRange()
-    widget._select_at(2, widget._page_offsets[2] + 3)
+    widget._select_at(2, stack.offsets[2] + 3)
     assert widget.loaded.page == 2 and widget.review is None
     assert widget.stack_pages.isChecked() and not widget.next_page.isEnabled()
     assert widget.loaded.image.shape == (60, 90)
@@ -409,7 +413,7 @@ def test_stack_navigation_analysis_roi_and_export(window, tmp_path, monkeypatch)
     assert widget.review is review
     assert widget._bounds() == [8, 8, 88, 72]
     widget.set_image(image)
-    assert widget._pages is None and widget.page_bar.isHidden()
+    assert widget.stack is None and widget.page_bar.isHidden()
     assert not widget.stack_pages.isChecked()
 
 
@@ -427,13 +431,24 @@ def test_stack_load_failure_restores_navigation_and_current_review(window, tmp_p
     def fail(path):
         raise ValueError("Unreadable TIFF page")
 
-    monkeypatch.setattr("subpx.workbench.load_pages", fail)
+    monkeypatch.setattr("subpx.workbench.PageReader", fail)
     widget.stack_pages.setChecked(True)
     wait_for_job(widget, app)
     assert widget.review is review and widget.loaded.page == 0
-    assert widget._pages is None and not widget.stack_pages.isChecked()
+    assert widget.stack is None and not widget.stack_pages.isChecked()
     assert widget.next_page.isEnabled()
     assert "Unreadable TIFF page" in widget.log.toPlainText()
+
+
+def drain_stack(widget, app, timeout=5):
+    # Pages in view are decoded and drawn between events.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        stack = widget.stack
+        if stack is None or not (stack._queue or stack._decode_timer.isActive() or stack._update_timer.isActive()):
+            break
+        time.sleep(.01)
 
 
 def write_pages(path, *images):
@@ -517,9 +532,9 @@ def test_no_hole_is_selected_until_a_click_and_failures_are_counted_per_method(w
     widget, app = window
     widget.run_analysis("detect")
     wait_for_job(widget, app)
-    assert widget.selected is None and "selected" not in widget.canvas.overlays
+    assert widget.selected is None and not widget.layers.selection.isVisible()
     widget._select_at(*widget.review.seeds_xy[4])
-    assert widget.selected == 4 and "selected" in widget.canvas.overlays
+    assert widget.selected == 4 and widget.layers.selection.isVisible()
     parameters = widget.parameters()
     parameters["methods"] = ("gaussian", "projection", "half_area")
     review = analyze_image(widget.loaded.image, parameters)
@@ -544,12 +559,12 @@ def test_table_keys_select_holes_keep_the_table_and_pan_to_them(window):
     width = np.diff(view.viewRange()[0])[0]
     widget.table.setFocus()
     widget.table.setCurrentIndex(widget.table_model.index(0, 0))
-    assert widget.selected == widget.table_model.rows[0][0]
+    assert widget.selected == widget.table_model.hole_at(0)
     QTest.keyClick(widget.table, QtCore.Qt.Key.Key_Down)
-    assert widget.selected == widget.table_model.rows[1][0]
+    assert widget.selected == widget.table_model.hole_at(1)
     assert widget.diagnostics.currentWidget() is widget.table_tab
     far = int(np.argmax(review.seeds_xy.sum(axis=1)))
-    widget.table.setCurrentIndex(widget.table_model.index(widget.table_model.row_of[far], 0))
+    widget.table.setCurrentIndex(widget.table_model.index(widget.table_model.row_of_hole(far), 0))
     (x0, x1), (y0, y1) = view.viewRange()
     point = review.seeds_xy[far] + review.origin_xy
     assert widget.selected == far and x0 <= point[0] <= x1 and y0 <= point[1] <= y1
@@ -639,3 +654,154 @@ def test_handler_errors_reach_the_banner_and_dropped_files_open(window, tmp_path
     widget.dropEvent(event)
     wait_for_job(widget, app)
     assert widget.loaded.name == "dropped.npy" and not widget.error_banner.isVisible()
+
+
+def test_selecting_moves_only_the_marker_and_far_views_show_raster_maps(window):
+    widget, app = window
+    widget.layer_checks["CD colors"].setChecked(True)
+    parameters = widget.parameters()
+    parameters["methods"] = ("gaussian", "projection", "half_area")
+    review = analyze_image(widget.loaded.image, parameters)
+    review.measurements["half_area"].valid[:3] = False
+    cds = review.measurements["gaussian"].metrics["cd_equivalent_px"]
+    cds[:] = np.linspace(4, 5, len(cds))  # the sample's holes are all alike; give them a spread and an outlier
+    cds[-1] = 50
+    widget._accept_review(review)
+    layers, measured = widget.layers, review.measurements["gaussian"]
+    # Each cell carries its hole's CD; the scale runs over 1-99 % of the shown method's CDs (not to the outlier).
+    x, y = np.rint(review.seeds_xy[5]).astype(int)
+    assert review.cd.cell_labels[y, x] == 5
+    assert layers.cd_map.source[y, x] == pytest.approx(cds[5], rel=1e-6)
+    np.testing.assert_allclose(widget.cd_bar.levels(), np.percentile(cds, (1, 99)))
+    assert widget.cd_bar.levels()[1] < 50 and widget.cd_scale.isVisible()
+
+    redrawn = []
+    show = layers.show
+    layers.show = lambda *args: (redrawn.append(args), show(*args))
+    try:
+        widget._select_at(*review.seeds_xy[5])
+        assert widget.selected == 5 and not redrawn  # only the marker moves
+        np.testing.assert_allclose(layers.selection.getData()[0], [review.seeds_xy[5, 0]])
+        widget.lock_cd.setChecked(True)
+        levels = widget.cd_bar.levels()
+        widget.method.setCurrentIndex(widget.method.findData("half_area"))
+        assert redrawn  # a method switch redraws the maps
+    finally:
+        del layers.show
+    np.testing.assert_allclose(widget.cd_bar.levels(), levels)  # the locked range stays for the other method
+    failed = layers.failures.source
+    assert layers.failures.isVisible()
+    assert failed[review.cd.cell_labels == 0].all() and not failed[review.cd.cell_labels == 5].any()
+    widget.lock_cd.setChecked(False)
+    values = review.measurements["half_area"].metrics["cd_equivalent_px"][3:]
+    low, high = np.percentile(values, (1, 99))
+    np.testing.assert_allclose(widget.cd_bar.levels(), (low, high) if high > low else (low - .5, high + .5))
+
+    # Far out the vector layers give way to the maps; closer in only the holes in view are drawn.
+    layers.VECTOR_LIMIT = 20
+    view = widget.canvas.plot.getViewBox()
+    widget.canvas.fit_image()
+    app.processEvents()
+    assert layers.in_view == len(review.seeds_xy) and not layers.centers.isVisible()
+    assert not layers.contours.isVisible() and "zoom in" in widget.summary_label.text()
+    view.setRange(xRange=(0, 20), yRange=(0, 16), padding=0)
+    app.processEvents()
+    assert layers.near and layers.centers.isVisible() and layers.contours.isVisible()
+    shown = len(layers.centers.getData()[0]) + len(layers.failed.getData()[0])
+    assert 0 < shown == layers.in_view < len(review.seeds_xy)
+    assert "zoom in" not in widget.summary_label.text()
+
+
+def test_table_keeps_its_columns_and_sort_when_the_method_changes(window):
+    widget, app = window
+    widget.recipe.setCurrentIndex(widget.recipe.findData("spot"))
+    widget.run_button.click()
+    wait_for_job(widget, app)
+    model, header = widget.table_model, widget.table.horizontalHeader()
+    horizontal = QtCore.Qt.Orientation.Horizontal
+    names = [model.headerData(column, horizontal) for column in range(model.columnCount())]
+    assert names[:6] == ["ID", "x (px)", "y (px)", "Status", "CD x (px)", "CD y (px)"]
+    assert names[6:] == [name + chr(10) + "CD (px)" for name in ("Gaussian fit", "Log fit", "Gradient edge", "Half-height")]
+    widget._select_at(*widget.review.seeds_xy[3])
+    widget.table.sortByColumn(7, QtCore.Qt.SortOrder.DescendingOrder)
+
+    def column(index):
+        values = np.array([model.value(row, index) for row in range(model.rowCount())], float)
+        return values[np.isfinite(values)]
+
+    assert (np.diff(column(7)) <= 0).all()
+    assert widget.table.currentIndex().row() == model.row_of_hole(3)  # the selection follows its hole
+    widget.method.setCurrentIndex(widget.method.findData("logquad"))
+    assert [model.headerData(c, horizontal) for c in range(model.columnCount())] == names
+    assert model.headerData(7, horizontal, QtCore.Qt.ItemDataRole.FontRole).bold()
+    assert header.sortIndicatorSection() == 7 and (np.diff(column(7)) <= 0).all()
+    widget.table.sortByColumn(4, QtCore.Qt.SortOrder.AscendingOrder)  # CD x of the shown method
+    widget.method.setCurrentIndex(widget.method.findData("gaussian"))
+    cd_x = widget.review.measurements["gaussian"].metrics["cd_x_px"]
+    np.testing.assert_allclose(column(4), np.sort(cd_x[np.isfinite(cd_x)]))
+    assert header.sectionSize(6) >= header.fontMetrics().horizontalAdvance("Gaussian fit")
+
+
+def test_results_are_kept_for_the_last_pages_only(window, tmp_path, monkeypatch):
+    widget, app = window
+    monkeypatch.setattr("subpx.workbench.RESULT_PAGES", 2)
+    image = widget.loaded.image
+    widget.open_image(path=write_pages(tmp_path / "pages.tif", image, image + 5, image + 10))
+    wait_for_job(widget, app)
+    for page in range(3):
+        widget.page_spin.setValue(page)
+        wait_for_job(widget, app)
+        widget.run_analysis("detect")
+        wait_for_job(widget, app)
+    assert {page for page, _ in widget._task_reviews} == {1, 2}
+    assert "Results of page 0 dropped" in widget.log.toPlainText()
+    widget.page_spin.setValue(1)
+    wait_for_job(widget, app)
+    assert widget.review is not None  # a recent page comes back with its result
+    widget.page_spin.setValue(0)
+    wait_for_job(widget, app)
+    assert widget.review is None
+    monkeypatch.setattr("subpx.workbench.RESULT_BYTES", 1)  # the memory limit: only the open page's result
+    widget.page_spin.setValue(1)
+    wait_for_job(widget, app)
+    assert {page for page, _ in widget._task_reviews} == {1}
+
+
+def test_stack_draws_pages_in_view_at_their_resolution_with_a_memory_cap(window, tmp_path, monkeypatch):
+    from subpx.workbench import PageStack
+
+    widget, app = window
+    rng = np.random.default_rng(1)
+    pages = [rng.integers(0, 200, (40, 600), dtype=np.uint8) for _ in range(12)]
+    widget.open_image(path=write_pages(tmp_path / "wide.tif", *pages), page=5)
+    wait_for_job(widget, app)
+    monkeypatch.setattr(PageStack, "FULL_SCALE", 1e-3)  # every view counts as zoomed out: previews
+    monkeypatch.setattr(PageStack, "FULL_BYTES", 4 * pages[0].nbytes)
+    widget.stack_pages.setChecked(True)
+    wait_for_job(widget, app)
+    stack, view = widget.stack, widget.canvas.plot.getViewBox()
+    drain_stack(widget, app)
+    assert sorted(stack.items) == [page for page in range(12) if page != 5]
+    assert all(item.source.shape == (13, 200) for item in stack.items.values())  # block means of 3 x 3 pixels
+    np.testing.assert_allclose(stack.items[0].source[0, 0], pages[0][:3, :3].mean(), atol=0.5)
+    stack.FULL_SCALE = 1e3  # every view counts as zoomed in: full pages, for the pages in view only
+    for page in (2, 8, 10):
+        top = stack.offsets[page]
+        view.setRange(xRange=(0, 600), yRange=(top, top + 40), padding=0)
+        drain_stack(widget, app)
+        assert stack.items[page].source.shape == (40, 600)
+        assert all(abs(other - page) <= 2 for other in stack.items)
+    assert len(stack.full) <= 4  # the memory cap
+    assert stack.memory() <= 12 * 13 * 200 + 4 * pages[0].nbytes
+    widget.activateWindow()
+    widget.canvas.plot.setFocus()
+    QTest.keyClick(widget.canvas.plot, QtCore.Qt.Key.Key_F, QtCore.Qt.KeyboardModifier.ShiftModifier)
+    (x0, x1), (y0, y1) = view.viewRange()
+    assert y0 <= 0 and y1 >= stack.offsets[-1] + 40 - 1  # the whole stack
+    QTest.keyClick(widget.canvas.plot, QtCore.Qt.Key.Key_F)
+    (x0, x1), (y0, y1) = view.viewRange()
+    assert (y0 + y1) / 2 == pytest.approx(stack.offsets[5] + 19.5, abs=1) and x1 - x0 < 700  # the active page
+    widget._select_at(10, stack.offsets[9] + 10)
+    wait_for_job(widget, app)
+    assert widget.loaded.page == 9
+    np.testing.assert_array_equal(widget.loaded.image, pages[9])

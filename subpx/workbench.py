@@ -7,12 +7,14 @@ Qt is deliberately imported only when this optional module is requested.
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 from dataclasses import replace
 from html import escape as html_escape
 import json
 from pathlib import Path
 import re
 import sys
+import time
 import traceback
 import weakref
 
@@ -25,9 +27,9 @@ except ImportError as exc:
     raise ImportError('The workbench requires PyQt6 and pyqtgraph. Install: pip install -e ".[analysis,viewer]"') from exc
 
 from ._workbench_data import (
-    HOLE_CHECK_MAX_ERROR, AnalysisReview, LoadedImage, analyze_image, analyze_patterns, cell_boundary, demo_image,
-    export_review, feature_input, feature_origin, grayscale, load_image, load_pages, projection_diagnostic,
-    radial_diagnostic, register_images,
+    HOLE_CHECK_MAX_ERROR, AnalysisReview, LoadedImage, PageReader, analyze_image, analyze_patterns, array_bytes,
+    cell_boundary, cell_mask_map, cell_values_map, demo_image, export_review, feature_input, feature_origin,
+    grayscale, load_image, page_preview, projection_diagnostic, radial_diagnostic, register_images,
 )
 from .cd import METHOD_LABELS
 
@@ -70,6 +72,9 @@ CD_SETTINGS = ("methods", "background", "seeds", "n_angles", "radial_step", "smo
                "half_area_level", "half_area_peak_pixels", "tail_area_level", "tail_window", "deblend_iterations",
                "deblend_tolerance", "nominal_cd", "psf_fwhm", "dark_level")
 SETTINGS_KEY = "workbench/v1"
+# Results are kept for the open page and the most recent other pages: at most this many pages and bytes.
+RESULT_PAGES = 3
+RESULT_BYTES = 3e9
 
 
 def method_name(key):
@@ -195,17 +200,10 @@ class ImageCanvas(QtWidgets.QWidget):
             self.side_layout.addWidget(self.histogram, 1)
             layout.addLayout(self.side_layout)
         self.overlays = {}
-        self.context_images = []
         self._image_key = None
         self._image_bounds = None
         self.plot.scene().sigMouseClicked.connect(self._clicked)
         self._hover_proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._hovered)
-        if self.histogram:
-            self.histogram.sigLevelsChanged.connect(self._sync_context_levels)
-
-    def _sync_context_levels(self):
-        for item in self.context_images:
-            item.setLevels(self.image_item.getLevels())
 
     def _clicked(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
@@ -250,7 +248,6 @@ class ImageCanvas(QtWidgets.QWidget):
             self.plot.getViewBox().setRange(self._image_bounds, padding=0.03)
 
     def clear_overlays(self):
-        self.context_images.clear()
         for item in self.overlays.values():
             self.plot.removeItem(item)
         self.overlays.clear()
@@ -270,82 +267,538 @@ class ImageCanvas(QtWidgets.QWidget):
 
 
 class MeasurementTable(QtCore.QAbstractTableModel):
+    """The holes table on NumPy columns: built once per result; a method switch, filter or sort reorders indices.
+
+    Fixed column order: ID, x, y, Status, CD x and CD y of the shown method, then the CD of every method in
+    Setup order (the shown one in bold). A sort stays when the method or the filter changes.
+    """
+
+    METHOD_COLUMNS = 6  # the first per-method CD column when the result has CDs
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.headers = []
-        self.rows = []
-        self.row_of = {}
-        self.extra_methods = []
-        self.review = None
+        self.review = self.method = None
+        self.failed_only = False
+        self.columns = []  # dicts: header, values (one per hole), tooltip, method (CD columns)
+        self.cd_methods = []
+        self.order = np.empty(0, int)  # hole per row
+        self.position = np.empty(0, int)  # row per hole, -1 when filtered out
+        self.bad = np.empty(0, bool)  # the shown method failed
+        self.sort_column, self.sort_order = None, QtCore.Qt.SortOrder.AscendingOrder
 
     def rowCount(self, parent=QtCore.QModelIndex()):
-        return 0 if parent.isValid() else len(self.rows)
+        return 0 if parent.isValid() else len(self.order)
 
     def columnCount(self, parent=QtCore.QModelIndex()):
-        return 0 if parent.isValid() else len(self.headers)
+        return 0 if parent.isValid() else len(self.columns)
 
     def data(self, index, role=QtCore.Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
-        row = self.rows[index.row()]
-        if role == QtCore.Qt.ItemDataRole.UserRole:
-            return row[0]
-        if role == QtCore.Qt.ItemDataRole.ToolTipRole and index.column() >= 7:
-            method = self.extra_methods[index.column() - 7]
-            return (f"{method_name(method)} ({method}: {METHOD_LABELS.get(method, method)}): "
-                    f"{self.review.measurements[method].status[row[0]]}")
-        if role == QtCore.Qt.ItemDataRole.ForegroundRole and row[3] != "ok":
-            return QtGui.QColor("#ff8c96")
-        if role == QtCore.Qt.ItemDataRole.DisplayRole:
-            value = row[index.column()]
+        column, hole = self.columns[index.column()], int(self.order[index.row()])
+        Role = QtCore.Qt.ItemDataRole
+        if role == Role.DisplayRole:
+            value = column["values"][hole]
             if isinstance(value, (float, np.floating)):
                 return f"{value:.5g}" if np.isfinite(value) else "--"
             return str(value)
+        if role == Role.UserRole:
+            return hole
+        method = column.get("method")
+        if role == Role.ForegroundRole:
+            failed = self.review.measurements[method].status[hole] != "ok" if method else self.bad[hole]
+            return QtGui.QColor("#ff8c96") if failed else None
+        if role == Role.ToolTipRole and method:
+            return (f"{method_name(method)} ({method}: {METHOD_LABELS.get(method, method)}): "
+                    f"{self.review.measurements[method].status[hole]}")
+        if role == Role.TextAlignmentRole and index.column() != 3:
+            return QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
         return None
 
     def headerData(self, section, orientation, role=QtCore.Qt.ItemDataRole.DisplayRole):
-        if role == QtCore.Qt.ItemDataRole.DisplayRole and orientation == QtCore.Qt.Orientation.Horizontal:
-            return self.headers[section]
+        if orientation != QtCore.Qt.Orientation.Horizontal or not 0 <= section < len(self.columns):
+            return None
+        column = self.columns[section]
+        if role == QtCore.Qt.ItemDataRole.DisplayRole:
+            return column["header"]
+        if role == QtCore.Qt.ItemDataRole.ToolTipRole:
+            return column.get("tooltip")
+        if role == QtCore.Qt.ItemDataRole.FontRole and column.get("method") == self.method:
+            font = QtGui.QFont()
+            font.setBold(True)
+            return font
         return None
 
     def set_review(self, review, method, failed_only=False):
         self.beginResetModel()
-        measured = review.measurements[method]
-        self.review = review
-        self.extra_methods = [name for name, result in review.measurements.items()
-                              if name != method and "cd_equivalent_px" in result.metrics]
+        self.review, self.method, self.failed_only = review, None, failed_only
         scale, unit = review.parameters["pixel_size"], review.parameters["unit"]
-        has_cd = "cd_equivalent_px" in measured.metrics
-        self.headers = ["ID", "x (px)", "y (px)", "Status"]
-        if has_cd:
-            self.headers.extend([f"CD ({unit})", f"CD x ({unit})", f"CD y ({unit})"])
-        self.headers.extend(f"{method_name(name)}\nCD ({unit})" for name in self.extra_methods)
-        self.rows = []
-        columns = [measured.metrics.get(key) for key in ("cd_equivalent_px", "cd_x_px", "cd_y_px")]
-        for i, point in enumerate(measured.centers_xy + review.origin_xy):
-            if failed_only and measured.valid[i]:
-                continue
-            values = [column[i] * scale if column is not None else np.nan for column in columns] if has_cd else []
-            comparison = [review.measurements[name].metrics["cd_equivalent_px"][i] * scale
-                          for name in self.extra_methods]
-            self.rows.append([i, *point, str(measured.status[i]), *values, *comparison])
-        self._index_rows()
+        self.cd_methods = [name for name, result in review.measurements.items() if "cd_equivalent_px" in result.metrics]
+        shown = "Center and status of the shown method (the method box)"
+        self.columns = [dict(header="ID", values=np.arange(len(review.seeds_xy)), tooltip="Hole number"),
+                        dict(header="x (px)", tooltip=shown), dict(header="y (px)", tooltip=shown),
+                        dict(header="Status", tooltip=shown)]
+        if self.cd_methods:
+            self.columns += [dict(header=f"CD x ({unit})", tooltip="CD x of the shown method"),
+                             dict(header=f"CD y ({unit})", tooltip="CD y of the shown method")]
+            self.columns += [dict(header=f"{method_name(name)}\nCD ({unit})", method=name,
+                                  tooltip=f"{name}: {METHOD_LABELS.get(name, name)}",
+                                  values=review.measurements[name].metrics["cd_equivalent_px"] * scale)
+                             for name in self.cd_methods]
+        self._set_method(method)
+        self._filter_and_sort()
         self.endResetModel()
 
-    def _index_rows(self):
-        self.row_of = {row[0]: position for position, row in enumerate(self.rows)}
+    def _set_method(self, method):
+        review, scale = self.review, self.review.parameters["pixel_size"]
+        measured = review.measurements[method]
+        self.method = method
+        points = measured.centers_xy + review.origin_xy
+        self.columns[1]["values"], self.columns[2]["values"] = points[:, 0], points[:, 1]
+        self.columns[3]["values"] = measured.status
+        self.bad = measured.status != "ok"
+        if self.cd_methods:
+            missing = np.full(len(points), np.nan)
+            for column, key in zip(self.columns[4:6], ("cd_x_px", "cd_y_px")):
+                values = measured.metrics.get(key)
+                column["values"] = values * scale if values is not None else missing
+
+    def set_method(self, method, failed_only=False):
+        """Show another method of the same result (or another filter); rows keep the sort."""
+        if method == self.method and failed_only == self.failed_only:
+            return
+        self._set_method(method)
+        self.failed_only = failed_only
+        self._relayout()
+        if self.order.size:
+            self.dataChanged.emit(self.index(0, 1), self.index(len(self.order) - 1, len(self.columns) - 1))
+        self.headerDataChanged.emit(QtCore.Qt.Orientation.Horizontal, 0, len(self.columns) - 1)
+
+    def _filter_and_sort(self):
+        rows = np.flatnonzero(self.bad) if self.failed_only else np.arange(len(self.bad))
+        if self.sort_column is not None and self.sort_column < len(self.columns):
+            values = self.columns[self.sort_column]["values"][rows]
+            descending = self.sort_order == QtCore.Qt.SortOrder.DescendingOrder
+            if values.dtype.kind in "fiu":
+                # Missing values (NaN) last in both directions.
+                rows = rows[np.argsort(-values if descending else values, kind="stable")]
+            else:
+                rows = rows[np.argsort(values, kind="stable")[::-1 if descending else 1]]
+        self.order = rows
+        self.position = np.full(len(self.bad), -1)
+        self.position[rows] = np.arange(len(rows))
+
+    def _relayout(self):
+        """Reorder the rows; the selection and current row stay on their holes."""
+        self.layoutAboutToBeChanged.emit()
+        persistent = self.persistentIndexList()
+        holes = [int(self.order[index.row()]) for index in persistent]
+        self._filter_and_sort()
+        self.changePersistentIndexList(persistent, [
+            self.index(int(self.position[hole]), index.column()) if self.position[hole] >= 0 else QtCore.QModelIndex()
+            for hole, index in zip(holes, persistent)])
+        self.layoutChanged.emit()
+
+    def row_of_hole(self, hole):
+        """The table row of a hole, -1 when the filter hides it."""
+        return int(self.position[hole]) if 0 <= hole < len(self.position) else -1
+
+    def hole_at(self, row):
+        return int(self.order[row])
+
+    def value(self, row, column):
+        return self.columns[column]["values"][self.order[row]]
+
+    def method_of_column(self, column):
+        return self.columns[column].get("method") if 0 <= column < len(self.columns) else None
 
     def clear(self):
         self.beginResetModel()
-        self.rows, self.headers, self.review, self.row_of = [], [], None, {}
+        self.review = self.method = None
+        self.columns, self.cd_methods = [], []
+        self.order = self.position = np.empty(0, int)
+        self.bad = np.empty(0, bool)
         self.endResetModel()
 
     def sort(self, column, order=QtCore.Qt.SortOrder.AscendingOrder):
-        self.layoutAboutToBeChanged.emit()
-        self.rows.sort(key=lambda row: (isinstance(row[column], float) and not np.isfinite(row[column]), row[column]),
-                       reverse=order == QtCore.Qt.SortOrder.DescendingOrder)
-        self._index_rows()
-        self.layoutChanged.emit()
+        self.sort_column, self.sort_order = column, order
+        if self.review is not None:
+            self._relayout()
+
+
+def _mask_item(color, z):
+    """An image item that paints the pixels equal to 1 in ``color`` (RGBA) and leaves 0 transparent."""
+    item = pg.ImageItem(axisOrder="row-major")
+    item.setLookupTable(np.array([(0, 0, 0, 0), color], np.uint8))
+    item.setLevels((0, 1))
+    item.setZValue(z)
+    return item
+
+
+def _set_raster(item, data, origin):
+    if getattr(item, "source", None) is not data:  # re-render only for a new map
+        item.source = data
+        item.setImage(data, autoLevels=False)
+    item.setRect(QtCore.QRectF(origin[0] - 0.5, origin[1] - 0.5, data.shape[1], data.shape[0]))
+    item.show()
+
+
+class HoleLayers(QtCore.QObject):
+    """The overlays of one result on the main image (spec 4.4).
+
+    Raster maps (CD colors, failed cells, Voronoi edges) are made once per result and method and shown at every
+    zoom. Centers, contours, pitch pairs and rejected boxes are drawn for the holes in view only, and only while
+    at most VECTOR_LIMIT holes are in view; farther out the raster maps carry the picture. The selection marker
+    is an item of its own: selecting a hole redraws nothing else.
+    """
+
+    VECTOR_LIMIT = 2000
+    changed = QtCore.pyqtSignal()  # vectors appeared or gave way to the rasters
+
+    def __init__(self, plot):
+        super().__init__(plot)
+        self.plot, self.view = plot, plot.getViewBox()
+        self.cd_map = pg.ImageItem(axisOrder="row-major")
+        self.cd_map.setOpacity(0.6)
+        self.cd_map.setZValue(5)
+        self.failures = _mask_item((255, 116, 138, 150), 6)
+        self.edges = _mask_item((86, 214, 207, 165), 7)
+        self.centers = pg.ScatterPlotItem(size=6, pen=pg.mkPen("#56d6cf", width=1), brush=pg.mkBrush(86, 214, 207, 60),
+                                          symbol="+")
+        self.failed = pg.ScatterPlotItem(size=10, pen=pg.mkPen("#ff748a", width=2), brush=None, symbol="x")
+        self.contours = pg.PlotDataItem(connect="finite")
+        self.pairs = {axis: pg.PlotDataItem(connect="pairs", pen=pg.mkPen(color, width=1))
+                      for axis, color in (("x", "#ffce73"), ("y", "#b49aff"))}
+        self.reference = pg.ScatterPlotItem(symbol="star", size=18, brush="#ffce73", pen="#fff3cf")
+        self.rejected = pg.PlotDataItem(connect="finite", pen="#ff748a")
+        self.selection = pg.ScatterPlotItem(symbol="o", size=20, brush=None, pen=pg.mkPen("#ffffff", width=2))
+        self.vectors = [self.centers, self.failed, self.contours, *self.pairs.values(), self.rejected]
+        for z, item in enumerate([*self.vectors, self.reference, self.selection], start=20):
+            item.setZValue(z)
+        for item in (self.cd_map, self.failures, self.edges, *self.vectors, self.reference, self.selection):
+            item.hide()
+            plot.addItem(item)
+        self.state = None
+        self._review = None
+        self._maps = {}
+        self.in_view, self.near = 0, True
+        self._timer = QtCore.QTimer(self, singleShot=True, interval=0, timeout=self._update_vectors)
+        self.view.sigRangeChanged.connect(lambda *args: self._timer.start())
+
+    def _map(self, key, build):
+        if key not in self._maps:
+            self._maps[key] = build()
+        return self._maps[key]
+
+    def show(self, review, method, origin, layers):
+        """Show ``review``'s ``method`` with the named ``layers`` on; ``origin``: display position of its pixel [0, 0].
+
+        ``review=None`` hides every layer.
+        """
+        if review is not self._review:
+            self._review, self._maps = review, {}
+        if review is None:
+            self.state = None
+            for item in (self.cd_map, self.failures, self.edges, *self.vectors, self.reference):
+                item.hide()
+            self.changed.emit()
+            return
+        measured = review.measurements[method]
+        origin = np.asarray(origin, float)
+        points = measured.centers_xy + origin
+        self.state = dict(review=review, method=method, origin=origin, layers=set(layers), points=points,
+                          seeds=review.seeds_xy + origin, valid=measured.valid & np.isfinite(points).all(axis=1),
+                          margin=np.sqrt(review.image.size / max(len(review.seeds_xy), 1)))
+        cd = review.cd
+        values = measured.metrics.get("cd_equivalent_px")
+        if "CD colors" in layers and cd is not None and values is not None:
+            scale = review.parameters["pixel_size"]
+            _set_raster(self.cd_map, self._map(("cd", method), lambda: cell_values_map(
+                cd.cell_labels, np.where(self.state["valid"], values * scale, np.nan))), origin)
+        else:
+            self.cd_map.hide()
+        if "Failed cells" in layers and cd is not None and not measured.valid.all():
+            _set_raster(self.failures, self._map(("failed", method), lambda: cell_mask_map(
+                cd.cell_labels, ~measured.valid)), origin)
+        else:
+            self.failures.hide()
+        if "Voronoi edges" in layers and cd is not None:
+            _set_raster(self.edges, self._map("edges", lambda: cell_boundary(cd.cell_labels).view(np.uint8)), origin)
+        else:
+            self.edges.hide()
+        self.contours.setPen(pg.mkPen(COLORS[list(review.measurements).index(method) % len(COLORS)], width=1.3))
+        self._update_vectors()
+
+    def _update_vectors(self):
+        state = self.state
+        if state is None:
+            return
+        review, layers, points, seeds = state["review"], state["layers"], state["points"], state["seeds"]
+        (x0, x1), (y0, y1) = self.view.viewRange()
+        margin = state["margin"]
+        inside = ((seeds[:, 0] >= x0 - margin) & (seeds[:, 0] <= x1 + margin)
+                  & (seeds[:, 1] >= y0 - margin) & (seeds[:, 1] <= y1 + margin))
+        near, was = int(inside.sum()) <= self.VECTOR_LIMIT, self.near
+        self.in_view, self.near = int(inside.sum()), near
+        measured, valid = review.measurements[state["method"]], state["valid"]
+        if near and "Centers" in layers:
+            self.centers.setData(pos=points[inside & valid])
+            self.failed.setData(pos=seeds[inside & ~valid])
+        self.centers.setVisible(near and "Centers" in layers)
+        self.failed.setVisible(near and "Centers" in layers)
+        contours = near and "Contours" in layers and measured.contours_xy.size > 0
+        if contours:
+            shapes = measured.contours_xy[inside] + state["origin"]
+            segments = np.concatenate((shapes, np.full((len(shapes), 1, 2), np.nan)), axis=1).reshape(-1, 2)
+            self.contours.setData(segments[:, 0], segments[:, 1], connect="finite")
+        self.contours.setVisible(contours)
+        pattern = review.patterns.get(state["method"]) if "Pitch pairs" in layers else None
+        for axis, item in self.pairs.items():
+            pairs = pattern.profiles[axis].pairs if pattern is not None else np.empty((0, 2), int)
+            shown = near and len(pairs) > 0
+            if shown:
+                segments = points[pairs[inside[pairs].any(axis=1)]].reshape(-1, 2)
+                item.setData(segments[:, 0], segments[:, 1], connect="pairs")
+            item.setVisible(shown)
+        if pattern is not None:
+            self.reference.setData(pos=[seeds[pattern.reference_index]])
+        self.reference.setVisible(pattern is not None)
+        rejected = near and "Rejected boxes" in layers and review.detection is not None
+        if rejected:
+            boxes = review.detection.boxes[~review.detection.kept]
+            if len(boxes):
+                x, y, w, h = (boxes[:, i].astype(float)[:, None] for i in range(4))
+                corners = np.stack((np.hstack((x, x + w, x + w, x, x, x)) - .5,
+                                    np.hstack((y, y, y + h, y + h, y, y)) - .5), axis=-1)
+                corners[:, -1] = np.nan
+                corners += state["origin"]
+                middle = corners[:, 0] + np.column_stack((w[:, 0], h[:, 0])) / 2
+                corners = corners[(middle[:, 0] >= x0) & (middle[:, 0] <= x1) & (middle[:, 1] >= y0) & (middle[:, 1] <= y1)]
+                self.rejected.setData(corners[..., 0].ravel(), corners[..., 1].ravel(), connect="finite")
+            rejected = len(boxes) > 0
+        self.rejected.setVisible(rejected)
+        if near != was:
+            self.changed.emit()
+
+    def hidden_vectors(self):
+        """True when vector layers are on but give way to the rasters (too many holes in view)."""
+        return (self.state is not None and not self.near
+                and bool(self.state["layers"] & {"Centers", "Contours", "Pitch pairs", "Rejected boxes"}))
+
+    def set_selection(self, point):
+        if point is None:
+            self.selection.hide()
+        else:
+            self.selection.setData(pos=[point])
+            self.selection.show()
+
+
+class PageStack(QtCore.QObject):
+    """Every page of the open file one under another ("Stack vertically"), drawn as the pages come into view.
+
+    Pages out of view are not drawn. Pages in view are drawn from a reduced preview when zoomed out and at full
+    resolution when zoomed in; previews are kept for every page seen (small), full pages up to FULL_BYTES. The
+    active page is the canvas's own image and is never drawn here. Decoding runs a page at a time between events,
+    so the window stays responsive while a large file fills in.
+    """
+
+    FULL_BYTES = 128e6
+    FULL_SCALE = 3.0  # image pixels per screen pixel below which pages in view are drawn at full resolution
+    LABEL_PAGES = 12  # page labels while at most this many pages are in view
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, plot, reader):
+        super().__init__(plot)
+        self.plot, self.view, self.reader = plot, plot.getViewBox(), reader
+        self.shapes = np.array(reader.shapes, int).reshape(-1, 2)
+        gap = max(8, round(int(self.shapes[:, 1].max()) * 0.04))
+        self.offsets = np.concatenate(([0], np.cumsum(self.shapes[:-1, 0] + gap)))
+        self.active, self.levels, self.visible = None, None, True
+        self.previews, self.full, self.items, self.labels = {}, OrderedDict(), {}, {}
+        self.broken = set()
+        self.borders = pg.PlotDataItem(connect="finite", pen=pg.mkPen("#354a60", width=1))
+        self.borders.setZValue(10)
+        corners = []
+        for (h, w), y in zip(self.shapes, self.offsets):
+            corners += [(-.5, y - .5), (w - .5, y - .5), (w - .5, y + h - .5), (-.5, y + h - .5), (-.5, y - .5),
+                        (np.nan, np.nan)]
+        corners = np.array(corners)
+        self.borders.setData(corners[:, 0], corners[:, 1], connect="finite")
+        self.active_border = QtWidgets.QGraphicsRectItem()
+        self.active_border.setPen(pg.mkPen("#56d6cf", width=2))
+        self.active_border.setZValue(11)
+        plot.addItem(self.borders)
+        plot.addItem(self.active_border)
+        self._queue = []
+        self._update_timer = QtCore.QTimer(self, singleShot=True, interval=0, timeout=self.update)
+        self._decode_timer = QtCore.QTimer(self, singleShot=True, interval=0, timeout=self._decode)
+        self.view.sigRangeChanged.connect(self._schedule)
+
+    def _schedule(self, *args):
+        if self.visible:
+            self._update_timer.start()
+
+    def bounds(self):
+        """The whole stack, with room above the first page for its label."""
+        height = int(self.offsets[-1] + self.shapes[-1, 0])
+        headroom = max(16, height * .05)
+        return QtCore.QRectF(-0.5, -0.5 - headroom, int(self.shapes[:, 1].max()), height + headroom)
+
+    def page_at(self, x, y):
+        """The page under the stack position (x, y), or None in a gap."""
+        page = int(np.searchsorted(self.offsets, y + 0.5, side="right")) - 1
+        if page >= 0:
+            h, w = self.shapes[page]
+            if -0.5 <= x < w - 0.5 and y < self.offsets[page] + h - 0.5:
+                return page
+        return None
+
+    def page(self, page):
+        """The page decoded at full resolution, if it is in memory."""
+        if page in self.full:
+            self.full.move_to_end(page)
+            return self.full[page]
+        return None
+
+    def remember(self, loaded):
+        """Keep a page that was decoded elsewhere (the page that was active), so it needs no decoding."""
+        if loaded.page not in self.previews:
+            self.previews[loaded.page] = page_preview(loaded.image)
+        self.full[loaded.page] = loaded
+        self.full.move_to_end(loaded.page)
+        self._trim()
+
+    def set_active(self, page):
+        self.active = page
+        h, w = self.shapes[page]
+        self.active_border.setRect(-0.5, self.offsets[page] - 0.5, w, h)
+        item = self.items.pop(page, None)
+        if item is not None:
+            self.plot.removeItem(item)
+        self.update()
+
+    def set_levels(self, levels):
+        """Contrast of the active page, used for every page."""
+        self.levels = tuple(levels)
+        for item in self.items.values():
+            item.setLevels(self.levels)
+
+    def set_visible(self, visible):
+        self.visible = visible
+        for item in (self.borders, self.active_border):
+            item.setVisible(visible)
+        if not visible:
+            for item in (*self.items.values(), *self.labels.values()):
+                self.plot.removeItem(item)
+            self.items, self.labels, self._queue = {}, {}, []
+        else:
+            self.update()
+
+    def close(self):
+        self.set_visible(False)
+        self._update_timer.stop()
+        self._decode_timer.stop()
+        for item in (self.borders, self.active_border):
+            self.plot.removeItem(item)
+        self.view.sigRangeChanged.disconnect(self._schedule)
+        self.reader.close()
+
+    def _in_view(self):
+        (x0, x1), (y0, y1) = self.view.viewRange()
+        pages = np.flatnonzero((self.offsets + self.shapes[:, 0] >= y0) & (self.offsets <= y1) & (x0 <= self.shapes[:, 1]))
+        full = self.view.viewPixelSize()[1] < self.FULL_SCALE
+        return pages, full
+
+    def update(self):
+        if not self.visible or self.active is None:
+            return
+        pages, full = self._in_view()
+        wanted = set(int(page) for page in pages) - {self.active}
+        for page in [page for page in self.items if page not in wanted]:
+            self.plot.removeItem(self.items.pop(page))
+        missing = []
+        for page in sorted(wanted):
+            if not self._draw(page, full) and page not in self.broken:
+                missing.append(page)
+        middle = np.mean(self.view.viewRange()[1])
+        self._queue = sorted(missing, key=lambda page: abs(self.offsets[page] + self.shapes[page, 0] / 2 - middle))
+        if self._queue:
+            self._decode_timer.start()
+        labelled = set(int(page) for page in pages) if len(pages) <= self.LABEL_PAGES else set()
+        for page in [page for page in self.labels if page not in labelled]:
+            self.plot.removeItem(self.labels.pop(page))
+        for page in labelled:
+            active = page == self.active
+            text = f"Page {page}" + (" · active" if active else " · click to select")
+            label = self.labels.get(page)
+            if label is None:
+                label = self.labels[page] = pg.TextItem(anchor=(0, 1), fill="#151e2b")
+                label.setPos(0, self.offsets[page] - .5)
+                label.setZValue(12)
+                self.plot.addItem(label)
+            label.setText(text, color="#56d6cf" if active else "#a9bbce")
+
+    def _draw(self, page, full):
+        """Draw a page from memory; False when it must be decoded first."""
+        loaded = self.full.get(page) if full else None
+        if loaded is not None:
+            data, factor = loaded.image, 1
+        elif page in self.previews and not full:
+            data, factor = self.previews[page]
+        elif page in self.previews:  # full resolution wanted: the preview until it is decoded
+            self._show(page, *self.previews[page])
+            return False
+        else:
+            return False
+        self._show(page, data, factor)
+        return True
+
+    def _show(self, page, data, factor):
+        item = self.items.get(page)
+        if item is None:
+            item = self.items[page] = pg.ImageItem(axisOrder="row-major")
+            item.setOpts(autoDownsample=True)  # averaged when small, as the active page
+            item.setZValue(-1)
+            self.plot.addItem(item)
+        if getattr(item, "source", None) is not data:
+            item.source = data
+            item.setImage(data, autoLevels=False)
+            if self.levels is not None:
+                item.setLevels(self.levels)
+            item.setRect(QtCore.QRectF(-0.5, self.offsets[page] - 0.5, data.shape[1] * factor, data.shape[0] * factor))
+
+    def _decode(self):
+        """Decode the pages in view nearest the middle first, for at most about 30 ms per turn of the event loop."""
+        started = time.perf_counter()
+        pages, full = self._in_view()
+        wanted = set(int(page) for page in pages)
+        while self._queue and time.perf_counter() - started < 0.03:
+            page = self._queue.pop(0)
+            if page not in wanted or page == self.active:
+                continue
+            try:
+                loaded = self.reader.read(page)
+            except Exception as exc:
+                self.broken.add(page)
+                self.failed.emit(f"Page {page} could not be read: {exc}")
+                continue
+            self.previews[page] = page_preview(loaded.image)
+            if full or self.previews[page][1] == 1:
+                self.full[page] = loaded
+                self._trim()
+            self._draw(page, full)
+        if self._queue:
+            self._decode_timer.start()
+
+    def _trim(self):
+        total = sum(loaded.image.nbytes for loaded in self.full.values())
+        while len(self.full) > 1 and total > self.FULL_BYTES:
+            page, loaded = self.full.popitem(last=False)
+            total -= loaded.image.nbytes
+
+    def memory(self):
+        return sum(data.nbytes for data, _ in self.previews.values()) + sum(
+            loaded.image.nbytes for loaded in self.full.values())
 
 
 class InspectionWindow(QtWidgets.QMainWindow):
@@ -369,10 +822,11 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.busy = False
         self._job = None
         self._radial_cache = None
-        self._pages = None
-        self._page_offsets = []
-        self._page_reviews = {}
-        self._task_reviews = {}
+        self.stack = None  # PageStack while "Stack vertically" has been used for the open file
+        self._page_reviews = OrderedDict()  # page -> result shown when the page was left, oldest first
+        self._task_reviews = {}  # (page, task) -> result
+        self._cd_levels = None  # CD color range while locked
+        self._summary_text = ""
         self._syncing_table = False
         self._building = True
         self._pool = QtCore.QThreadPool(self)
@@ -396,9 +850,11 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.open_action.setToolTip("Open an image (Ctrl+O), or drop a file on the window")
         self.demo_action = toolbar.addAction("Load demo", self.load_demo)
         toolbar.addSeparator()
-        fit = toolbar.addAction("Fit image", lambda: self.canvas.fit_image())
+        fit = toolbar.addAction("Fit page", lambda: self.canvas.fit_image())
         fit.setShortcut("F")
-        fit.setToolTip("Fit the image (F)")
+        fit.setToolTip("Fit the active page (F); Shift+F fits the whole stack")
+        fit_stack = QtGui.QAction("Fit stack", self, shortcut="Shift+F", triggered=self.fit_stack)
+        self.addAction(fit_stack)
         zoom = toolbar.addAction("Zoom to hole", self.zoom_selected)
         zoom.setShortcut("Z")
         zoom.setToolTip("Zoom to the selected hole (Z)")
@@ -804,7 +1260,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
             average_rows=self.average_rows, average_columns=self.average_columns, nominal_x=self.nominal_x,
             nominal_y=self.nominal_y, reference_selected=self.reference_selected, pitch_hint_x=self.pitch_hint_x,
             pitch_hint_y=self.pitch_hint_y, upsample=self.upsample, hole_check_mode=self.hole_check_mode,
-            failed_only=self.failed_only, lock_levels=self.lock_levels,
+            failed_only=self.failed_only, lock_levels=self.lock_levels, lock_cd=self.lock_cd,
         )
         controls.update({f"layer:{name}": check for name, check in self.layer_checks.items()})
         return controls
@@ -880,6 +1336,8 @@ class InspectionWindow(QtWidgets.QMainWindow):
         """Every setting back to its default; the image, results and window layout stay."""
         self._apply_values(self._defaults)
         self._settings_changed()
+        self._render_image()
+        self._update_table()
         self.statusBar().showMessage("Settings reset to their defaults (the batch's defaults).", 8000)
 
     def _last_folder(self):
@@ -953,10 +1411,14 @@ class InspectionWindow(QtWidgets.QMainWindow):
         layout.addLayout(row)
         layers = QtWidgets.QHBoxLayout()
         self.layer_checks = {}
-        for name, checked in (("Centers", True), ("Contours", True), ("Voronoi edges", False),
+        tips = {"Centers": "Shown while at most 2,000 holes are in view", "Contours": "Shown while at most 2,000 holes "
+                "are in view", "Failed cells": "Cells of the holes the shown method failed on, in red",
+                "CD colors": "Each cell colored by the shown method's CD (scale beside the image)"}
+        for name, checked in (("Centers", True), ("Contours", True), ("Failed cells", True), ("Voronoi edges", False),
                               ("Rejected boxes", False), ("Pitch pairs", False), ("CD colors", False)):
             check = QtWidgets.QCheckBox(name)
             check.setChecked(checked)
+            check.setToolTip(tips.get(name, ""))
             check.toggled.connect(self._render_image)
             self.layer_checks[name] = check
             layers.addWidget(check)
@@ -998,6 +1460,27 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.canvas.side_layout.addWidget(self.lock_levels)
         self.canvas.histogram.sigLevelsChanged.connect(self._levels_changed)
         self._locked_levels = None
+        self.layers = HoleLayers(self.canvas.plot)
+        self.layers.changed.connect(self._show_summary)
+        # CD color scale beside the image: 1-99 % of the shown method, drag its ends to set, Lock to compare.
+        self.cd_scale = QtWidgets.QWidget()
+        self.cd_scale.setFixedWidth(92)
+        scale_layout = QtWidgets.QVBoxLayout(self.cd_scale)
+        scale_layout.setContentsMargins(0, 0, 0, 0)
+        scale_view = pg.GraphicsLayoutWidget()
+        scale_view.setBackground("#0c121b")
+        self.cd_bar = pg.ColorBarItem(values=(0, 1), colorMap=pg.colormap.get("viridis"), width=14, rounding=1e-3)
+        scale_view.addItem(self.cd_bar)
+        self.cd_bar.setImageItem(self.layers.cd_map)
+        self.cd_bar.sigLevelsChangeFinished.connect(self._cd_levels_changed)
+        scale_layout.addWidget(scale_view, 1)
+        self.lock_cd = QtWidgets.QCheckBox("Lock")
+        self.lock_cd.setToolTip("Keep this CD color range for every method and page "
+                                "(otherwise 1-99 % of the shown method's CDs)")
+        self.lock_cd.toggled.connect(self._lock_cd_changed)
+        scale_layout.addWidget(self.lock_cd)
+        self.cd_scale.hide()
+        self.canvas.layout().insertWidget(1, self.cd_scale)
         self.vertical_splitter.addWidget(self.canvas)
         for keys, button in (("PgUp", self.previous_page), ("PgDown", self.next_page)):
             for scope in (self.canvas, self.page_bar):  # never while typing in a table or field
@@ -1122,10 +1605,18 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.table_model = MeasurementTable(self)
         self.table = QtWidgets.QTableView()
         self.table.setModel(self.table_model)
+        header = self.table.horizontalHeader()
+        header.setSortIndicator(0, QtCore.Qt.SortOrder.AscendingOrder)  # rows in ID order until a header click
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        # Compact columns the user can widen; fixed row height, so 40k rows cost nothing to lay out.
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+        header.setDefaultSectionSize(92)
+        header.setMinimumSectionSize(36)
+        self.table.verticalHeader().hide()
+        self.table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self.table.verticalHeader().setDefaultSectionSize(22)
         self.table.clicked.connect(self._select_table)
         # Arrow keys, Page keys and clicks all move the current row; the selected hole follows it.
         self.table.selectionModel().currentRowChanged.connect(self._table_row_changed)
@@ -1355,7 +1846,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
 
     def _show_error(self, detail, *, context=""):
         """One plain line over the results (which stay visible); the full text goes to the Activity log."""
-        if self._pages is None:
+        if self.stack is None:
             self.stack_pages.blockSignals(True)
             self.stack_pages.setChecked(False)
             self.stack_pages.blockSignals(False)
@@ -1388,39 +1879,43 @@ class InspectionWindow(QtWidgets.QMainWindow):
 
     def _page_changed(self, value):
         if self.loaded is not None and self.loaded.path and value != self.loaded.page and not self.busy:
-            if self._pages is not None:
-                self._set_loaded(self._pages[value], keep_pages=True)
-            else:
-                path = self.loaded.path
-                self._run_job("Loading page", lambda: load_image(path, value),
-                              lambda loaded: self._set_loaded(loaded, keep_pages=True))
+            cached = self.stack.page(value) if self.stack is not None else None
+            if cached is not None:
+                self._set_loaded(cached, keep_pages=True)
+                return
+            # With the stack the file is open already; otherwise the page is read from the file.
+            read = self.stack.reader.read if self.stack is not None else (lambda page, path=self.loaded.path:
+                                                                         load_image(path, page))
+            self._run_job("Loading page", lambda: read(value), lambda loaded: self._set_loaded(loaded, keep_pages=True))
+
+    def _stacked(self):
+        return self.stack is not None and self.stack_pages.isChecked()
 
     def _stack_changed(self, enabled):
         if self.loaded is None or self.busy:
             return
-        old_offset = self._display_offset()
-        if enabled and self._pages is None:
+        if enabled and self.stack is None:
             path = self.loaded.path
 
-            def accept(pages):
-                # Reuse the active array so its analysis and contrast remain valid.
-                pages[self.loaded.page] = self.loaded
-                self._pages = pages
-                gap = max(8, round(max(page.image.shape[1] for page in pages) * 0.04))
-                self._page_offsets = np.cumsum([0] + [page.image.shape[0] + gap for page in pages[:-1]]).tolist()
-                self.stack_pages.setChecked(True)
-                self._refresh_page_view(old_offset)
+            def accept(reader):
+                self.stack = PageStack(self.canvas.plot, reader)
+                self.stack.failed.connect(lambda text: self.log.appendPlainText(text))
+                self.stack.remember(self.loaded)
+                self.stack.set_levels(self.canvas.image_item.getLevels())
+                self.stack.set_active(self.loaded.page)
+                self._refresh_page_view(np.zeros(2))
                 self._set_state("All pages visible | analysis uses the active page")
 
-            self._run_job("Loading all pages", lambda: load_pages(path), accept)
-        else:
+            self._run_job("Reading page sizes", lambda: PageReader(path), accept)
+        elif self.stack is not None:
             # The toggle has already changed; recover the previous display offset.
-            old_offset = np.array([0, self._page_offsets[self.loaded.page]]) if not enabled and self._pages else np.zeros(2)
+            old_offset = np.zeros(2) if enabled else np.array([0, self.stack.offsets[self.loaded.page]])
+            self.stack.set_visible(enabled)
             self._refresh_page_view(old_offset)
 
     def _display_offset(self):
-        if self._pages is not None and self.stack_pages.isChecked():
-            return np.array([0, self._page_offsets[self.loaded.page]])
+        if self._stacked():
+            return np.array([0, self.stack.offsets[self.loaded.page]])
         return np.zeros(2)
 
     def _refresh_page_view(self, old_offset):
@@ -1431,16 +1926,25 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.roi.maxBounds = QtCore.QRectF(-0.5, offset[1] - 0.5, w, h)
         self.roi.blockSignals(False)
         self._render_image()
-        self.canvas.fit_image()
+        self._update_selection()
+        self.fit_stack()  # the whole stack when it was turned on, the page when off
+
+    def fit_stack(self):
+        """Shift+F: the whole stack in view (the page when the stack is off)."""
+        if self._stacked():
+            self.canvas.plot.getViewBox().setRange(self.stack.bounds(), padding=0.02)
+        else:
+            self.canvas.fit_image()
 
     def _page_at(self, x, y):
-        pages = self._pages if self.stack_pages.isChecked() and self._pages is not None else [self.loaded]
-        for page in pages:
-            offset = self._page_offsets[page.page] if self.stack_pages.isChecked() and self._pages else 0
-            h, w = page.image.shape
-            if -0.5 <= x < w - 0.5 and offset - 0.5 <= y < offset + h - 0.5:
-                return page, y - offset
-        return None, y
+        """(page number, page-local y) under a display position, or (None, y)."""
+        if self.loaded is None:
+            return None, y
+        if self._stacked():
+            page = self.stack.page_at(x, y)
+            return (None, y) if page is None else (page, y - self.stack.offsets[page])
+        h, w = self.loaded.image.shape
+        return (self.loaded.page, y) if -0.5 <= x < w - 0.5 and -0.5 <= y < h - 0.5 else (None, y)
 
     def set_image(self, image, *, name="Array image"):
         """Load a finite grayscale/RGB NumPy array, resetting dependent results."""
@@ -1458,21 +1962,27 @@ class InspectionWindow(QtWidgets.QMainWindow):
         previous = self.loaded
         page_change = keep_pages and previous is not None
         old_offset = self._display_offset() if previous is not None else np.zeros(2)
-        stacked = page_change and self.stack_pages.isChecked() and self._pages is not None
+        stacked = page_change and self._stacked()
         keep_view = page_change and (stacked or previous.image.shape == loaded.image.shape)
         if page_change:
-            self._page_reviews[previous.page] = self.review
+            self._page_reviews.pop(previous.page, None)
+            self._page_reviews[previous.page] = self.review  # the most recent page last
+            if self.stack is not None:
+                self.stack.remember(previous)  # drawn in the stack from memory, no decoding
         else:
             self._page_reviews.clear()
             self._task_reviews.clear()
-            self._pages = None
-            self._page_offsets = []
+            if self.stack is not None:
+                self.stack.close()
+                self.stack = None
             self.stack_pages.blockSignals(True)
             self.stack_pages.setChecked(False)
             self.stack_pages.blockSignals(False)
             self.moving = None
             self._selected_xy = None
         self.loaded = loaded
+        if self.stack is not None:
+            self.stack.set_active(loaded.page)
         self.review = self.registration = None
         self._radial_cache = None
         self.selected = None
@@ -1487,7 +1997,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
                                   + (f"  |  {loaded.conversion}" if loaded.conversion else ""))
         self.source_label.setToolTip(loaded.path or loaded.name)
         self._set_state("Image ready")
-        self.summary_label.setText("Measure the active page, then click a hole on the image or a row of the table.")
+        self._set_summary("Measure the active page, then click a hole on the image or a row of the table.")
         self.failure_label.clear()
         self.feature_spin.setRange(0, 0)
         self._clear_detail("Click a hole after measuring.")
@@ -1529,7 +2039,35 @@ class InspectionWindow(QtWidgets.QMainWindow):
         saved = self._page_reviews.get(loaded.page)
         if saved is not None:
             self._accept_review(saved, restoring=True)
+        self._keep_results()
         self._update_enabled()
+
+    def _keep_results(self):
+        """Keep the results of the open page and of the most recent other pages, at most RESULT_PAGES pages and
+        RESULT_BYTES of memory; older pages' results are dropped (measure the page again to see them)."""
+        current = self.loaded.page if self.loaded is not None else None
+        pages = [current] + [page for page in reversed(self._page_reviews) if page != current]
+        pages += [page for page, _ in self._task_reviews if page not in pages]
+        kept, total, dropped = set(), 0, []
+        for page in pages:
+            reviews = [review for (other, _), review in self._task_reviews.items() if other == page]
+            size = array_bytes(self._page_reviews.get(page), *reviews)
+            if page != current and not size:
+                continue  # no result on this page
+            if page == current or (len(kept) < RESULT_PAGES and total + size <= RESULT_BYTES):
+                kept.add(page)
+                total += size
+            else:
+                dropped.append(page)
+        for page in [page for page in self._page_reviews if page not in kept]:
+            del self._page_reviews[page]
+        for key in [key for key in self._task_reviews if key[0] not in kept]:
+            del self._task_reviews[key]
+        if dropped:
+            self.log.appendPlainText(
+                f"Results of page {', '.join(map(str, sorted(dropped)))} dropped to limit memory (kept: "
+                f"{len(kept)} page{'s' * (len(kept) > 1)}, {total / 1e9:.1f} GB; at most {RESULT_PAGES} pages and "
+                f"{RESULT_BYTES / 1e9:.0f} GB).")
 
     def _clear_detail(self, message):
         self.feature_label.setText(message)
@@ -1546,8 +2084,12 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self._locked_levels = tuple(self.canvas.image_item.getLevels()) if locked else None
 
     def _levels_changed(self):
-        if self.lock_levels.isChecked() and self.stage.currentText() == "Loaded image":
+        if self.stage.currentText() != "Loaded image":
+            return
+        if self.lock_levels.isChecked():
             self._locked_levels = tuple(self.canvas.histogram.getLevels())
+        if self.stack is not None:
+            self.stack.set_levels(self.canvas.histogram.getLevels())  # one contrast for every page
 
     def load_demo(self):
         def generate():
@@ -1654,6 +2196,8 @@ class InspectionWindow(QtWidgets.QMainWindow):
     def _accept_review(self, review, *, restoring=False):
         self.review = review
         self._task_reviews[self.loaded.page, review.parameters.get("operation", "cd")] = review
+        if not restoring:
+            self._keep_results()
         self._radial_cache = None
         old = self.method.currentData()
         self.method.blockSignals(True)
@@ -1741,11 +2285,11 @@ class InspectionWindow(QtWidgets.QMainWindow):
             check.setVisible(self.task.currentData() != "register" and (relevant or name in ("Centers", "Contours", "Voronoi edges")))
 
     def _render_image(self, *args):
+        """The image (or pipeline stage) and the result's layers; cached maps make this cheap to call often."""
         if self.loaded is None:
             return
         canvas = self.canvas
         review = self.review if self.task.currentData() != "register" else None
-        canvas.clear_overlays()
         data, origin, categorical = self.loaded.image, np.zeros(2), False
         stage = self.stage.currentText()
         message = ""
@@ -1774,76 +2318,84 @@ class InspectionWindow(QtWidgets.QMainWindow):
         canvas.set_image(data, origin + offset, fit=False, categorical=categorical, keep_levels=locked)
         if locked:
             canvas.histogram.setLevels(*self._locked_levels)
-        if self._pages is not None and self.stack_pages.isChecked():
-            self._render_pages()
+        if self.stack is not None and stage == "Loaded image":
+            self.stack.set_levels(canvas.image_item.getLevels())
         self.roi.setZValue(50)
-        if review is None or not len(review.seeds_xy) or self.method.currentData() not in review.measurements:
+        name = self.method.currentData()
+        shown = review is not None and len(review.seeds_xy) and name in review.measurements
+        layers = {key for key, check in self.layer_checks.items() if check.isChecked()}
+        self.layers.show(review if shown else None, name, display_origin, layers)
+        self._update_selection()
+        self._update_cd_scale(review if shown and "CD colors" in layers else None, name)
+        if not shown:
             self.failure_label.clear()
             if self.task.currentData() == "register":
-                self.summary_label.setText("Reference: active page. Open a matching moving image, then Align images.")
+                self._summary_text = "Reference: active page. Open a matching moving image, then Align images."
             elif review is not None and not len(review.seeds_xy):
-                self.summary_label.setText("No holes found. Inspect the threshold mask, area limits, polarity and region.")
+                self._summary_text = "No holes found. Inspect the threshold mask, area limits, polarity and region."
             elif message:
-                self.summary_label.setText(message)
+                self._summary_text = message
+            self._show_summary()
             return
-        name = self.method.currentData()
         measured = review.measurements[name]
-        points = measured.centers_xy + display_origin
-        seeds = review.seeds_xy + display_origin
-        valid = measured.valid & np.isfinite(points).all(axis=1)
-        flags = self.layer_checks
-        if flags["Voronoi edges"].isChecked() and review.cd is not None:
-            edge = cell_boundary(review.cd.cell_labels)
-            rgba = np.zeros((*edge.shape, 4), np.uint8)
-            rgba[edge] = (86, 214, 207, 165)
-            canvas.raster("cells", rgba, display_origin)
-        color_message = ""
-        if flags["CD colors"].isChecked() and "cd_equivalent_px" in measured.metrics:
-            values = measured.metrics["cd_equivalent_px"] * review.parameters["pixel_size"]
-            good = valid & np.isfinite(values)
-            if good.any():
-                low, high = np.min(values[good]), np.max(values[good])
-                colors = pg.colormap.get("viridis").map((values[good] - low) / max(high - low, 1e-12), mode="byte")
-                canvas.add_overlay("values", pg.ScatterPlotItem(pos=points[good], size=10,
-                    brush=[pg.mkBrush(c) for c in colors], pen=None))
-                color_message = f" | CD color: {low:.4g} (purple) to {high:.4g} (yellow) {review.parameters['unit']}"
-        if flags["Centers"].isChecked():
-            canvas.add_overlay("centers", pg.ScatterPlotItem(pos=points[valid], size=6,
-                pen=pg.mkPen("#56d6cf", width=1), brush=pg.mkBrush(86, 214, 207, 60), symbol="+"))
-            canvas.add_overlay("failed", pg.ScatterPlotItem(pos=seeds[~valid], size=10,
-                pen=pg.mkPen("#ff748a", width=2), symbol="x"))
-        if flags["Contours"].isChecked() and measured.contours_xy.size:
-            contours = measured.contours_xy + display_origin
-            segments = np.concatenate((contours, np.full((len(contours), 1, 2), np.nan)), axis=1).reshape(-1, 2)
-            canvas.add_overlay("contours", pg.PlotDataItem(segments[:, 0], segments[:, 1], connect="finite",
-                pen=pg.mkPen(COLORS[list(review.measurements).index(name) % len(COLORS)], width=1.3)))
-        if flags["Rejected boxes"].isChecked() and review.detection is not None:
-            segments = []
-            for x, y, w, h, area in review.detection.boxes[~review.detection.kept]:
-                segments.extend([(x - .5, y - .5), (x + w - .5, y - .5), (x + w - .5, y + h - .5),
-                                 (x - .5, y + h - .5), (x - .5, y - .5), (np.nan, np.nan)])
-            if segments:
-                segments = np.array(segments) + display_origin
-                canvas.add_overlay("rejected", pg.PlotDataItem(segments[:, 0], segments[:, 1], connect="finite", pen="#ff748a"))
-        if flags["Pitch pairs"].isChecked() and name in review.patterns:
-            pattern = review.patterns[name]
-            for axis, color in zip(("x", "y"), ("#ffce73", "#b49aff")):
-                pairs = pattern.profiles[axis].pairs
-                if len(pairs):
-                    segments = points[pairs].reshape(-1, 2)
-                    canvas.add_overlay(f"pairs_{axis}", pg.PlotDataItem(segments[:, 0], segments[:, 1], connect="pairs", pen=pg.mkPen(color, width=1)))
-            ref = seeds[pattern.reference_index]
-            canvas.add_overlay("reference", pg.ScatterPlotItem(pos=[ref], symbol="star", size=18, brush="#ffce73", pen="#fff3cf"))
-        if self.selected is not None and 0 <= self.selected < len(seeds):
-            canvas.add_overlay("selected", pg.ScatterPlotItem(pos=[seeds[self.selected]], symbol="o", size=20,
-                brush=None, pen=pg.mkPen("#ffffff", width=2)))
+        valid = measured.valid & np.isfinite(measured.centers_xy).all(axis=1)
         page = f"Page {self.loaded.page} | " if self.loaded.pages > 1 else ""
         summary = f"{page}{len(valid):,} holes | {method_name(name)}: {valid.sum():,} measured"
         values = measured.metrics.get("cd_equivalent_px")
         if values is not None and valid.any():
             summary += f", mean CD {np.mean(values[valid]) * review.parameters['pixel_size']:.4g} {review.parameters['unit']}"
-        self.summary_label.setText(message + summary + color_message)
+        self._summary_text = message + summary
+        self._show_summary()
         self.failure_label.setText(self._failure_summary(review))
+
+    def _set_summary(self, text):
+        self._summary_text = text
+        self._show_summary()
+
+    def _show_summary(self):
+        """The summary line, with a hint when centers and contours wait for a closer zoom."""
+        hint = ""
+        if self.layers.hidden_vectors():
+            hint = (f" | {self.layers.in_view:,} holes in view: zoom in to see centers and contours "
+                    f"(at most {self.layers.VECTOR_LIMIT:,})")
+        self.summary_label.setText(self._summary_text + hint)
+
+    def _update_cd_scale(self, review, method):
+        """CD color scale: 1-99 % of the shown method's CDs, or the locked range."""
+        values = review.measurements[method].metrics.get("cd_equivalent_px") if review is not None else None
+        good = review.measurements[method].valid & np.isfinite(values) if values is not None else None
+        if values is None or not good.any():
+            self.cd_scale.hide()
+            return
+        unit = review.parameters["unit"]
+        if self.lock_cd.isChecked() and self._cd_levels is not None:
+            low, high = self._cd_levels
+        else:
+            low, high = np.percentile(values[good] * review.parameters["pixel_size"], (1, 99))
+            if high <= low:
+                low, high = low - 0.5, high + 0.5
+            if self.lock_cd.isChecked():
+                self._cd_levels = (float(low), float(high))
+        self.cd_bar.setLevels((float(low), float(high)))
+        self.cd_bar.axis.setLabel(f"CD ({unit})")
+        self.cd_scale.show()
+
+    def _cd_levels_changed(self):
+        if self.lock_cd.isChecked():
+            self._cd_levels = tuple(float(value) for value in self.cd_bar.levels())
+
+    def _lock_cd_changed(self, locked):
+        self._cd_levels = tuple(float(value) for value in self.cd_bar.levels()) if locked and self.cd_scale.isVisible() else None
+        if not locked:
+            self._render_image()
+
+    def _update_selection(self):
+        """Move the selection marker only; no other layer is redrawn."""
+        review = self.review if self.task.currentData() != "register" else None
+        if review is None or self.selected is None or not 0 <= self.selected < len(review.seeds_xy):
+            self.layers.set_selection(None)
+        else:
+            self.layers.set_selection(review.seeds_xy[self.selected] + review.origin_xy + self._display_offset())
 
     @staticmethod
     def _failure_summary(review):
@@ -1859,47 +2411,15 @@ class InspectionWindow(QtWidgets.QMainWindow):
             return "<span style='color:#9be28a'>No method failed on any hole.</span>"
         return "<span style='color:#ffce73'>Failed: " + " &middot; ".join(parts) + "</span>"
 
-    def _render_pages(self):
-        canvas = self.canvas
-        for page, offset in zip(self._pages, self._page_offsets):
-            h, w = page.image.shape
-            if page.page != self.loaded.page:
-                item = pg.ImageItem(page.image, axisOrder="row-major")
-                item.setOpts(autoDownsample=True)
-                item.setRect(QtCore.QRectF(-0.5, offset - 0.5, w, h))
-                # Diagnostic stages may use categorical colors on the active page.
-                if self.stage.currentIndex() == 0:
-                    item.setLevels(canvas.image_item.getLevels())
-                    canvas.context_images.append(item)
-                else:
-                    sample = page.image[::max(1, h // 512), ::max(1, w // 512)]
-                    low, high = np.percentile(sample, (1, 99.5))
-                    item.setLevels((float(low), float(max(high, low + 1))))
-                canvas.add_overlay(f"page_{page.page}", item)
-            active = page.page == self.loaded.page
-            border = QtWidgets.QGraphicsRectItem(-0.5, offset - 0.5, w, h)
-            border.setPen(pg.mkPen("#56d6cf" if active else "#354a60", width=2 if active else 1))
-            border.setZValue(10)
-            canvas.add_overlay(f"page_border_{page.page}", border)
-            label = pg.TextItem(f"Page {page.page}" + (" · active" if active else " · click to select"),
-                                color="#56d6cf" if active else "#a9bbce", anchor=(0, 1), fill="#151e2b")
-            label.setPos(0, offset - .5)
-            label.setZValue(11)
-            canvas.add_overlay(f"page_label_{page.page}", label)
-        width = max(page.image.shape[1] for page in self._pages)
-        height = self._page_offsets[-1] + self._pages[-1].image.shape[0]
-        headroom = max(16, height * .05)
-        canvas._image_bounds = QtCore.QRectF(-0.5, -0.5 - headroom, width, height + headroom)
-
     def _select_at(self, x, y):
         if self.loaded is None:
             return
         page, local_y = self._page_at(x, y)
         if page is None:
             return
-        if page.page != self.loaded.page:
+        if page != self.loaded.page:
             if not self.busy:
-                self.page_spin.setValue(page.page)
+                self.page_spin.setValue(page)
             return
         index = self._hole_near(self.review, (x, local_y))
         if index >= 0:
@@ -1927,8 +2447,11 @@ class InspectionWindow(QtWidgets.QMainWindow):
         page, local_y = self._page_at(x, y)
         if page is not None:
             ix, iy = int(np.floor(x + .5)), int(np.floor(local_y + .5))
-            prefix = f"Page {page.page} | " if self.loaded.pages > 1 else ""
-            self.hover_label.setText(f"{prefix}x={x:.2f}, y={local_y:.2f} px | pixel [{iy}, {ix}] = {page.image[iy, ix]:.6g}")
+            prefix = f"Page {page} | " if self.loaded.pages > 1 else ""
+            # Other pages of the stack: the value when the page is in memory at full resolution.
+            loaded = self.loaded if page == self.loaded.page else self.stack.page(page)
+            value = f" = {loaded.image[iy, ix]:.6g}" if loaded is not None else ""
+            self.hover_label.setText(f"{prefix}x={x:.2f}, y={local_y:.2f} px | pixel [{iy}, {ix}]{value}")
 
     def select_feature(self, index, *, reveal=True, pan=False):
         """Select hole ``index``. ``reveal`` opens the hole tab (image clicks); ``pan`` brings it into view."""
@@ -1939,16 +2462,8 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self._selected_xy = review.seeds_xy[self.selected] + review.origin_xy
         if reveal:
             self.diagnostics.setCurrentWidget(self.feature_tab)
-        row = self.table_model.row_of.get(self.selected)
-        self._syncing_table = True
-        try:
-            if row is None:
-                self.table.clearSelection()
-            elif self.table.currentIndex().row() != row:
-                self.table.selectRow(row)
-                self.table.scrollTo(self.table_model.index(row, 0))
-        finally:
-            self._syncing_table = False
+        self._sync_table_selection()
+        self._update_selection()
         self.feature_spin.blockSignals(True)
         self.feature_spin.setValue(self.selected)
         self.feature_spin.blockSignals(False)
@@ -1990,7 +2505,6 @@ class InspectionWindow(QtWidgets.QMainWindow):
                 value, label = value * scale, name[:-3] + f" ({unit})"
             self.metrics.setItem(row, 0, QtWidgets.QTableWidgetItem(label))
             self.metrics.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{value:.6g}" if np.isfinite(value) else "--"))
-        self._render_image()
         self._draw_detail()
         if pan:
             self._reveal(seed + self._display_offset())
@@ -2028,14 +2542,47 @@ class InspectionWindow(QtWidgets.QMainWindow):
                                   yRange=(point[1] - radius, point[1] + radius), padding=0)
 
     def _update_table(self, *args):
-        if self.review is not None and self.method.currentData() in self.review.measurements:
-            self._syncing_table = True
-            try:
-                self.table_model.set_review(self.review, self.method.currentData(), self.failed_only.isChecked())
-            finally:
-                self._syncing_table = False
-            if self.selected is not None and self.selected in self.table_model.row_of:
-                self.select_feature(self.selected, reveal=False)
+        """A new result rebuilds the table; another method or filter only reorders it (the sort stays)."""
+        review, method = self.review, self.method.currentData()
+        if review is None or method not in review.measurements:
+            return
+        self._syncing_table = True
+        try:
+            if self.table_model.review is review:
+                self.table_model.set_method(method, self.failed_only.isChecked())
+            else:
+                # The sort of the last table carries over to the new result.
+                header = self.table.horizontalHeader()
+                self.table_model.sort_column = max(0, header.sortIndicatorSection())
+                self.table_model.sort_order = header.sortIndicatorOrder()
+                self.table_model.set_review(review, method, self.failed_only.isChecked())
+                # Compact: each column as wide as its name (bold when shown), never squeezed below it.
+                font = QtGui.QFont(header.font())
+                font.setBold(True)
+                metrics = QtGui.QFontMetrics(font)
+                for column in range(self.table_model.columnCount()):
+                    text = self.table_model.headerData(column, QtCore.Qt.Orientation.Horizontal)
+                    width = max(metrics.horizontalAdvance(line) for line in text.splitlines()) + 24
+                    header.resizeSection(column, int(np.clip(width, 140 if column == 3 else 56, 280)))
+                if self.table_model.sort_column >= self.table_model.columnCount():
+                    self.table_model.sort_column = 0
+                    header.setSortIndicator(0, QtCore.Qt.SortOrder.AscendingOrder)
+        finally:
+            self._syncing_table = False
+        self._sync_table_selection()
+
+    def _sync_table_selection(self):
+        """The table's current row follows the selected hole (no row when the filter hides it)."""
+        row = self.table_model.row_of_hole(self.selected) if self.selected is not None else -1
+        self._syncing_table = True
+        try:
+            if row < 0:
+                self.table.clearSelection()
+            elif self.table.currentIndex().row() != row:
+                self.table.selectRow(row)
+                self.table.scrollTo(self.table_model.index(row, 0))
+        finally:
+            self._syncing_table = False
 
     def _table_row_changed(self, current, previous):
         # Clicks, arrow keys and Page keys in the table select the hole of the current row; the table stays.
@@ -2047,9 +2594,10 @@ class InspectionWindow(QtWidgets.QMainWindow):
 
     def _select_table(self, index):
         # A click on another method's CD column shows that method too.
-        if index.column() >= 7:
+        method = self.table_model.method_of_column(index.column())
+        if method is not None and method != self.method.currentData():
             self.selected = int(self.table_model.data(index, QtCore.Qt.ItemDataRole.UserRole))
-            self.method.setCurrentIndex(self.method.findData(self.table_model.extra_methods[index.column() - 7]))
+            self.method.setCurrentIndex(self.method.findData(method))
 
     def _draw_detail(self, *args):
         review = self.review
@@ -2416,6 +2964,9 @@ class InspectionWindow(QtWidgets.QMainWindow):
             event.ignore()
         else:
             self.save_settings()
+            if self.stack is not None:
+                self.stack.close()
+                self.stack = None
             _WINDOWS.discard(self)
             event.accept()
 

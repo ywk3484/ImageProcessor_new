@@ -107,7 +107,22 @@ testing interactively on sample images.
   unchanged, that is P1. Found on the way: tests must never use the real QSettings (they wrote area max 1
   into the registry; cleared, the fixture now uses a temp file); the summary above the image is two fixed
   rows so the zoom does not shift when its text changes. Not done in P0 (P2): C3 sizes, C11 pinned Run.
-- [ ] P1 speed at 40k holes: click < 0.1 s, method switch / layer toggle < 0.2 s, full-view repaint < 0.05 s; the
+- [x] P1 speed at 40k holes: click < 0.1 s, method switch / layer toggle < 0.2 s, full-view repaint < 0.05 s; the
       stack decoded on demand with a memory cap
+  - [x] B2 selection marker of its own; maps cached per result and method (`HoleLayers`)
+  - [x] B1/B3 + F5 CD map and failed cells as rasters at every zoom, centers/contours/pairs for the holes in view
+        only (at most 2,000); CD scale 1-99 %, draggable, Lock
+  - [x] B4 + F2 NumPy table model: fixed column order, names in headers, columns as wide as their names, sort kept
+  - [x] B6 results kept for the open page and the most recent others: at most 3 pages and 3 GB
+  - [x] G1 stack: page sizes read once, file kept open, pages decoded in view (previews zoomed out, full pages
+        zoomed in, 128 MB cap); F fits the page, Shift+F the stack
+  - [x] tests, timing on the 39k page and the 48-page stack, screenshots, docs/workbench.md, commit + push
+  P1 review: on the 39,042-hole page (ten methods, GPU) click 0.03-0.06 s (was 0.8-1.3), method switch 0.05-0.10 s
+  (0.8), layer toggles 0.01-0.05 s (CD colors 1.9), repaint 0.004 s at full view (0.53) and 0.03 s zoomed in with
+  1,551 holes drawn. Memory 1.9 -> 3.0 -> 4.2 -> 4.4 -> 4.3 GB over five pages (one page with ten methods holds
+  1.25 GB, not the 0.47 GB measured with four, so the limit counts bytes as well as pages). Stack of 48 pages:
+  sizes read in 0.1 s, view filled in 0.3-1.2 s between events, repaint 0.004 s, hole click 0.04 s, another page
+  0.12 s, 5 MB of page images. Found on the way: Qt elides a two-line header badly (it cut the unit line), so
+  columns are sized to their names; previews must be averaged like the active page or pages look different.
 - [ ] P2 new layout: session object, Setup steps, hole inspector, bottom tabs, page list next to the stack, Align view
 - [ ] P3 later: open a cd_batch run (run.json settings, pages.csv page list, batch vs workbench mean)
