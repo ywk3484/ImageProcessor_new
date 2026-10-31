@@ -7,8 +7,8 @@ changes on top of 5d61ece). Line numbers below refer to that version.
 
 **What was tested.** Every task (Find features, Measure CD, Pitch + placement, Align images), every dialog, error
 cases and the minimum window size, on the demo image and on a page of your size (2048 x 1378 px, 39,042 holes,
-`artifacts/cd_test/data/stripe1_board1.tif` page 0), on this PC's GPU. A second, independent review was checked and
-merged.
+`artifacts/cd_test/data/stripe1_board1.tif` page 0), on this PC's GPU; afterwards a short check on the synthetic sample
+(`examples/data/synthetic_ch/contact_holes.tif`, 2,805 holes). A second, independent review was checked and merged.
 
 **The five problems that matter most**
 
@@ -53,14 +53,15 @@ merged.
 - The **image** stays in the middle; the **selected hole** is always shown on the right; the **holes table** below
   never disappears when you click.
 - **Setup** lists the steps once, in order (image, holes, CD methods, pitch), each with "ok / changed / not run".
-- **Defaults = the batch's defaults**, remembered between sessions, or loaded from a batch `run.json`.
+- **Defaults = the batch's defaults** (methods, area limits, GPU), remembered between sessions.
 - **Failures per method** are always on screen; every hole can be stepped through with the keyboard.
-- **Pages** come from a list (with your batch's page numbers); zoom, region and selection stay when the page changes.
+- **Pages**: a page list to move through pages, and "Stack vertically" kept and made to handle many pages; pages
+  counted from 0 like the batch; zoom, region and selection stay when the page changes.
 - **Align images** gets its own view where the comparison fills the main image area.
 
 **Build order** (section 5): P0 fixes in the current window (no new layout), P1 speed and memory at 40k holes, P2 the
-new layout, P3 opening a batch run (optional). **Decisions needed** (section 6): page numbering, "Stack vertically",
-P3 now or later.
+new layout; P3 (opening a batch run) later. **Decided** (section 6): pages counted from 0; the page list and "Stack
+vertically" both stay; batch runs later, the goal now is an inspection UI for testing on sample images.
 
 ## 2. How this was reviewed
 
@@ -82,6 +83,9 @@ P3 now or later.
 - Failures on that page: default preset Gradient edge 36,774 (94 %), Half-height 29,021 (74 %), both
   `incomplete_rays`; Gaussian and Log fit 0. Your batch's 10 methods: projection 2,048 (5 %), foot_area 471,
   foot_area_ratio 430, tail_area_norm 23, tail_area 9.
+- Synthetic sample (256 x 768, 2,805 holes): Measure CD 2.7 s in the window (first GPU run), select a hole 0.19 s,
+  switch method 0.09 s; no failures with the default preset or the batch's 10 methods; at full view the markers
+  cover it the same way (B1). Small samples are fast enough today; the speed work (P1) is for pages of your size.
 - Small behaviour checks (results in section 3): PageDown in the table, arrow keys in the table, disabled-button
   colours, the registration error value, the tab label text, the sort arrow, padding 5 vs 3.
 - The second review (no access to these findings) listed 54 items, most of them the same. Its new items were checked
@@ -100,8 +104,8 @@ Each item: what happens (evidence) -> fix direction.
   edge_area, foot_area, foot_area_ratio), `--deblend-tolerance` (not in the workbench). Components of 200-500 px2
   (blobs) are measured here and dropped by the batch, so such a page gets another hole list. (Padding 5 here vs 3 in
   the batch changes no CD: checked for 4 methods on the 39,042-hole page.) -> A "Batch default" preset equal to
-  `cd_batch` (a test pins it to `scripts.cd_batch.ALL_METHODS` and its option defaults); "Load settings from batch
-  run" reads `run.json`.
+  `cd_batch` (a test pins it to `scripts.cd_batch.ALL_METHODS` and its option defaults). Reading a batch run's
+  `run.json` comes later (P3).
 - **A2 critical. The default preset fails on most of your holes, and the screen hides it.** See section 2. The summary
   counts the shown method only (`:1424-1428`); only the first note is shown (`:1269`), so "gradient: incomplete_rays
   (36774)" sits behind "Gaussian deblending reached its iteration limit" (`before_full_view_39k.png`). -> Per-method
@@ -113,7 +117,7 @@ Each item: what happens (evidence) -> fix direction.
   layout, last folder (no `QSettings` anywhere). -> Persist all settings; "Reset to defaults".
 - **A5 major. Page numbers start at 1** ("Page 95", `:681-686`) **while `pages.csv`, `--pages` and `--reference-page`
   start at 0** ("page 94"); `source.json` exports start at 0 again. Going from a batch row to the workbench is off by
-  one. -> One numbering everywhere (decision D1).
+  one. -> Count pages from 0 everywhere, like the batch (decided, section 6).
 - **A6 critical. Compute defaults to CPU** (`:458`) even when the GPU works: Measure CD on your page took 508 s
   instead of 3.9 s, with no progress, no cancel and a window that refuses to close meanwhile. -> Default "Auto".
 - **A7 minor. Hidden and false links between the tasks.** Threshold and padding feed CD (`_workbench_data.py:208-211`)
@@ -276,16 +280,17 @@ Each item: what happens (evidence) -> fix direction.
 
 ### G. Pages and files
 
-- **G1 major. "Stack vertically" loads every page and draws them as one column.** 48 pages become a strip about 90 px
-  wide at full view (`before_stack_48_pages.png`; `_workbench_data.py:129-147`). A 720-page (2 GB) file added 1.9 GB of
-  memory, 2,163 items redrawn on each update and 2.4 s per click (second review). -> Page list with small thumbnails
-  loaded on demand (decision D2).
+- **G1 major. "Stack vertically" does not scale.** It decodes every page up front and draws all of them at full
+  resolution (`_workbench_data.py:129-147`); Fit shows the whole stack, so 48 pages become a strip about 90 px wide
+  (`before_stack_48_pages.png`). A 720-page (2 GB) file added 1.9 GB of memory, 2,163 items redrawn on each update and
+  2.4 s per click (second review). -> Keep it next to the page list (decided, section 6): pages decoded when they come
+  into view, drawn at reduced resolution when zoomed out, memory capped; F fits the active page, Shift+F the stack.
 - **G2 minor (the workbench was not timed on the HDD). Each page change reopens the TIFF and counts its pages**
   (`_workbench_data.py:111-115`), which walks every page header: 0.04 s on the 48-page test file, 7 ms for 720 pages
   on a warm SSD (second review). On this PC's HDD the first walk of a 740-page file's headers took 4.9-5.2 s cold,
   then 0.1-0.3 s (batch notes, `tasks/archive/todo-2026-10.md`). -> Keep the file open; read the page table once.
 - **G3 minor. No overview of pages**: which have holes (no hole-check result), which were measured here. -> Page list
-  (with batch values when a run is loaded, P3).
+  (batch values when a run is loaded: P3, later).
 - **G4 major. A page change resets the view.** Zoom goes back to fit, contrast is re-stretched, the analysis region is
   switched off and re-centred, the bottom tab returns to Results and the selection to hole 0 (`:1105`, `:1115`,
   `:1138-1145`, `:148-156`). One area cannot be followed through pages. -> Keep zoom, region, tab and the selected
@@ -337,12 +342,13 @@ Each item: what happens (evidence) -> fix direction.
    One selected hole and one current method drive all of them; none hides another.
 2. **One page = one set of results.** Holes, CD and pitch of a page live together; looking at one never replaces
    another. Moving between pages keeps what you look at (zoom, region, selected position).
-3. **Measure like the batch.** Batch defaults, remembered settings, settings loadable from `run.json`.
+3. **Same defaults as the batch.** The batch's methods, limits and GPU by default; settings remembered. Reading a
+   batch run comes later (P3).
 4. **Failures first.** Failed counts per method always visible; failed holes one key away.
 5. **Interactive at 40k holes.** Click < 0.1 s, method switch and layer toggles < 0.2 s, repaint at full view
    < 0.05 s; memory bounded.
 6. **One name per thing**: one display name per method, one word for features or holes (the batch says "holes"),
-   one page numbering.
+   pages counted from 0.
 
 ### 4.2 Window
 
@@ -362,7 +368,7 @@ under the steps so it never scrolls away; Ctrl+Enter runs the open step.
    rejected boxes are image layers.
 3. **CD methods**: preset (Batch default / Spot widths / Raw cell / Custom); methods grouped (spot fits, radial edges,
    projections, area methods, raw-cell methods, calibrated) with a short name and one line each, select all / none;
-   "Parameters" folds out the parameters of the ticked methods only; "Load from batch run...".
+   "Parameters" folds out the parameters of the ticked methods only.
 4. **Pitch**: centers of which method, lattice, averaging, design pitch; "Advanced" folds out hints and stagger
    direction (replaces the indexing dialog).
 
@@ -401,12 +407,17 @@ A tab next to Setup holds the **Pages** list (4.7).
 
 ### 4.7 Pages
 
-List of pages: number (decision D1), small thumbnail made on demand, marks for "measured here" and failures; with a
-batch run (P3): status, holes, mean CD of the current method, hole-check error. The TIFF stays open with a small cache
-of decoded pages; results are kept for the last few pages only. Zoom, region, bottom tab and the selected position
-stay when the page changes; contrast stays when locked. PageUp / PageDown when the image or list has focus; optional
-"Measure and next page". Replaces "Stack vertically" (D2); a later "compare pages" could show 2 pages side by side
-with linked zoom.
+Both ways of moving through pages stay (section 6), linked: the list follows the stack and the stack follows the list.
+
+- **Page list**: page number counted from 0, small thumbnail made on demand, marks for "measured here" and failures.
+  PageUp / PageDown when the image or list has focus; optional "Measure and next page".
+- **Stack vertically**: all pages in one view, as today; analysis runs on the active, outlined page and clicking a
+  page makes it active. Pages are decoded when they come into view and drawn at reduced resolution when zoomed out
+  (full resolution only for pages in view), with a memory cap. F fits the active page, Shift+F the whole stack.
+
+The TIFF stays open with a small cache of decoded pages; results are kept for the last few pages only. Zoom, region,
+bottom tab and the selected position stay when the page changes; contrast stays when locked. With a batch run (P3,
+later) the list adds status, holes, mean CD and hole-check error.
 
 ### 4.8 Align view
 
@@ -435,7 +446,7 @@ list, and stays when the reference page changes.
 |---|---|
 | Ctrl+O, drop a file | open |
 | Ctrl+Enter (either Enter key) | run the open Setup step |
-| F / Z | fit / zoom to the selected hole |
+| F / Shift+F / Z | fit the page / fit the whole stack / zoom to the selected hole |
 | Up / Down in the table, or J / K | previous / next hole in table order |
 | N / Shift+N | next / previous failed hole (current method) |
 | PageUp / PageDown | previous / next page (image or page list focused) |
@@ -458,7 +469,7 @@ subpx/workbench/
   session.py       Session(QObject): open file + page cache, page, settings, results per page (last few pages),
                    selected hole, current method; signals page_changed, results_changed, selection_changed,
                    method_changed, settings_changed (with which steps are now stale), job_* signals
-  settings.py      settings dataclass, validation, QSettings load/save, presets, run.json import
+  settings.py      settings dataclass, validation, QSettings load/save, presets (run.json import later, P3)
   names.py         display names and one-line descriptions of methods, statuses and metrics
   jobs.py          one worker, progress, cancel (discard), errors as plain text + traceback
   canvas.py        image view with layers and level of detail
@@ -493,7 +504,8 @@ commit + push.
       presets, compute default Auto
 - [ ] A4 settings and window layout saved with `QSettings`; "Reset to defaults"
 - [ ] F1 one display-name table for all methods, used everywhere
-- [ ] E4 no pre-selected hole; A5 page numbering per D1
+- [ ] E4 no pre-selected hole; A5 pages counted from 0 (page box, page labels, hover, status line, exports)
+- [ ] E9 (part) drop a file on the window to open it (testing many sample files)
 
 Done when: tests cover each fix (style differs when disabled, PageDown in the table keeps the page, arrow keys select,
 failed counts shown, zoom and region survive a page change, settings survive a new window, batch preset equals
@@ -504,24 +516,26 @@ failed counts shown, zoom and region survive a page change, settings survive a n
 - [ ] B1 / B3 raster maps far out, visible-holes-only vectors close in; F5 colorbar and range
 - [ ] B4 NumPy-backed table model built once per result; filters and sort by index arrays; F2 sort kept
 - [ ] B6 results kept for the last few pages only
+- [ ] G1 Stack vertically: pages decoded when in view, reduced resolution when zoomed out, memory cap; F / Shift+F
 
 Done when, on the 39,042-hole page: click < 0.1 s, method switch < 0.2 s, layer toggle < 0.2 s, full-view repaint
 < 0.05 s, memory stops growing after the page limit, and the full-view screenshot shows the image with a CD map
-instead of a solid block.
+instead of a solid block. Stack vertically on the 48-page test file: click < 0.1 s, repaint < 0.05 s, and memory
+does not grow with the number of pages beyond the reduced previews.
 
 **P2. New layout**
 - [ ] Session object and package split (4.11); tests moved to the new widgets
 - [ ] Docks: Setup steps with status marks and a pinned Run button (4.3, C11), hole inspector (4.5), bottom tabs
       (4.6); dialogs removed (C7)
 - [ ] Stale banner with Re-run / Revert (D2); Cancel and stage progress (B5)
-- [ ] Pages list replacing "Stack vertically" (4.7, D2, G5); TIFF kept open (G2)
+- [ ] Page list next to "Stack vertically", the two linked (4.7, G5); TIFF kept open (G2)
 - [ ] Align view (4.8); Pitch tab with method choice and clickable points (I1-I3)
 - [ ] Menus, recent files, drop to open, shortcuts in tooltips, table right-click menu (E9, E11); export dialog and
       copy rows (J1); ask before discarding results (J2)
 
 Done when these walk-throughs work by keyboard and mouse as described, each checked with a screenshot:
-1. Open a 700-page TIFF, go to the page a batch row names, measure with batch settings, see the failures per method,
-   step through 10 failed holes with N without touching the table.
+1. Drop a sample on the window (the 48-page test file), pick page 5 in the page list, measure with the batch's
+   methods, see the failures per method, step through 10 failed holes with N without touching the table.
 2. Change area max 200 -> 150: banner appears; Revert restores; Re-run updates.
 3. On one hole, compare all methods: colours in the method table match the contours; clicking a method changes the
    profile.
@@ -529,19 +543,21 @@ Done when these walk-throughs work by keyboard and mouse as described, each chec
 5. Pitch from the current CD without a hidden re-measure; click a placement point to find its holes.
 6. Align three pages in turn with one reference page: flicker on the main image; shift and hole-check error shown;
    the moving image is never reopened by hand.
+7. Turn on Stack vertically on the 48-page file: Shift+F shows the whole stack, F the active page; clicking another
+   page makes it active and the page list follows.
 
-**P3. Open a batch run (only if D3 = now)**
-- [ ] Open a `cd_batch` output folder: settings from `run.json`, page list from `pages.csv`
+**P3. Open a batch run (later, decided 2026-10-31)**
+- [ ] Open a `cd_batch` output folder: settings from `run.json`, page list from `pages.csv`; "Load settings from
+      batch run" in Setup
 - [ ] Measure a listed page with the run's settings and show the batch mean next to the workbench mean (they should
       agree; a difference means different settings or code)
 
-## 6. Decisions needed
+## 6. Decisions (answered 2026-10-31)
 
-- **D1 Page numbers.** Recommended: count from 0 like `pages.csv`, `--pages` and `--reference-page`, so a batch row's
-  page number can be typed as is. Alternative: count from 1 and show "(0-based: 94)" next to it.
-- **D2 "Stack vertically".** Recommended: replace it with the page list (and later 2 pages side by side). Keep it only
-  if you use it for something the list would not cover.
-- **D3 Opening a batch run (P3).** In this rework, or later?
+1. **Page numbers**: counted from 0 everywhere, like `pages.csv`, `--pages` and `--reference-page`.
+2. **Pages**: both are needed, page navigation (the page list) and "Stack vertically". The stack stays and is made to
+   handle many pages (4.7).
+3. **Opening a batch run (P3)**: later. The goal now is an inspection UI for testing interactively on sample images.
 
 Not changed by this plan: CD methods and their numbers, method keys and library labels, `cd_batch`, the public
 `launch_workbench` call.

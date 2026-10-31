@@ -79,15 +79,17 @@ their stop is from the end, which cure wins there; the `f` spread here mixes two
 nothing. Step 2 (the cure into the library, CPU + GPU, as default; a deblend version key in run.json; workers per
 GPU and power-plan advice) waits for those lines and its own approval.
 
-# Workbench UI/UX rework (review 2026-10-31; waiting for the user's decisions and approval)
+# Workbench UI/UX rework (review 2026-10-31; decisions made, implementation in a new session)
 
 Review, target layout and phases: `docs/superpowers/specs/2026-10-31-workbench-ux-review-design.md`. Baseline:
 `scripts/workbench_timing.py` on the 39,042-hole page (click 0.9-2.0 s, full-view repaint 0.55 s; default preset:
-gradient 94 % and halfmax 74 % failed). No library change; CD numbers unchanged.
+gradient 94 % and halfmax 74 % failed). No library change; CD numbers unchanged. Goal now: an inspection UI for
+testing interactively on sample images.
 
-- [ ] Decisions D1 page numbering (0 like pages.csv?), D2 replace "Stack vertically" by a page list?, D3 open a
-      batch run now or later?
+- [x] Decisions (user, 2026-10-31): pages counted from 0 like pages.csv; page navigation AND "Stack vertically" both
+      kept (the stack made to handle many pages); opening a batch run later
 - [ ] P0 fixes in the current window (spec section 5)
-- [ ] P1 speed at 40k holes: click < 0.1 s, method switch / layer toggle < 0.2 s, full-view repaint < 0.05 s
-- [ ] P2 new layout: session object, Setup steps, hole inspector, bottom tabs, page list, Align view
-- [ ] P3 (if D3 = now) open a cd_batch run: run.json settings, pages.csv page list, batch vs workbench mean
+- [ ] P1 speed at 40k holes: click < 0.1 s, method switch / layer toggle < 0.2 s, full-view repaint < 0.05 s; the
+      stack decoded on demand with a memory cap
+- [ ] P2 new layout: session object, Setup steps, hole inspector, bottom tabs, page list next to the stack, Align view
+- [ ] P3 later: open a cd_batch run (run.json settings, pages.csv page list, batch vs workbench mean)

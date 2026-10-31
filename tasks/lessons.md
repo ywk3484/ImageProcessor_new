@@ -144,3 +144,7 @@
   round 36 by the same 1e-3 rule, 1 nm short of where the loop ends; cures compared with it looked like different
   fixed points. Run the reference to a stop the drift cannot meet by chance (here 1e-5; the plain loop, Anderson and
   a wider start then agree within 0.01 nm) and judge each cure by its distance from that end point.
+- **Fix a feature the user has; do not propose removing it.** The workbench review recommended replacing "Stack
+  vertically" with a page list because it was slow and narrow at full view; the user needs both. When an existing
+  feature is slow or awkward, propose making it work (load on demand, a better fit) and add the new one beside it;
+  removing it is the user's call, asked as a plain question with what it would cost them.
