@@ -41,7 +41,8 @@ class AnalysisReview:
     detection: DetectionReview | None = None
     cd: CDResult | None = None
     patterns: dict[str, PatternPitchResult] = field(default_factory=dict)
-    notes: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)  # information, e.g. component counts
+    warnings: list[str] = field(default_factory=list)  # failures and limits reached
     seconds: float = 0.0
 
     @property
@@ -69,6 +70,8 @@ class RegistrationReview:
     correlation: np.ndarray
     rmse_before: float
     rmse_after: float
+    hole_check_error: float = float("nan")
+    hole_check_mode: str = "centered"
 
 
 def demo_image():
@@ -208,16 +211,18 @@ def analyze_image(image, parameters, *, operation="cd", bounds=None):
         keys = ("methods", "background", "seeds", "threshold", "invert", "area_min", "area_max", "pad",
                 "n_angles", "radial_step", "smooth_sigma", "fit_fraction", "pixel_size", "unit", "backend",
                 "half_area_level", "half_area_peak_pixels", "tail_area_level", "tail_window", "deblend_iterations",
-                "nominal_cd", "psf_fwhm", "dark_level")
-        review.cd = measure_cds(image, **{key: parameters[key] for key in keys})
+                "deblend_tolerance", "nominal_cd", "psf_fwhm", "dark_level")
+        options = {key: parameters[key] for key in keys if key != "deblend_tolerance"}
+        options["deblend_tolerance"] = parameters.get("deblend_tolerance", 1e-3)  # measure_cds's default
+        review.cd = measure_cds(image, **options)
         if review.cd.meta.get("deblend_converged") is False:
-            review.notes.append("Gaussian deblending reached its iteration limit. Inspect fit residuals and statuses.")
+            review.warnings.append("Gaussian deblending reached its iteration limit. Inspect fit residuals and statuses.")
         for name, measured in review.cd.measurements.items():
             statuses, counts = np.unique(measured.status[~measured.valid], return_counts=True)
             if len(statuses):
-                review.notes.append(f"{name}: " + ", ".join(f"{s} ({c})" for s, c in zip(statuses, counts)))
+                review.warnings.append(f"{name}: " + ", ".join(f"{s} ({c})" for s, c in zip(statuses, counts)))
     if not len(review.seeds_xy):
-        review.notes.append("No features found. Review polarity, segmentation, area limits and region.")
+        review.warnings.append("No holes found. Review polarity, segmentation, area limits and region.")
     if operation == "pitch":
         source = review.cd
         if source is None:
@@ -226,7 +231,7 @@ def analyze_image(image, parameters, *, operation="cd", bounds=None):
             review.patterns = analyze_pitch(source, **parameters["pitch_options"])
         except ValueError as exc:
             # Keep the computed CD and segmentation available for debugging.
-            review.notes.append(f"Pitch indexing failed: {exc}")
+            review.warnings.append(f"Pitch indexing failed: {exc}")
     review.seconds = perf_counter() - started
     return review
 
@@ -327,7 +332,46 @@ def projection_diagnostic(result, method, index, axis="x"):
     return dict(grid=grid, values=values, slope=slope, samples=profile, left=grid[left], right=grid[right], span=span)
 
 
-def register_images(reference, moving, *, upsample_factor=20):
+# The batch's hole-check thresholds per mode (scripts/cd_batch.py --max-error defaults).
+HOLE_CHECK_MAX_ERROR = {"centered": 0.8, "raw": 0.3}
+
+
+def hole_check_error(reference, image, mode="centered"):
+    """The batch's hole-check error between two images (scripts/cd_batch.py ``PccCheck``; a test pins them equal).
+
+    scikit-image's whole-pixel phase-correlation error with ``normalization=None``: 0 when ``image`` is the
+    reference at some shift, towards 1 for unrelated images. ``centered`` removes each image's mean first and
+    rejects constant images (error 1); ``raw`` does not. Images of different sizes are compared on the
+    centre part both share.
+    """
+    if mode not in HOLE_CHECK_MAX_ERROR:
+        raise ValueError("hole-check mode must be 'raw' or 'centered'")
+    reference, image = np.asarray(reference, dtype=np.float64), np.asarray(image, dtype=np.float64)
+    h, w = min(reference.shape[0], image.shape[0]), min(reference.shape[1], image.shape[1])
+
+    def prepare(data):
+        y0, x0 = (data.shape[0] - h) // 2, (data.shape[1] - w) // 2
+        data = data[y0:y0 + h, x0:x0 + w]
+        if mode == "raw":
+            return data, float((data * data).sum())
+        mean = data.mean()
+        data = data - mean
+        energy = float((data * data).sum())
+        scale = max(abs(float(mean)), 1.0)
+        if not np.isfinite(energy) or energy <= data.size * (32 * np.finfo(float).eps * scale) ** 2:
+            return data, 0.0
+        return data, energy
+
+    (ref, ref_energy), (mov, mov_energy) = prepare(reference), prepare(image)
+    if mode == "centered" and (ref_energy <= 0 or mov_energy <= 0):
+        return 1.0
+    cc = np.fft.irfft2(np.fft.rfft2(ref) * np.conj(np.fft.rfft2(mov)), s=ref.shape)
+    peak, amp = float(np.abs(cc).max()), ref_energy * mov_energy
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return float(np.sqrt(abs(1.0 - peak * peak / amp))) if amp > 0 else float("nan")
+
+
+def register_images(reference, moving, *, upsample_factor=20, hole_check_mode="centered"):
     from scipy.ndimage import shift
     from .registration import estimate_shift
 
@@ -348,7 +392,8 @@ def register_images(reference, moving, *, upsample_factor=20):
     correlation = np.fft.fftshift(np.abs(np.fft.ifft2(cross)))
     return RegistrationReview(result, aligned, overlap, before, after, correlation,
                               float(np.sqrt(np.mean(before[overlap] ** 2))),
-                              float(np.sqrt(np.mean(after[overlap] ** 2))))
+                              float(np.sqrt(np.mean(after[overlap] ** 2))),
+                              hole_check_error(ref, mov, hole_check_mode), hole_check_mode)
 
 
 def export_review(review, directory):
@@ -376,5 +421,5 @@ def export_review(review, directory):
                                      profile.counts[i] if i < len(profile.counts) else ""])
     manifest = dict(parameters=review.parameters, origin_xy=review.origin_xy.tolist(),
                     coordinates="CD arrays are crop-local [x, y] pixels. Add origin_xy to obtain loaded-image coordinates.",
-                    notes=review.notes, seconds=review.seconds)
+                    notes=review.notes, warnings=review.warnings, seconds=review.seconds)
     (directory / "workbench.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

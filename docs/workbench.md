@@ -22,29 +22,55 @@ subpx-workbench
 
 Choose a task tab: **Find features**, **Measure CD**, **Pitch + placement** or
 **Align images**. Its controls and named action stay beside the image; results
-stay below it. **Ctrl+Enter** runs the current task. Image overlays and the
-contrast histogram are directly available beside the image.
+stay below it. **Ctrl+Enter** (either Enter key) runs the current task. A
+disabled Run button says why directly under it (for example "Area min (300) is
+above area max (200)"), and the field at fault gets a red border. Image overlays
+and the contrast histogram are directly available beside the image.
 
-CD offers three measurement presets: **Compare spot widths** (Gaussian,
-log-quadratic, gradient and half-height), **Compare raw-cell widths** (local
-projection and half-area), and **Calibrated hole diameter** (disk and flux ratio).
-Presets select compatible methods and background settings together. Calibration
-fields appear for calibrated methods, and measurement waits for the required
-nominal CD or PSF value. **Choose methods and parameters** customizes methods;
-only parameters used by the selected methods appear in that dialog.
+**The defaults are the batch's defaults** (`scripts/cd_batch.py`): the
+**Batch default** preset (its ten methods: Gaussian fit, Projection, Half area,
+Half area min level, Half area min level avg peak, Tail area, Tail area no
+level, Edge area, Foot area, Foot area image ratio), area 3-200 px², padding 3,
+deblend iterations 30 and stop tolerance 0.001, and **Compute: Auto** (the GPU
+when CuPy works). A test pins them to `cd_batch`, so the workbench measures a page
+as the batch does. Two more presets compare **Spot widths** (Gaussian, log fit,
+gradient, half-height) and **Raw-cell widths**. The calibrated methods (blurred
+hole fit, flux ratio) need a nominal CD or PSF and are only in the full list of
+**Choose methods and parameters**; only parameters of the ticked methods appear
+there. Every method has one display name everywhere; its library key and label
+are in tooltips and exports.
 
-The **Results** table compares CDs across methods. Click a CD value to select
-that method and feature in the **Selected feature** tab, with its original pixels,
-method input, contour and profile. **Metrics and notes** contains all numerical
-diagnostics; **Method definition** explains assumptions. Drag the splitters or
-use **Expand** for more diagnostic room. Completed measurements are retained
-when switching tasks or pages, until another image is opened.
+**Settings are remembered** between sessions (all controls, the task, the window
+size and splitters, the last folder). **Reset settings** restores the defaults
+above; the image and results stay.
+
+The line above the image always lists the **failed holes of every method**
+(e.g. "Failed: Projection 2,048 (5 %) · Foot area 471 (1 %)"), not only of the
+method shown. The **Results** table lists the holes. Click a row, or move with
+the arrow and Page keys, to select its hole; the table stays, and the image pans
+(keeping the zoom) when the hole is outside the view. Click another method's CD
+column to show that method. Clicking a hole on the image opens the **Selected
+feature** tab with its original pixels, method input, contours and profile. No
+hole is selected until you click one. **Metrics and notes** contains all
+numerical diagnostics; **Method definition** explains assumptions.
+
+Errors appear as one plain line in a red banner over the results, which stay
+visible; **Details** opens the full message in **Activity**. Unexpected errors in
+the window itself go to the same banner. Drop an image file on the window to open
+it.
 
 ## Image review
 
 - Open TIFF, PNG, JPEG, BMP or a two-dimensional `.npy` array. Multipage files
   reveal a navigation bar above the image. Use **Previous**, **Next**, the
-  one-based **Page** control, or **Page Up / Page Down**.
+  **Page** box, or **Page Up / Page Down** while the image or the page bar has
+  focus (in the table they scroll the table). **Pages are counted from 0**, as in
+  the batch's `pages.csv`, `--pages` and `--reference-page`.
+- Changing the page keeps the zoom, the analysis region, the lower tab, the image
+  view, the selected position (after measuring, the hole at that position is
+  selected) and the moving image of **Align images**, so one area can be followed
+  through the pages. Tick **Lock** under the histogram to keep the contrast too;
+  otherwise each page is stretched to its own 1-99.5 %.
 - Enable **Stack vertically** to display all pages together, in file order.
   Click any page to make it active; its outline turns teal. Pages may have
   different dimensions or numeric types. They are displayed separately, with
@@ -55,8 +81,8 @@ when switching tasks or pages, until another image is opened.
   coordinates. **Fit image** fits all displayed pages.
 - Stacking loads all pages in a background worker and caches them until another
   file is opened. Turning it off returns to the active page without discarding
-  its measurements. Returning to a measured page restores its analysis, selected
-  feature and analysis region. Registration resets when the reference page changes.
+  its measurements. Returning to a measured page restores its analysis. An
+  alignment result resets when the reference page changes; the moving image stays.
   For files too large to hold all pages in memory, use individual-page mode.
   A multidimensional array within a single TIFF page must first be reduced to
   a two-dimensional or RGB(A) image.
@@ -73,17 +99,17 @@ when switching tasks or pages, until another image is opened.
   analysis uses only that crop. Its boundaries can clip features, affect seed
   detection and exclude cells; review the region edges. Pixel centers have
   integer coordinates, x is the column and y increases down the image.
-- In **Scale and compute**, set the length per pixel and its unit together before
+- In **Scale and compute**, set the pixel size and its unit together before
   measurement. The UI displays calibrated lengths and areas; original result arrays
-  retain pixel units. CPU is the default; Auto and GPU use existing dispatch.
+  retain pixel units. Auto (the default) uses the GPU when available, as the batch.
 
 ![TIFF pages stacked vertically with an outlined active page](images/workbench_stack.png)
 
 ## Find patterns
 
 Choose **Find features**, adjust threshold, component area limits and center
-refinement, then click **Find features**. The preview switches to the threshold
-mask. **Adjust** beside CD's feature filter takes you directly to this task.
+refinement, then click **Find features**. The image view stays as you set it.
+**Adjust** beside CD's feature filter takes you directly to this task.
 Switch the image view to **Threshold mask** or **Component
 labels** and enable **Rejected boxes** to see components outside the area limits.
 Click the image or a measurement-table row to select a feature. The inspector
@@ -115,6 +141,9 @@ The inspector compares calibrated CD and status across methods. It also shows
 the selected method's metrics, full cell area and mean original cell intensity.
 **Next failed** and **Show failed measurements only** help review problems.
 Failed measurements retain their status and NaN values, with no seed fallback.
+Below the results table, warnings (failures per method and status, deblending
+stopped at its iteration limit, no holes, pitch indexing failed) are listed in
+amber, information (component counts, crops) in grey.
 
 The **Selected feature** tab shows original pixels, the method's input and
 overlaid method contours. The emphasized contour is the selected method.
@@ -154,7 +183,7 @@ It supports square/rectangular and staggered indexing, row/column averaging,
 pitch hints, a selected reference feature and a nominal x/y pitch.
 
 Gold links are the actual x pairs; purple links are the y pairs in the selected
-averaging bands. A star marks the calculation's reference. The **Pitch &
+averaging bands. A star marks the calculation's reference. The **Pitch +
 placement** tab shows interval pitch and cumulative placement error for both
 axes, with pair counts, selected bands and the baseline source.
 
@@ -167,20 +196,25 @@ spread across contributing pairs within an interval, not repeated-image
 precision or uncertainty of the mean. Irregular patterns can fail lattice
 indexing; the CD results and diagnostic notes remain available.
 
-## Image registration
+## Align images
 
-Choose **Align images**, open a moving image, select its page and subpixel factor,
-then click **Align images**. The action is enabled once a moving image is ready. The two pages
-must have matching dimensions. Registration always uses those full pages,
-independently of the analysis region or stacked display.
+Choose **Align images**, open a moving image (or **Use this file** for a page of
+the open file, chosen in **Moving page**, counted from 0), set the subpixel factor,
+then click **Align images**. The two pages must have matching dimensions.
+Alignment always uses those full pages, independently of the analysis region or
+stacked display. The moving image stays when the reference page changes, so
+several pages can be aligned to it in turn.
 
 The CPU phase-correlation result is the shift **to apply** to the moving image,
-in `[dy, dx]` pixels. The lower tab shows before/after differences on the same
-intensity scale and the integer-lag phase correlation. Switch to the aligned
+in `[dy, dx]` pixels. The **Align** tab shows before/after differences on the
+same intensity scale and the integer-lag phase correlation. Switch to the aligned
 moving image or a 50% blend to inspect alignment directly. RMSE is calculated
-before and after on the same valid overlap; padding is excluded. The normalized
-phase-correlation error is reported separately. Repetitive patterns may have
-ambiguous correlation peaks.
+before and after on the same valid overlap; padding is excluded. The **hole
+check** is the batch's (`cd_batch.py`, same function, pinned by a test):
+**centered** (default) passes below 0.8, **raw** below 0.3. When it fails, the
+batch would skip the page as "no holes" and the shift may mean nothing; the
+status turns amber. Repetitive patterns may have ambiguous correlation peaks
+(shifts by whole pitches).
 
 ## Results and responsiveness
 
@@ -190,9 +224,10 @@ ambiguous correlation peaks.
   labels, area decisions and global center coordinates.
 - Per-method, per-axis pitch CSVs, including node positions, pitch, pair spread,
   counts, integrated distance and placement error.
-- `workbench.json` with analysis parameters, elapsed time, notes and crop origin;
-  `source.json` with image paths, zero-based active page, total page count,
-  display mode (`page` or `stack`) and registration metadata when present.
+- `workbench.json` with analysis parameters, elapsed time, notes, warnings and
+  crop origin; `source.json` with image paths, zero-based active page, total page
+  count, display mode (`page` or `stack`) and alignment metadata (shift, RMSE,
+  hole-check error and mode) when present.
 - `registration.npz` with shift, aligned image, valid overlap, difference images
   and correlation when image registration has been calculated.
 
@@ -238,7 +273,14 @@ $env:QT_QPA_PLATFORM = "offscreen"
 .\.venv\Scripts\python.exe -m pytest tests/test_workbench_data.py tests/test_workbench.py -q
 ```
 
-Tests cover scientific image precision, mixed-size/mixed-dtype TIFF pages,
+The tests use their own settings file, never your saved settings.
+`scripts/workbench_timing.py` times clicks, method switches and repaints on a
+page of your size (default: `artifacts/cd_test/data/stripe1_board1.tif`).
+
+Tests cover the batch defaults, remembered settings, disabled styles and Run
+reasons, Page keys scoped to the image, table keyboard selection and panning,
+per-method failure counts, the state kept across pages, the batch's hole check,
+the error banner, scientific image precision, mixed-size/mixed-dtype TIFF pages,
 page navigation and vertical stacking, page-local overlays/crops/exports,
 stack loading failures, task controls, compatible presets, calibration guidance,
 method comparison selection, task/page result retention, crops and coordinate origins,

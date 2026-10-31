@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -37,7 +38,10 @@ def main(argv=None):
     from subpx.workbench import InspectionWindow
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    window = InspectionWindow()
+    # A throw-away settings file: the defaults are timed and the user's saved settings stay untouched.
+    settings_dir = tempfile.TemporaryDirectory()
+    settings = QtCore.QSettings(str(Path(settings_dir.name) / "workbench.ini"), QtCore.QSettings.Format.IniFormat)
+    window = InspectionWindow(settings=settings)
     window.show()
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)
@@ -91,6 +95,7 @@ def main(argv=None):
     timed("show failed only", lambda: window.failed_only.setChecked(True))
     timed("sort table by CD", lambda: window.table.sortByColumn(4, QtCore.Qt.SortOrder.DescendingOrder))
     window.close()
+    settings_dir.cleanup()
 
 
 if __name__ == "__main__":

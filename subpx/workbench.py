@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+from html import escape as html_escape
+import json
 from pathlib import Path
+import re
 import sys
 import traceback
+import weakref
 
 import numpy as np
 
@@ -21,7 +25,7 @@ except ImportError as exc:
     raise ImportError('The workbench requires PyQt6 and pyqtgraph. Install: pip install -e ".[analysis,viewer]"') from exc
 
 from ._workbench_data import (
-    AnalysisReview, LoadedImage, analyze_image, analyze_patterns, cell_boundary, demo_image,
+    HOLE_CHECK_MAX_ERROR, AnalysisReview, LoadedImage, analyze_image, analyze_patterns, cell_boundary, demo_image,
     export_review, feature_input, feature_origin, grayscale, load_image, load_pages, projection_diagnostic,
     radial_diagnostic, register_images,
 )
@@ -40,18 +44,93 @@ METHOD_HELP = {
     "flux_ratio": "Hole light divided by its own fitted background minus detector dark level. Requires a nominal CD or PSF calibration. A calibration derived per image should not be used to compare image means.",
 }
 AREA_HELP = "The peak-connected region above the method's threshold is measured on a 4x cubic enlargement. Equivalent CD = 2 sqrt(area / pi). The outline, threshold and local level depend on the selected method; x/y widths use area and second moments."
+# The default methods of scripts/cd_batch.py (ALL_METHODS of scripts/cd_report.py); a test pins them.
+BATCH_METHODS = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area",
+                 "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
 RECIPES = {
-    "spot": ("Compare spot widths", ("gaussian", "logquad", "gradient", "halfmax")),
-    "local": ("Compare raw-cell widths", ("local_projection", "local_half_area")),
-    "hole": ("Calibrated hole diameter", ("disk", "flux_ratio")),
+    "batch": ("Batch default", BATCH_METHODS),
+    "spot": ("Spot widths", ("gaussian", "logquad", "gradient", "halfmax")),
+    "local": ("Raw-cell widths", ("local_projection", "local_half_area")),
 }
-METHOD_NAMES = {"gaussian": "Gaussian fit", "logquad": "Log fit", "gradient": "Gradient edge",
-                "halfmax": "Half-height", "local_projection": "Raw-cell projection",
-                "local_half_area": "Raw-cell half-area", "disk": "Blurred-hole fit", "flux_ratio": "Flux ratio"}
+# One display name per method. Library keys and labels stay in tooltips and exports.
+METHOD_NAMES = {
+    "gaussian": "Gaussian fit", "logquad": "Log fit", "gradient": "Gradient edge", "halfmax": "Half-height",
+    "disk": "Blurred-hole fit", "flux_ratio": "Flux ratio", "projection": "Projection", "half_area": "Half area",
+    "half_area_min": "Half area, min level", "half_area_min_avg": "Half area, min level, avg peak",
+    "tail_area": "Tail area", "tail_area_norm": "Tail area, no level", "edge_area": "Edge area",
+    "foot_area": "Foot area", "foot_area_ratio": "Foot area, image ratio",
+    "local_projection": "Raw-cell projection", "local_half_area": "Raw-cell half area",
+    "local_half_area_min_avg": "Raw-cell half area, min level, avg peak", "local_tail_area": "Raw-cell tail area",
+    "pixel_half_area": "Pixel half area", "pixel_half_area_min_avg": "Pixel half area, min level, avg peak",
+    "pixel_tail_area": "Pixel tail area", "detection": "Detected centers",
+}
+CALIBRATED_METHODS = {"disk", "flux_ratio"}
 COMMON_SETTINGS = ("threshold", "invert", "area_min", "area_max", "pad", "backend", "pixel_size", "unit")
 CD_SETTINGS = ("methods", "background", "seeds", "n_angles", "radial_step", "smooth_sigma", "fit_fraction",
                "half_area_level", "half_area_peak_pixels", "tail_area_level", "tail_window", "deblend_iterations",
-               "nominal_cd", "psf_fwhm", "dark_level")
+               "deblend_tolerance", "nominal_cd", "psf_fwhm", "dark_level")
+SETTINGS_KEY = "workbench/v1"
+
+
+def method_name(key):
+    return METHOD_NAMES.get(key, key)
+
+
+def plain_error(detail):
+    """The last line of a traceback without the exception class, e.g. 'Area max is below area min.'"""
+    lines = [line for line in str(detail).strip().splitlines() if line.strip()]
+    line = lines[-1].strip() if lines else "Unknown error"
+    match = re.match(r"^[\w.]*(?:Error|Exception|Exit)\w*: (.+)$", line)
+    return match.group(1) if match else line
+
+
+_WINDOWS = weakref.WeakSet()
+_previous_hook = None
+
+
+def _exception_hook(kind, value, tb):
+    """Errors raised in click or redraw handlers reach the open windows' error banner and log."""
+    detail = "".join(traceback.format_exception(kind, value, tb))
+    for window in list(_WINDOWS):
+        try:
+            window._show_error(detail, context="Unexpected error")
+        except Exception:
+            pass
+    (_previous_hook or sys.__excepthook__)(kind, value, tb)
+
+
+def _arrow_images():
+    """Spin-box arrow images drawn once per process (a styled spin box shows no arrows of its own)."""
+    import tempfile
+
+    folder = Path(tempfile.gettempdir()) / "subpx-workbench"
+    folder.mkdir(exist_ok=True)
+    paths = []
+    for name, points in (("up", ((1, 6), (5, 2), (9, 6))), ("down", ((1, 2), (5, 6), (9, 2)))):
+        path = folder / f"arrow_{name}.png"
+        image = QtGui.QImage(10, 8, QtGui.QImage.Format.Format_ARGB32)
+        image.fill(QtCore.Qt.GlobalColor.transparent)
+        painter = QtGui.QPainter(image)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QColor("#a9bbce"))
+        painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(*point) for point in points]))
+        painter.end()
+        image.save(str(path))
+        paths.append(path.as_posix())
+    return paths
+
+
+def _install_exception_hook():
+    global _previous_hook
+    if sys.excepthook is not _exception_hook:
+        _previous_hook, sys.excepthook = sys.excepthook, _exception_hook
+
+
+def no_si_prefix(plot_item):
+    """Pixel axes read 'x (px)', never 'x (kpx)' or 'y (mpx)'."""
+    for name in ("bottom", "left"):
+        plot_item.getAxis(name).enableAutoSIPrefix(False)
 
 
 class TaskTabs(QtWidgets.QTabBar):
@@ -94,6 +173,9 @@ class ImageCanvas(QtWidgets.QWidget):
         self.plot = pg.PlotWidget(background="#0c121b")
         self.plot.setLabel("bottom", "x", units="px")
         self.plot.setLabel("left", "y", units="px")
+        no_si_prefix(self.plot.getPlotItem())
+        # Page keys act on the image only when it has focus; a click gives it focus.
+        self.plot.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.plot.setAspectLocked(True)
         self.plot.invertY(True)
         self.plot.showGrid(x=True, y=True, alpha=0.08)
@@ -108,7 +190,10 @@ class ImageCanvas(QtWidgets.QWidget):
             self.histogram.setMaximumWidth(125)
             self.histogram.setImageItem(self.image_item)
             self.histogram.gradient.loadPreset("grey")
-            layout.addWidget(self.histogram)
+            self.side_layout = QtWidgets.QVBoxLayout()
+            self.side_layout.setContentsMargins(0, 0, 0, 0)
+            self.side_layout.addWidget(self.histogram, 1)
+            layout.addLayout(self.side_layout)
         self.overlays = {}
         self.context_images = []
         self._image_key = None
@@ -132,9 +217,9 @@ class ImageCanvas(QtWidgets.QWidget):
             point = self.plot.getViewBox().mapSceneToView(event[0])
             self.hovered.emit(point.x(), point.y())
 
-    def set_image(self, data, origin=(0, 0), *, fit=True, categorical=False):
+    def set_image(self, data, origin=(0, 0), *, fit=True, categorical=False, keep_levels=False):
         key = (id(data), categorical)
-        preserve_levels = key == self._image_key
+        preserve_levels = key == self._image_key or keep_levels
         self._image_key = key
         data = np.asarray(data)
         if not data.size:
@@ -189,6 +274,7 @@ class MeasurementTable(QtCore.QAbstractTableModel):
         super().__init__(parent)
         self.headers = []
         self.rows = []
+        self.row_of = {}
         self.extra_methods = []
         self.review = None
 
@@ -206,7 +292,8 @@ class MeasurementTable(QtCore.QAbstractTableModel):
             return row[0]
         if role == QtCore.Qt.ItemDataRole.ToolTipRole and index.column() >= 7:
             method = self.extra_methods[index.column() - 7]
-            return f"{METHOD_LABELS.get(method, method)}: {self.review.measurements[method].status[row[0]]}"
+            return (f"{method_name(method)} ({method}: {METHOD_LABELS.get(method, method)}): "
+                    f"{self.review.measurements[method].status[row[0]]}")
         if role == QtCore.Qt.ItemDataRole.ForegroundRole and row[3] != "ok":
             return QtGui.QColor("#ff8c96")
         if role == QtCore.Qt.ItemDataRole.DisplayRole:
@@ -232,7 +319,7 @@ class MeasurementTable(QtCore.QAbstractTableModel):
         self.headers = ["ID", "x (px)", "y (px)", "Status"]
         if has_cd:
             self.headers.extend([f"CD ({unit})", f"CD x ({unit})", f"CD y ({unit})"])
-        self.headers.extend(f"{name}\nCD ({unit})" for name in self.extra_methods)
+        self.headers.extend(f"{method_name(name)}\nCD ({unit})" for name in self.extra_methods)
         self.rows = []
         columns = [measured.metrics.get(key) for key in ("cd_equivalent_px", "cd_x_px", "cd_y_px")]
         for i, point in enumerate(measured.centers_xy + review.origin_xy):
@@ -242,43 +329,62 @@ class MeasurementTable(QtCore.QAbstractTableModel):
             comparison = [review.measurements[name].metrics["cd_equivalent_px"][i] * scale
                           for name in self.extra_methods]
             self.rows.append([i, *point, str(measured.status[i]), *values, *comparison])
+        self._index_rows()
+        self.endResetModel()
+
+    def _index_rows(self):
+        self.row_of = {row[0]: position for position, row in enumerate(self.rows)}
+
+    def clear(self):
+        self.beginResetModel()
+        self.rows, self.headers, self.review, self.row_of = [], [], None, {}
         self.endResetModel()
 
     def sort(self, column, order=QtCore.Qt.SortOrder.AscendingOrder):
         self.layoutAboutToBeChanged.emit()
         self.rows.sort(key=lambda row: (isinstance(row[column], float) and not np.isfinite(row[column]), row[column]),
                        reverse=order == QtCore.Qt.SortOrder.DescendingOrder)
+        self._index_rows()
         self.layoutChanged.emit()
 
 
 class InspectionWindow(QtWidgets.QMainWindow):
     """Desktop workbench for reviewing repository measurements and their inputs."""
 
-    def __init__(self, image=None, *, title="subpx | Inspection workbench"):
+    def __init__(self, image=None, *, title="subpx | Inspection workbench", settings=None):
         super().__init__()
         self.setWindowTitle(title)
         self.resize(1440, 900)
         self.setMinimumSize(1024, 680)
+        self.setAcceptDrops(True)
+        # Settings and window layout persist here; tests pass their own QSettings file.
+        self._settings = settings if settings is not None else QtCore.QSettings("subpx", "workbench")
         self.loaded = None
         self.moving = None
         self.registration = None
         self.review = None
-        self.selected = 0
+        self.selected = None
+        self._selected_xy = None  # loaded-page [x, y] of the selected hole, kept across pages and runs
+        self._region = None  # (page-local position, size) of the analysis region as last set by the user
         self.busy = False
         self._job = None
         self._radial_cache = None
         self._pages = None
         self._page_offsets = []
         self._page_reviews = {}
-        self._page_selections = {}
         self._task_reviews = {}
+        self._syncing_table = False
         self._building = True
         self._pool = QtCore.QThreadPool(self)
         self._pool.setMaxThreadCount(1)
         self._build_ui()
         self._apply_style()
+        self._defaults = self._control_values()
+        self._load_settings()
         self._building = False
         self._update_enabled()
+        _install_exception_hook()
+        _WINDOWS.add(self)
         if image is not None:
             self.set_image(image)
 
@@ -287,16 +393,23 @@ class InspectionWindow(QtWidgets.QMainWindow):
         toolbar.setMovable(False)
         self.open_action = toolbar.addAction("Open image...", self.open_image)
         self.open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        self.open_action.setToolTip("Open an image (Ctrl+O), or drop a file on the window")
         self.demo_action = toolbar.addAction("Load demo", self.load_demo)
         toolbar.addSeparator()
-        toolbar.addAction("Fit image", lambda: self.canvas.fit_image()).setShortcut("F")
-        toolbar.addAction("Selected feature", self.zoom_selected).setShortcut("Z")
+        fit = toolbar.addAction("Fit image", lambda: self.canvas.fit_image())
+        fit.setShortcut("F")
+        fit.setToolTip("Fit the image (F)")
+        zoom = toolbar.addAction("Zoom to hole", self.zoom_selected)
+        zoom.setShortcut("Z")
+        zoom.setToolTip("Zoom to the selected hole (Z)")
         self.roi_action = toolbar.addAction("Analysis region")
         self.roi_action.setCheckable(True)
         self.roi_action.toggled.connect(self._toggle_roi)
         toolbar.addSeparator()
         self.export_action = toolbar.addAction("Export results...", self.export_results)
         toolbar.addAction("Screenshot...", self.save_screenshot)
+        self.reset_action = toolbar.addAction("Reset settings", self.reset_settings)
+        self.reset_action.setToolTip("Every setting back to its default (the batch's defaults)")
         toolbar.addAction("Guide", self.show_guide)
         root = QtWidgets.QWidget()
         self.setCentralWidget(root)
@@ -330,12 +443,17 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.splitter.setStretchFactor(1, 1)
         self.task.currentChanged.connect(self._task_changed)
         self._task_changed()
-        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Return"), self, activated=self._run_current)
+        for keys in ("Ctrl+Return", "Ctrl+Enter"):  # main and keypad Enter
+            QtGui.QShortcut(QtGui.QKeySequence(keys), self, activated=self._run_current)
+        self.hover_label = QtWidgets.QLabel("Wheel: zoom | Drag: pan | Click a hole: inspect | F: fit | Z: zoom to hole")
+        self.hover_label.setObjectName("hint")
+        self.hover_label.setMinimumWidth(460)
+        # Permanent: messages (saved files, errors) appear on the left and are never overwritten by hovering.
+        self.statusBar().addPermanentWidget(self.hover_label)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setMaximumWidth(180)
         self.progress.hide()
         self.statusBar().addPermanentWidget(self.progress)
-        self.statusBar().showMessage("Wheel: zoom | Drag: pan | Click a feature or result row: inspect | F: fit | Z: selected feature")
 
     def _fit_detail_images(self):
         for canvas in (self.raw_canvas, self.input_canvas, *self.registration_canvases):
@@ -357,7 +475,6 @@ class InspectionWindow(QtWidgets.QMainWindow):
         target = self.pitch_tab if operation == "pitch" else self.alignment_tab if operation == "register" else self.table_tab
         self.diagnostics.setCurrentWidget(target)
         self.run_button = self.action_buttons[operation]
-        self.stage.setCurrentIndex(1 if operation == "detect" and self.review is not None else 0)
         self._render_image()
         self._update_enabled()
 
@@ -412,14 +529,14 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.invert = self._check("Dark features on bright background")
         self.threshold = self._combo([("Otsu (automatic)", "otsu"), ("Triangle", "triangle")])
         self.area_min = self._number(3, 1, 100000000)
-        self.area_max = self._number(500, 1, 100000000)
+        self.area_max = self._number(200, 1, 100000000)
         limits = QtWidgets.QWidget()
         limits_layout = QtWidgets.QHBoxLayout(limits)
         limits_layout.setContentsMargins(0, 0, 0, 0)
         limits_layout.addWidget(self.area_min)
         limits_layout.addWidget(QtWidgets.QLabel("to"))
         limits_layout.addWidget(self.area_max)
-        self.pad = self._number(5, 1, 1000)
+        self.pad = self._number(3, 1, 1000)
         self.refine = self._combo([(label, value) for label, value in
             (("Log-quadratic", "logquad"), ("Weighted center", "weighted"),
              ("Edge gradient", "edge_gradmoment"), ("Automatic", "auto"), ("None", "none"))])
@@ -444,7 +561,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.recipe_group = self._form_group("Measurement", [("", self.recipe), ("", self.recipe_summary),
                                                            ("", self.methods_button)], layout)
         self.pixel_size = self._number(1, 0.000001, 1e9, decimals=6, step=0.1)
-        self.pixel_size.setToolTip("Physical length represented by one pixel")
+        self.pixel_size.setToolTip("Length of one pixel, in the unit beside it")
         self.unit = QtWidgets.QLineEdit("px")
         self.unit.setMaximumWidth(65)
         self.unit.setToolTip("Length unit, for example nm")
@@ -454,9 +571,8 @@ class InspectionWindow(QtWidgets.QMainWindow):
         scale_layout.setContentsMargins(0, 0, 0, 0)
         scale_layout.addWidget(self.pixel_size, 1)
         scale_layout.addWidget(self.unit)
-        scale_layout.addWidget(QtWidgets.QLabel("/ pixel"))
-        self.backend = self._combo([("CPU", "cpu"), ("Auto", "auto"), ("GPU", "gpu")])
-        self.scale_group = self._form_group("Scale and compute", [("", scale), ("Compute", self.backend)], layout)
+        self.backend = self._combo([("Auto (GPU when available)", "auto"), ("GPU", "gpu"), ("CPU", "cpu")])
+        self.scale_group = self._form_group("Scale and compute", [("Pixel size", scale), ("Compute", self.backend)], layout)
         self.nominal_cd = self._number(0, 0, 1e9, decimals=4)
         self.psf_fwhm = self._number(0, 0, 1e9, decimals=4)
         for number in (self.nominal_cd, self.psf_fwhm):
@@ -470,6 +586,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
         task_layout.setContentsMargins(0, 0, 0, 0)
         self.task_widgets = {}
         self.action_buttons = {}
+        self.run_reasons = {}
         for operation, label in (("detect", "Find features"), ("cd", "Measure CD"),
                                  ("pitch", "Measure pitch"), ("register", "Align images")):
             page = QtWidgets.QWidget()
@@ -486,6 +603,11 @@ class InspectionWindow(QtWidgets.QMainWindow):
             else:
                 button.clicked.connect(lambda checked=False, op=operation: self.run_analysis(op))
             self.action_buttons[operation] = button
+            reason = QtWidgets.QLabel()
+            reason.setObjectName("reason")
+            reason.setWordWrap(True)
+            reason.hide()
+            self.run_reasons[operation] = reason
         self.detect_button, self.cd_button, self.pitch_button, self.register_button = (
             self.action_buttons[key] for key in ("detect", "cd", "pitch", "register"))
         self.task_widgets["detect"].layout().addWidget(self._hint("Check feature centers and the threshold mask before measuring. These settings also feed CD measurements."))
@@ -503,7 +625,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
             number.setSpecialValueText("All")
         for number in (self.nominal_x, self.nominal_y):
             number.setSpecialValueText("Measured mean")
-        self.reference_selected = self._check("Reference at selected feature")
+        self.reference_selected = self._check("Reference at selected hole")
         self._form_group("Pitch and placement", [("Centers", self.pitch_source), ("Lattice", self.pattern_layout),
             ("Average rows", self.average_rows), ("Average columns", self.average_columns),
             ("Design pitch x", self.nominal_x), ("Design pitch y", self.nominal_y), ("", self.reference_selected)], pitch)
@@ -516,26 +638,36 @@ class InspectionWindow(QtWidgets.QMainWindow):
         index_button.clicked.connect(self.index_dialog.show)
         pitch.addWidget(index_button)
         align = self.task_widgets["register"].layout()
+        moving_buttons = QtWidgets.QHBoxLayout()
         self.moving_button = QtWidgets.QPushButton("Open moving image...")
         self.moving_button.clicked.connect(self.open_moving)
-        align.addWidget(self.moving_button)
+        moving_buttons.addWidget(self.moving_button)
+        self.moving_this_file = QtWidgets.QPushButton("Use this file")
+        self.moving_this_file.setToolTip("Moving image = the page of the open file chosen in 'Moving page'")
+        self.moving_this_file.clicked.connect(self._use_this_file)
+        moving_buttons.addWidget(self.moving_this_file)
+        align.addLayout(moving_buttons)
         self.moving_label = self._hint("Open a second image with the same dimensions as the active reference page.")
         align.addWidget(self.moving_label)
-        self.moving_page_spin = self._number(1, 1, 1)
+        self.moving_page_spin = self._number(0, 0, 0)
+        self.moving_page_spin.setToolTip("Page of the moving file (0 = first)")
         self.moving_page_spin.setKeyboardTracking(False)
         self.moving_page_spin.valueChanged.connect(self._moving_page_changed)
         self.upsample = self._number(20, 1, 1000)
-        self._form_group("Alignment", [("Moving page", self.moving_page_spin), ("Subpixel factor", self.upsample)], align)
+        self.hole_check_mode = self._combo([("Centered (batch default)", "centered"), ("Raw", "raw")])
+        self.hole_check_mode.setToolTip("The batch's hole check: 'centered' removes each image's mean first "
+                                        "(passes below 0.8), 'raw' does not (passes below 0.3)")
+        self._form_group("Alignment", [("Moving page", self.moving_page_spin), ("Subpixel factor", self.upsample),
+                                       ("Hole check", self.hole_check_mode)], align)
         self.registration_label = self._hint("Open the moving image, then Align images. Shifts are reported in [dy, dx] pixels.")
         align.addWidget(self.registration_label)
         for key, page in self.task_widgets.items():
             page.layout().addWidget(self.action_buttons[key])
+            page.layout().addWidget(self.run_reasons[key])
             page.layout().addStretch()
         layout.addWidget(self.task_pages)
         layout.addStretch()
         self._build_method_options()
-        self.nominal_cd.valueChanged.connect(self._update_enabled)
-        self.psf_fwhm.valueChanged.connect(self._update_enabled)
         self.seeds.currentIndexChanged.connect(self._update_recipe_context)
         self.recipe.currentIndexChanged.connect(self._recipe_changed)
         self._recipe_changed()
@@ -564,9 +696,9 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.method_list.setMinimumHeight(210)
         self.method_list.setMaximumHeight(250)
         for name, label in METHOD_LABELS.items():
-            item = QtWidgets.QListWidgetItem(label)
+            item = QtWidgets.QListWidgetItem(method_name(name))
             item.setData(QtCore.Qt.ItemDataRole.UserRole, name)
-            item.setToolTip(name + ": " + METHOD_HELP.get(name, AREA_HELP))
+            item.setToolTip(f"{name}: {label}. " + METHOD_HELP.get(name, AREA_HELP))
             item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(QtCore.Qt.CheckState.Unchecked)
             self.method_list.addItem(item)
@@ -581,6 +713,9 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.tail_level = self._number(0.2, 0.01, 0.99, decimals=2, step=0.05)
         self.tail_window = self._number(1.2, 0.5, 2, decimals=2, step=0.1)
         self.iterations = self._number(30, 1, 1000)
+        self.tolerance = self._number(1e-3, 1e-6, 1, decimals=6, step=1e-4)
+        self.tolerance.setToolTip("Deblending stops when the fit changes less than this per round "
+                                  "(or at the iteration limit); the batch's --deblend-tolerance")
         self.dark_level = self._number(0, -1e9, 1e9, decimals=3)
         self.method_groups = []
 
@@ -588,7 +723,8 @@ class InspectionWindow(QtWidgets.QMainWindow):
             self.method_groups.append((self._form_group(title, rows, layout), set(methods)))
 
         nonlocal_methods = set(METHOD_LABELS) - {name for name in METHOD_LABELS if name.startswith("local_")}
-        group("Neighbour subtraction", [("Background", self.background), ("Fit iterations", self.iterations)], nonlocal_methods)
+        group("Neighbour subtraction", [("Background", self.background), ("Fit iterations", self.iterations),
+                                        ("Stop tolerance (px)", self.tolerance)], nonlocal_methods)
         group("Radial edge sampling", [("Rays", self.n_angles), ("Step (px)", self.radial_step),
               ("Smoothing (px)", self.smooth_sigma)], ("gradient", "halfmax"))
         group("Log-quadratic fit", [("Fit fraction", self.fit_fraction)], ("logquad",))
@@ -638,13 +774,13 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.background.model().item(border).setEnabled(not needs_model)
         if needs_model:
             self.background.setCurrentIndex(self.background.findData("model"))
-        self.recipe_summary.setText(", ".join(METHOD_NAMES.get(name, METHOD_LABELS[name]) for name in names) or "Select at least one measurement method.")
+        self.recipe_summary.setText(", ".join(method_name(name) for name in names) or "Select at least one measurement method.")
         for widget, methods in self.method_groups:
             widget.setVisible(bool(selected & methods))
         operation = self.task.currentData()
         use_cd = operation == "cd" or (operation == "pitch" and self.pitch_source.currentData() == "cd")
         self.recipe_group.setVisible(use_cd)
-        calibrated = use_cd and bool(selected & {"disk", "flux_ratio"})
+        calibrated = use_cd and bool(selected & CALIBRATED_METHODS)
         self.hole_group.setVisible(calibrated)
         self.hole_note.setVisible(calibrated)
         if not self._building:
@@ -652,6 +788,113 @@ class InspectionWindow(QtWidgets.QMainWindow):
 
     def _update_feature_summary(self):
         self.filter_button.setText(f"{self.area_min.value()} - {self.area_max.value()} px²  |  Adjust...")
+
+    # ---------------------------------------------------------------------------------------------- settings
+    def _persistent_controls(self):
+        """Every setting that is saved between sessions and reset by 'Reset settings', by name."""
+        controls = dict(
+            invert=self.invert, threshold=self.threshold, area_min=self.area_min, area_max=self.area_max,
+            pad=self.pad, refine=self.refine, seeds=self.seeds, recipe=self.recipe, background=self.background,
+            n_angles=self.n_angles, radial_step=self.radial_step, smooth_sigma=self.smooth_sigma,
+            fit_fraction=self.fit_fraction, half_level=self.half_level, peak_pixels=self.peak_pixels,
+            tail_level=self.tail_level, tail_window=self.tail_window, iterations=self.iterations,
+            tolerance=self.tolerance, dark_level=self.dark_level, pixel_size=self.pixel_size, unit=self.unit,
+            backend=self.backend, nominal_cd=self.nominal_cd, psf_fwhm=self.psf_fwhm,
+            pitch_source=self.pitch_source, pattern_layout=self.pattern_layout, stagger_axis=self.stagger_axis,
+            average_rows=self.average_rows, average_columns=self.average_columns, nominal_x=self.nominal_x,
+            nominal_y=self.nominal_y, reference_selected=self.reference_selected, pitch_hint_x=self.pitch_hint_x,
+            pitch_hint_y=self.pitch_hint_y, upsample=self.upsample, hole_check_mode=self.hole_check_mode,
+            failed_only=self.failed_only, lock_levels=self.lock_levels,
+        )
+        controls.update({f"layer:{name}": check for name, check in self.layer_checks.items()})
+        return controls
+
+    def _control_values(self):
+        values = {}
+        for name, widget in self._persistent_controls().items():
+            if isinstance(widget, QtWidgets.QComboBox):
+                values[name] = widget.currentData()
+            elif isinstance(widget, QtWidgets.QAbstractButton):
+                values[name] = widget.isChecked()
+            elif isinstance(widget, QtWidgets.QLineEdit):
+                values[name] = widget.text()
+            else:
+                values[name] = widget.value()
+        values["methods"] = list(self._checked_methods())
+        return values
+
+    def _apply_values(self, values):
+        building, self._building = self._building, True
+        try:
+            for name, widget in self._persistent_controls().items():
+                if name not in values:
+                    continue
+                value = values[name]
+                with QtCore.QSignalBlocker(widget):
+                    if isinstance(widget, QtWidgets.QComboBox):
+                        if widget.findData(value) >= 0:
+                            widget.setCurrentIndex(widget.findData(value))
+                    elif isinstance(widget, QtWidgets.QAbstractButton):
+                        widget.setChecked(bool(value))
+                    elif isinstance(widget, QtWidgets.QLineEdit):
+                        widget.setText(str(value))
+                    else:
+                        widget.setValue(type(widget.value())(value))
+            if "methods" in values:
+                with QtCore.QSignalBlocker(self.method_list):
+                    for i in range(self.method_list.count()):
+                        item = self.method_list.item(i)
+                        checked = item.data(QtCore.Qt.ItemDataRole.UserRole) in values["methods"]
+                        item.setCheckState(QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked)
+            self._update_feature_summary()
+            self._update_recipe_context()
+        finally:
+            self._building = building
+
+    def _load_settings(self):
+        settings = self._settings
+        try:
+            values = json.loads(settings.value(f"{SETTINGS_KEY}/controls", "{}") or "{}")
+        except (TypeError, ValueError):
+            values = {}
+        self._apply_values(values)
+        task = self.task.findData(settings.value(f"{SETTINGS_KEY}/task", "cd"))
+        if task >= 0:
+            self.task.setCurrentIndex(task)
+        for key, restore in (("geometry", self.restoreGeometry), ("splitter", self.splitter.restoreState),
+                             ("vertical_splitter", self.vertical_splitter.restoreState)):
+            state = settings.value(f"{SETTINGS_KEY}/{key}")
+            if isinstance(state, QtCore.QByteArray) and not state.isEmpty():
+                restore(state)
+
+    def save_settings(self):
+        settings = self._settings
+        settings.setValue(f"{SETTINGS_KEY}/controls", json.dumps(self._control_values()))
+        settings.setValue(f"{SETTINGS_KEY}/task", self.task.currentData())
+        settings.setValue(f"{SETTINGS_KEY}/geometry", self.saveGeometry())
+        settings.setValue(f"{SETTINGS_KEY}/splitter", self.splitter.saveState())
+        settings.setValue(f"{SETTINGS_KEY}/vertical_splitter", self.vertical_splitter.saveState())
+        settings.sync()
+
+    def reset_settings(self):
+        """Every setting back to its default; the image, results and window layout stay."""
+        self._apply_values(self._defaults)
+        self._settings_changed()
+        self.statusBar().showMessage("Settings reset to their defaults (the batch's defaults).", 8000)
+
+    def _last_folder(self):
+        return str(self._settings.value(f"{SETTINGS_KEY}/last_folder", "") or "")
+
+    def _remember_folder(self, path):
+        self._settings.setValue(f"{SETTINGS_KEY}/last_folder", str(Path(path).parent))
+
+    def _summary_row(self, text):
+        label = QtWidgets.QLabel(text)
+        label.setObjectName("hint")
+        label.setWordWrap(False)
+        label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        return label
 
     @staticmethod
     def _hint(text):
@@ -671,19 +914,18 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.previous_page = QtWidgets.QToolButton()
         self.previous_page.setText("Previous")
         self.previous_page.clicked.connect(lambda: self.page_spin.setValue(self.page_spin.value() - 1))
-        self.previous_page.setToolTip("Previous page (Page Up)")
+        self.previous_page.setToolTip("Previous page (Page Up on the image)")
         self.next_page = QtWidgets.QToolButton()
         self.next_page.setText("Next")
         self.next_page.clicked.connect(lambda: self.page_spin.setValue(self.page_spin.value() + 1))
-        self.next_page.setToolTip("Next page (Page Down)")
-        QtGui.QShortcut(QtGui.QKeySequence("PgUp"), self, activated=self.previous_page.click)
-        QtGui.QShortcut(QtGui.QKeySequence("PgDown"), self, activated=self.next_page.click)
+        self.next_page.setToolTip("Next page (Page Down on the image)")
         self.page_spin = QtWidgets.QSpinBox()
-        self.page_spin.setRange(1, 1)
+        self.page_spin.setRange(0, 0)
         self.page_spin.setKeyboardTracking(False)
         self.page_spin.setPrefix("Page ")
+        self.page_spin.setToolTip("Page number, 0 = first (as in the batch's pages.csv and --pages)")
         self.page_spin.valueChanged.connect(self._page_changed)
-        self.page_count = QtWidgets.QLabel("of 1")
+        self.page_count = QtWidgets.QLabel("1 page")
         self.stack_pages = QtWidgets.QCheckBox("Stack vertically")
         self.stack_pages.setToolTip("Show every page; analysis uses only the active, outlined page")
         self.stack_pages.toggled.connect(self._stack_changed)
@@ -720,17 +962,50 @@ class InspectionWindow(QtWidgets.QMainWindow):
             layers.addWidget(check)
         layers.addStretch()
         layout.addLayout(layers)
-        self.summary_label = self._hint("Load your image or choose Load demo to explore a synthetic staggered pattern.")
+        # Two single-line rows of constant height: the image below never moves when the text changes.
+        self.summary_label = self._summary_row("Load your image or choose Load demo to explore a synthetic staggered pattern.")
+        self.failure_label = self._summary_row("")
         layout.addWidget(self.summary_label)
+        layout.addWidget(self.failure_label)
+        self.error_banner = QtWidgets.QFrame()
+        self.error_banner.setObjectName("banner")
+        banner = QtWidgets.QHBoxLayout(self.error_banner)
+        banner.setContentsMargins(8, 4, 4, 4)
+        self.error_label = QtWidgets.QLabel()
+        self.error_label.setObjectName("error")
+        self.error_label.setWordWrap(True)
+        self.error_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        banner.addWidget(self.error_label, 1)
+        details = QtWidgets.QToolButton()
+        details.setText("Details")
+        details.setToolTip("Show the full message in the Activity log")
+        details.clicked.connect(lambda: self.diagnostics.setCurrentWidget(self.log))
+        banner.addWidget(details)
+        dismiss = QtWidgets.QToolButton()
+        dismiss.setText("Dismiss")
+        dismiss.clicked.connect(self._clear_error)
+        banner.addWidget(dismiss)
+        self.error_banner.hide()
+        layout.addWidget(self.error_banner)
         self.vertical_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         layout.addWidget(self.vertical_splitter, 1)
         self.canvas = ImageCanvas(histogram=True)
         self.canvas.clicked.connect(self._select_at)
         self.canvas.hovered.connect(self._hover_image)
+        self.lock_levels = QtWidgets.QCheckBox("Lock")
+        self.lock_levels.setToolTip("Keep this contrast on every page (otherwise each page is stretched to 1-99.5 %)")
+        self.lock_levels.toggled.connect(self._lock_levels_changed)
+        self.canvas.side_layout.addWidget(self.lock_levels)
+        self.canvas.histogram.sigLevelsChanged.connect(self._levels_changed)
+        self._locked_levels = None
         self.vertical_splitter.addWidget(self.canvas)
+        for keys, button in (("PgUp", self.previous_page), ("PgDown", self.next_page)):
+            for scope in (self.canvas, self.page_bar):  # never while typing in a table or field
+                QtGui.QShortcut(QtGui.QKeySequence(keys), scope, activated=button.click,
+                                context=QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.roi = pg.RectROI((10, 10), (100, 100), pen=pg.mkPen("#ffce73", width=2))
         self.roi.addScaleHandle((1, 1), (0, 0))
-        self.roi.sigRegionChangeFinished.connect(self._settings_changed)
+        self.roi.sigRegionChangeFinished.connect(self._roi_changed)
         self.canvas.plot.addItem(self.roi)
         self.roi.hide()
         self.diagnostics = QtWidgets.QTabWidget()
@@ -788,6 +1063,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.profile_plot = pg.PlotWidget(background="#0c121b")
         self.profile_plot.addLegend(offset=(8, 8))
         self.profile_plot.showGrid(x=True, y=True, alpha=0.15)
+        no_si_prefix(self.profile_plot.getPlotItem())
         for canvas in (self.raw_canvas, self.input_canvas):
             canvas.setMinimumWidth(100)
             splitter.addWidget(canvas)
@@ -806,13 +1082,14 @@ class InspectionWindow(QtWidgets.QMainWindow):
         graphics = pg.GraphicsLayoutWidget()
         graphics.setBackground("#0c121b")
         self.pitch_plots = {}
-        for row, key in enumerate(("pitch", "registration")):
+        for row, (key, title) in enumerate((("pitch", "pitch"), ("registration", "placement error"))):
             for column, axis in enumerate(("x", "y")):
-                plot = graphics.addPlot(row=row, col=column, title=f"{axis.upper()} {key}")
+                plot = graphics.addPlot(row=row, col=column, title=f"{axis.upper()} {title}")
                 plot.showGrid(x=True, y=True, alpha=0.15)
+                no_si_prefix(plot)
                 self.pitch_plots[key, axis] = plot
         layout.addWidget(graphics, 1)
-        self.diagnostics.addTab(tab, "Pitch & placement")
+        self.diagnostics.addTab(tab, "Pitch + placement")
 
     def _build_registration_tab(self):
         tab = QtWidgets.QWidget()
@@ -828,7 +1105,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
         for canvas in self.registration_canvases:
             splitter.addWidget(canvas)
         layout.addWidget(splitter, 1)
-        self.diagnostics.addTab(tab, "Image registration")
+        self.diagnostics.addTab(tab, "Align")
 
     def _build_table_tab(self):
         tab = QtWidgets.QWidget()
@@ -836,6 +1113,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(4, 4, 4, 4)
         self.review_notice = self._hint("")
+        self.review_notice.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self.review_notice.hide()
         layout.addWidget(self.review_notice)
         self.failed_only = QtWidgets.QCheckBox("Show failed measurements only")
@@ -849,6 +1127,8 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.table.clicked.connect(self._select_table)
+        # Arrow keys, Page keys and clicks all move the current row; the selected hole follows it.
+        self.table.selectionModel().currentRowChanged.connect(self._table_row_changed)
         layout.addWidget(self.table, 1)
         self.diagnostics.addTab(tab, "Results")
 
@@ -859,10 +1139,11 @@ class InspectionWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(widget)
         layout.setContentsMargins(4, 0, 4, 0)
         controls = QtWidgets.QHBoxLayout()
-        controls.addWidget(QtWidgets.QLabel("Feature"))
+        controls.addWidget(QtWidgets.QLabel("Hole"))
         self.feature_spin = QtWidgets.QSpinBox()
         self.feature_spin.setRange(0, 0)
-        self.feature_spin.valueChanged.connect(self.select_feature)
+        self.feature_spin.setKeyboardTracking(False)  # typing "150" selects once, not 1, 15 and 150
+        self.feature_spin.valueChanged.connect(lambda value: self.select_feature(value, reveal=False, pan=True))
         controls.addWidget(self.feature_spin, 1)
         next_failed = QtWidgets.QPushButton("Next failed")
         next_failed.clicked.connect(self.next_failed)
@@ -877,7 +1158,9 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.comparison.verticalHeader().hide()
         self.comparison.verticalHeader().setDefaultSectionSize(23)
         self.comparison.horizontalHeader().setFixedHeight(25)
-        self.comparison.cellClicked.connect(lambda row, col: self.method.setCurrentIndex(row))
+        self.comparison.cellClicked.connect(
+            lambda row, col: self.method.setCurrentIndex(self.method.findData(self.comparison.item(row, 0).data(
+                QtCore.Qt.ItemDataRole.UserRole))))
         layout.addWidget(self.comparison, 1)
         buttons = QtWidgets.QHBoxLayout()
         definition = QtWidgets.QPushButton("Method definition")
@@ -901,6 +1184,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
         return widget
 
     def _apply_style(self):
+        up, down = _arrow_images()
         self.setStyleSheet("""
             QMainWindow, QWidget { background: #151e2b; color: #dee7f2; font-family: 'Segoe UI'; font-size: 12px; }
             QToolBar { background: #1b2839; padding: 7px; spacing: 7px; border: 0; }
@@ -908,15 +1192,31 @@ class InspectionWindow(QtWidgets.QMainWindow):
             QToolButton:hover, QToolButton:checked { background: #30465e; }
             QLabel#title { font-size: 20px; font-weight: 600; color: #f4f8ff; }
             QLabel#state { color: #56d6cf; padding: 6px 12px; background: #203c44; border-radius: 4px; }
+            QLabel#state[level="warning"] { color: #ffce73; background: #3b3322; }
+            QLabel#state[level="error"] { color: #ff9aa6; background: #42232b; }
             QLabel#section { color: #56d6cf; font-weight: 600; padding-bottom: 8px; }
             QLabel#hint { color: #a9bbce; line-height: 1.4; }
+            QLabel#reason { color: #ffce73; }
+            QLabel#error { color: #ffd3d8; }
+            QFrame#banner { background: #42232b; border: 1px solid #8f3a46; border-radius: 4px; }
             QPushButton { background: #24384e; border: 1px solid #3c556e; border-radius: 4px; padding: 7px 9px; }
             QPushButton:hover { background: #31516b; border-color: #56d6cf; }
             QPushButton#primary { background: #246c72; border-color: #56d6cf; color: #ffffff; font-weight: 600; padding: 7px 24px; }
-            QPushButton:disabled { color: #6b7f92; border-color: #293a4c; }
+            QPushButton:disabled, QPushButton#primary:disabled { background: #1a2532; color: #5d6f82; border-color: #293a4c; }
+            QCheckBox:disabled, QLabel:disabled, QToolButton:disabled { color: #5d6f82; }
             QGroupBox { border: 1px solid #304155; border-radius: 5px; margin-top: 12px; font-weight: 600; }
             QGroupBox::title { subcontrol-origin: margin; left: 9px; color: #90b2d2; }
             QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit { background: #0f1824; border: 1px solid #354a60; border-radius: 3px; padding: 4px; min-height: 20px; }
+            QSpinBox, QDoubleSpinBox { padding-right: 18px; }
+            QSpinBox[invalid="true"], QDoubleSpinBox[invalid="true"] { border: 1px solid #ff748a; }
+            QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled, QLineEdit:disabled { color: #5d6f82; border-color: #293a4c; }
+            QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border; width: 16px; background: #1c2b3d; border-left: 1px solid #354a60; }
+            QSpinBox::up-button, QDoubleSpinBox::up-button { subcontrol-position: top right; border-top-right-radius: 3px; }
+            QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-position: bottom right; border-bottom-right-radius: 3px; }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover { background: #31516b; }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url(ARROW_UP); width: 10px; height: 8px; }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url(ARROW_DOWN); width: 10px; height: 8px; }
             QComboBox QAbstractItemView { background: #1c2b3d; selection-background-color: #365571; }
             QTabWidget::pane { border: 1px solid #304155; }
             QTabBar::tab { background: #1b293a; padding: 8px 10px; border-bottom: 2px solid transparent; }
@@ -927,24 +1227,69 @@ class InspectionWindow(QtWidgets.QMainWindow):
             QSplitter::handle { background: #28394c; }
             QStatusBar { color: #a9bbce; background: #101925; }
             QCheckBox { spacing: 5px; }
-        """)
+        """.replace("ARROW_UP", up).replace("ARROW_DOWN", down))
 
     def _settings_changed(self, *args):
-        if not self._building and (self.review is not None or self.registration is not None) and not self.busy:
-            self.state_label.setText("Settings changed | measure again to apply")
+        if self._building:
+            return
+        if (self.review is not None or self.registration is not None) and not self.busy:
+            self._set_state("Settings changed | measure again to apply", "warning")
+        self._update_enabled()
+
+    def _set_state(self, text, level="info"):
+        self.state_label.setText(text)
+        self.state_label.setProperty("level", level)
+        self.state_label.style().unpolish(self.state_label)
+        self.state_label.style().polish(self.state_label)
+
+    def _run_problems(self):
+        """Why each task cannot run now ('' = it can), and the fields that cause it."""
+        problems = dict.fromkeys(self.action_buttons, "")
+        invalid = set()
+        if self.loaded is None:
+            return dict.fromkeys(self.action_buttons, "Open an image first."), invalid
+        segmentation = ""
+        if self.area_min.value() > self.area_max.value():
+            segmentation = f"Area min ({self.area_min.value()}) is above area max ({self.area_max.value()})."
+            invalid |= {self.area_min, self.area_max}
+        selected = set(self._checked_methods())
+        cd = segmentation
+        if not cd and not selected:
+            cd = "Tick at least one CD method (Choose methods and parameters)."
+        elif not cd and selected & CALIBRATED_METHODS and not (self.nominal_cd.value() or self.psf_fwhm.value()):
+            cd = ", ".join(method_name(m) for m in sorted(selected & CALIBRATED_METHODS)) + " needs a nominal CD or PSF FWHM."
+            invalid |= {self.nominal_cd, self.psf_fwhm}
+        pitch = cd if self.pitch_source.currentData() == "cd" else segmentation
+        for (x, y), what in (((self.nominal_x, self.nominal_y), "design pitches"),
+                             ((self.pitch_hint_x, self.pitch_hint_y), "pitch hints")):
+            if (x.value() == 0) != (y.value() == 0):
+                pitch = pitch or f"Set both {what} (x and y), or neither."
+                invalid |= {x, y}
+        register = ""
+        if self.moving is None:
+            register = "Open a moving image, or use a page of this file."
+        elif self.moving.image.shape != self.loaded.image.shape:
+            (mh, mw), (h, w) = self.moving.image.shape, self.loaded.image.shape
+            register = f"The moving image is {mw} x {mh} px; this page is {w} x {h} px."
+        problems.update(detect=segmentation, cd=cd, pitch=pitch, register=register)
+        return problems, invalid
 
     def _update_enabled(self):
         available = self.loaded is not None and not self.busy
-        for button in (self.detect_button, self.cd_button, self.pitch_button):
-            button.setEnabled(available)
-        selected = set(self._checked_methods())
-        needs_calibration = bool(selected & {"disk", "flux_ratio"}) and not (self.nominal_cd.value() or self.psf_fwhm.value())
-        can_measure = available and bool(selected) and not needs_calibration
-        self.cd_button.setEnabled(can_measure)
-        self.pitch_button.setEnabled(can_measure if self.pitch_source.currentData() == "cd" else available)
-        explanation = "Set a nominal CD or PSF FWHM first." if needs_calibration else "Select at least one method." if not selected else "Measure the active page (Ctrl+Enter)"
-        self.cd_button.setToolTip(explanation)
-        self.register_button.setEnabled(available and self.moving is not None)
+        problems, invalid = self._run_problems()
+        for operation, button in self.action_buttons.items():
+            button.setEnabled(available and not problems[operation])
+            # The reason sits under the button; a busy job is not a reason.
+            self.run_reasons[operation].setText(problems[operation])
+            self.run_reasons[operation].setVisible(bool(problems[operation]) and not self.busy)
+            button.setToolTip(problems[operation] or "Run on the active page (Ctrl+Enter)")
+        for widget in (self.area_min, self.area_max, self.nominal_cd, self.psf_fwhm, self.nominal_x, self.nominal_y,
+                       self.pitch_hint_x, self.pitch_hint_y):
+            if widget.property("invalid") != (widget in invalid):
+                widget.setProperty("invalid", widget in invalid)
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+        self.moving_this_file.setEnabled(available and bool(self.loaded.path))
         self.export_action.setEnabled(not self.busy and (self.review is not None or self.registration is not None))
         self.open_action.setEnabled(not self.busy)
         self.demo_action.setEnabled(not self.busy)
@@ -969,66 +1314,85 @@ class InspectionWindow(QtWidgets.QMainWindow):
         if self.loaded is None:
             return
         self.page_spin.blockSignals(True)
-        self.page_spin.setRange(1, self.loaded.pages)
-        self.page_spin.setValue(self.loaded.page + 1)
+        self.page_spin.setRange(0, self.loaded.pages - 1)
+        self.page_spin.setValue(self.loaded.page)
         self.page_spin.blockSignals(False)
-        self.page_count.setText(f"of {self.loaded.pages}")
+        self.page_count.setText(f"{self.loaded.pages} pages")
         self.page_bar.setVisible(self.loaded.pages > 1)
 
     def _run_job(self, message, function, on_result):
         if self.busy:
             return
         self.busy = True
-        self.state_label.setText(message)
+        self.save_settings()
+        self._set_state(message)
         self.log.appendPlainText(message)
         self.progress.setRange(0, 0)
         self.progress.show()
         self._update_enabled()
         self._job = _Job(function)
+        context = message.rstrip(".") + " failed"
 
         def done(result):
             self.busy = False
             self.progress.hide()
+            self._clear_error()
             try:
                 on_result(result)
             except Exception:
-                self._show_error(traceback.format_exc())
+                self._show_error(traceback.format_exc(), context=context)
             self._update_enabled()
 
         def failed(detail):
             self.busy = False
             self.progress.hide()
-            self._show_error(detail)
+            self._show_error(detail, context=context)
             self._update_enabled()
 
         self._job.signals.finished.connect(done)
         self._job.signals.failed.connect(failed)
         self._pool.start(self._job)
 
-    def _show_error(self, detail):
+    def _show_error(self, detail, *, context=""):
+        """One plain line over the results (which stay visible); the full text goes to the Activity log."""
         if self._pages is None:
             self.stack_pages.blockSignals(True)
             self.stack_pages.setChecked(False)
             self.stack_pages.blockSignals(False)
         self.log.appendPlainText(detail)
-        self.state_label.setText("Action failed | see Activity")
-        self.statusBar().showMessage(detail.strip().splitlines()[-1], 20000)
-        self.diagnostics.setCurrentWidget(self.log)
+        self.error_label.setText((f"{context}: " if context else "") + plain_error(detail))
+        self.error_banner.show()
+        self._set_state("Failed", "error")
+
+    def _clear_error(self):
+        self.error_banner.hide()
+        self.error_label.clear()
 
     def open_image(self, checked=False, *, path=None, page=0):
         if path is None:
-            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open inspection image", "",
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open inspection image", self._last_folder(),
                 "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.npy);;All files (*)")
         if path:
-            self._run_job("Loading image...", lambda: load_image(path, page), self._set_loaded)
+            self._remember_folder(path)
+            self._run_job("Loading image", lambda: load_image(path, page), self._set_loaded)
+
+    def dragEnterEvent(self, event):
+        if any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if paths and not self.busy:
+            event.acceptProposedAction()
+            self.open_image(path=paths[0])
 
     def _page_changed(self, value):
-        if self.loaded is not None and self.loaded.path and value - 1 != self.loaded.page and not self.busy:
+        if self.loaded is not None and self.loaded.path and value != self.loaded.page and not self.busy:
             if self._pages is not None:
-                self._set_loaded(self._pages[value - 1], keep_pages=True)
+                self._set_loaded(self._pages[value], keep_pages=True)
             else:
                 path = self.loaded.path
-                self._run_job("Loading page...", lambda: load_image(path, value - 1),
+                self._run_job("Loading page", lambda: load_image(path, value),
                               lambda loaded: self._set_loaded(loaded, keep_pages=True))
 
     def _stack_changed(self, enabled):
@@ -1046,9 +1410,9 @@ class InspectionWindow(QtWidgets.QMainWindow):
                 self._page_offsets = np.cumsum([0] + [page.image.shape[0] + gap for page in pages[:-1]]).tolist()
                 self.stack_pages.setChecked(True)
                 self._refresh_page_view(old_offset)
-                self.state_label.setText("All pages visible | analysis uses the active page")
+                self._set_state("All pages visible | analysis uses the active page")
 
-            self._run_job("Loading all pages...", lambda: load_pages(path), accept)
+            self._run_job("Loading all pages", lambda: load_pages(path), accept)
         else:
             # The toggle has already changed; recover the previous display offset.
             old_offset = np.array([0, self._page_offsets[self.loaded.page]]) if not enabled and self._pages else np.zeros(2)
@@ -1086,84 +1450,118 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self._set_loaded(LoadedImage(data, name, conversion=conversion))
 
     def _set_loaded(self, loaded, *, keep_pages=False):
-        preserve_view = keep_pages and self.stack_pages.isChecked() and self._pages is not None
-        if keep_pages and self.loaded is not None:
-            self._page_reviews[self.loaded.page] = self.review
-            self._page_selections[self.loaded.page] = self.selected
-        if not keep_pages:
+        """Show a new image, or (keep_pages) another page of the open file.
+
+        A page change keeps the zoom, the analysis region, the bottom tab, the image view, the selected position,
+        the moving image and a locked contrast, so one area can be followed through the pages.
+        """
+        previous = self.loaded
+        page_change = keep_pages and previous is not None
+        old_offset = self._display_offset() if previous is not None else np.zeros(2)
+        stacked = page_change and self.stack_pages.isChecked() and self._pages is not None
+        keep_view = page_change and (stacked or previous.image.shape == loaded.image.shape)
+        if page_change:
+            self._page_reviews[previous.page] = self.review
+        else:
             self._page_reviews.clear()
-            self._page_selections.clear()
             self._task_reviews.clear()
             self._pages = None
             self._page_offsets = []
             self.stack_pages.blockSignals(True)
             self.stack_pages.setChecked(False)
             self.stack_pages.blockSignals(False)
+            self.moving = None
+            self._selected_xy = None
         self.loaded = loaded
-        self.review = self.registration = self.moving = None
+        self.review = self.registration = None
         self._radial_cache = None
-        self.selected = 0
+        self.selected = None
         self.method.clear()
-        self.stage.setCurrentIndex(0)
+        if not page_change:
+            self.stage.setCurrentIndex(0)
+            self.diagnostics.setCurrentWidget(self.table_tab)
         self._sync_page_controls()
         h, w = loaded.image.shape
-        self.source_label.setText(f"{loaded.name}  |  {w:,} x {h:,} px  |  {loaded.image.dtype}  |  page {loaded.page + 1}/{loaded.pages}"
-                                 + (f"  |  {loaded.conversion}" if loaded.conversion else ""))
+        page = f"  |  page {loaded.page} of {loaded.pages} (0 = first)" if loaded.pages > 1 else ""
+        self.source_label.setText(f"{loaded.name}  |  {w:,} x {h:,} px  |  {loaded.image.dtype}{page}"
+                                  + (f"  |  {loaded.conversion}" if loaded.conversion else ""))
         self.source_label.setToolTip(loaded.path or loaded.name)
-        self.state_label.setText("Image ready")
-        self.summary_label.setText("Measure the active page, then click a result row or image feature to inspect it.")
-        self.diagnostics.setCurrentWidget(self.table_tab)
-        self.feature_label.setText("Click a feature after analysis.")
+        self._set_state("Image ready")
+        self.summary_label.setText("Measure the active page, then click a hole on the image or a row of the table.")
+        self.failure_label.clear()
         self.feature_spin.setRange(0, 0)
-        self.metrics.setRowCount(0)
-        self.comparison.setRowCount(0)
-        self.table_model.beginResetModel()
-        self.table_model.rows = []
-        self.table_model.review = None
-        self.table_model.endResetModel()
-        self.profile_plot.clear()
-        self.detail_label.setText("Click a detected feature to inspect its input and measurement.")
-        self.method_help.setText("Select a method to see its definition and assumptions.")
+        self._clear_detail("Click a hole after measuring.")
+        self.table_model.clear()
         self.notes_label.setText("Review failed fits and method assumptions before accepting measurements.")
         self.review_notice.hide()
-        for canvas in (self.raw_canvas, self.input_canvas, *self.registration_canvases):
+        for canvas in self.registration_canvases:
             canvas.image_item.clear()
             canvas.clear_overlays()
         for plot in self.pitch_plots.values():
             plot.clear()
         self.pitch_label.setText("Run Pitch + placement to calculate profiles.")
-        self.registration_label.setText("No image registration calculated.")
-        self.moving_page_spin.setRange(1, 1)
-        self.moving_label.setText("Open a moving image of the same dimensions. The loaded image is the fixed reference.")
-        self.roi_action.setChecked(False)
+        self.registration_label.setText("No alignment calculated." + (
+            " The moving image stays; align again for this page." if self.moving is not None else ""))
+        if self.moving is None:
+            self._sync_moving_controls()
         offset = self._display_offset()
-        self.roi.setPos((w * 0.25 - 0.5, h * 0.25 - 0.5 + offset[1]))
-        self.roi.setSize((w * 0.5, h * 0.5))
+        self.roi.blockSignals(True)
+        if page_change:
+            # The same region on the new page, moved inside it when the page is smaller.
+            position, size = self._region or (self.roi.pos() - QtCore.QPointF(*old_offset), self.roi.size())
+            size = QtCore.QPointF(min(size.x(), w), min(size.y(), h))
+            x = min(max(position.x(), -0.5), w - 0.5 - size.x())
+            y = min(max(position.y(), -0.5), h - 0.5 - size.y())
+            self.roi.setSize((size.x(), size.y()))
+            self.roi.setPos((x, y + offset[1]))
+        else:
+            self.roi_action.setChecked(False)
+            self._region = None
+            self.roi.setPos((w * 0.25 - 0.5, h * 0.25 - 0.5 + offset[1]))
+            self.roi.setSize((w * 0.5, h * 0.5))
         self.roi.maxBounds = QtCore.QRectF(-0.5, offset[1] - 0.5, w, h)
+        self.roi.blockSignals(False)
         self._render_image()
-        if not preserve_view:
+        if not keep_view:
             self.canvas.fit_image()
-        self.log.appendPlainText(f"Loaded {loaded.name}: shape={loaded.image.shape}, dtype={loaded.image.dtype}. {loaded.conversion}")
+        self.log.appendPlainText(f"Loaded {loaded.name}, page {loaded.page}: shape={loaded.image.shape}, "
+                                 f"dtype={loaded.image.dtype}. {loaded.conversion}")
         saved = self._page_reviews.get(loaded.page)
         if saved is not None:
-            bounds = saved.parameters.get("bounds")
-            if bounds is not None:
-                x0, y0, x1, y1 = bounds
-                self.roi.setPos((x0 - .5, y0 - .5 + offset[1]))
-                self.roi.setSize((x1 - x0, y1 - y0))
-                self.roi_action.setChecked(True)
-            self.selected = self._page_selections.get(loaded.page, 0)
             self._accept_review(saved, restoring=True)
         self._update_enabled()
+
+    def _clear_detail(self, message):
+        self.feature_label.setText(message)
+        self.metrics.setRowCount(0)
+        self.comparison.setRowCount(0)
+        self.profile_plot.clear()
+        self.detail_label.setText("Click a hole to inspect its input and measurement.")
+        self.method_help.setText("Select a method to see its definition and assumptions.")
+        for canvas in (self.raw_canvas, self.input_canvas):
+            canvas.image_item.clear()
+            canvas.clear_overlays()
+
+    def _lock_levels_changed(self, locked):
+        self._locked_levels = tuple(self.canvas.image_item.getLevels()) if locked else None
+
+    def _levels_changed(self):
+        if self.lock_levels.isChecked() and self.stage.currentText() == "Loaded image":
+            self._locked_levels = tuple(self.canvas.histogram.getLevels())
 
     def load_demo(self):
         def generate():
             return LoadedImage(demo_image(),
                                "Synthetic staggered contact holes (seed 42)")
-        self._run_job("Generating demonstration image...", generate, self._set_loaded)
+        self._run_job("Generating demonstration image", generate, self._set_loaded)
 
     def _toggle_roi(self, enabled):
         self.roi.setVisible(enabled)
+        self._settings_changed()
+
+    def _roi_changed(self):
+        # The region as the user set it (page-local), so a smaller page in between cannot shrink it.
+        self._region = (self.roi.pos() - QtCore.QPointF(*self._display_offset()), self.roi.size())
         self._settings_changed()
 
     def _bounds(self):
@@ -1191,7 +1589,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
         if validate_pitch and (hint[0] == 0) != (hint[1] == 0):
             raise ValueError("Set both x/y pitch hints, or leave both at zero for automatic indexing.")
         reference = None
-        if self.reference_selected.isChecked() and self.review is not None and len(self.review.seeds_xy):
+        if self.reference_selected.isChecked() and self.review is not None and self.selected is not None:
             # Convert via loaded-image coordinates if the analysis region changed.
             origin = np.array(self._bounds()[:2]) if self._bounds() is not None else np.zeros(2)
             reference = (self.review.seeds_xy[self.selected] + self.review.origin_xy - origin).tolist()
@@ -1205,6 +1603,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
             fit_fraction=self.fit_fraction.value(), half_area_level=self.half_level.value(),
             half_area_peak_pixels=self.peak_pixels.value(), tail_area_level=self.tail_level.value(),
             tail_window=self.tail_window.value(), deblend_iterations=self.iterations.value(),
+            deblend_tolerance=self.tolerance.value(),
             nominal_cd=self.nominal_cd.value() or None, psf_fwhm=self.psf_fwhm.value() or None,
             dark_level=self.dark_level.value(), pitch_source=self.pitch_source.currentData(),
             pitch_options=dict(layout=self.pattern_layout.currentData(), stagger_axis=self.stagger_axis.currentData(),
@@ -1215,6 +1614,10 @@ class InspectionWindow(QtWidgets.QMainWindow):
 
     def run_analysis(self, operation):
         if self.loaded is None or self.busy:
+            return
+        problem = self._run_problems()[0][operation]
+        if problem:
+            self._show_error(problem)
             return
         try:
             parameters, bounds = self.parameters(validate_pitch=operation == "pitch"), self._bounds()
@@ -1241,11 +1644,11 @@ class InspectionWindow(QtWidgets.QMainWindow):
                 try:
                     result.patterns = analyze_patterns(result, parameters["pitch_options"])
                 except ValueError as exc:
-                    result.notes.append(f"Pitch indexing failed: {exc}")
+                    result.warnings.append(f"Pitch indexing failed: {exc}")
                 result.parameters["operation"] = "pitch"
             return result
 
-        labels = {"detect": "Finding patterns...", "cd": "Measuring CD...", "pitch": "Calculating pitch and placement..."}
+        labels = {"detect": "Finding holes", "cd": "Measuring CD", "pitch": "Calculating pitch and placement"}
         self._run_job(labels[operation], calculate, self._accept_review)
 
     def _accept_review(self, review, *, restoring=False):
@@ -1256,43 +1659,49 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.method.blockSignals(True)
         self.method.clear()
         for name in review.measurements:
-            self.method.addItem(METHOD_NAMES.get(name, name), name)
+            self.method.addItem(method_name(name), name)
+            self.method.setItemData(self.method.count() - 1, f"{name}: {METHOD_LABELS.get(name, name)}",
+                                    QtCore.Qt.ItemDataRole.ToolTipRole)
         self.method.setCurrentIndex(max(0, self.method.findData(old)))
         self.method.blockSignals(False)
         self.feature_spin.blockSignals(True)
         self.feature_spin.setRange(0, max(0, len(review.seeds_xy) - 1))
         self.feature_spin.blockSignals(False)
-        self.selected = min(self.selected, max(0, len(review.seeds_xy) - 1))
-        self.state_label.setText(f"{len(review.seeds_xy):,} features | {review.seconds:.2f} s | "
-                                 + ("review notes" if review.notes else "ready"))
-        self.notes_label.setText("\n\n".join(review.notes) or "No method failures reported. Inspect image support and fit assumptions before accepting a measurement.")
-        self.review_notice.setText(review.notes[0] if review.notes else "")
-        self.review_notice.setToolTip("\n".join(review.notes))
-        self.review_notice.setVisible(bool(review.notes))
+        # No hole is selected until a click; a hole selected before stays selected at its position.
+        index = self._hole_near(review, self._selected_xy)
+        self.selected = index if index >= 0 else None
+        warnings = review.warnings
+        self._set_state(f"{len(review.seeds_xy):,} holes | {review.seconds:.2f} s"
+                        + (f" | {len(warnings)} warning{'s' * (len(warnings) > 1)}" if warnings else ""),
+                        "warning" if warnings else "info")
+        self.notes_label.setText("\n\n".join([*(f"Warning: {text}" for text in warnings), *review.notes])
+                                 or "No method failures reported. Inspect image support and fit assumptions "
+                                    "before accepting a measurement.")
+        lines = ([f"<span style='color:#ffce73'>&#9888; {html_escape(text)}</span>" for text in warnings]
+                 + [f"<span style='color:#a9bbce'>{html_escape(text)}</span>" for text in review.notes])
+        self.review_notice.setText("<br>".join(lines))
+        self.review_notice.setVisible(bool(lines))
         if not restoring:
             self.log.appendPlainText(f"Analysis complete in {review.seconds:.3f} s. Region origin [x,y]={review.origin_xy.tolist()}.")
             if review.cd is not None:
                 self.log.appendPlainText(f"Background: {review.cd.meta.get('background_definition')}")
-                self.log.appendPlainText("Stage timings (s): " + str(review.cd.meta.get("seconds", {})))
-            for note in review.notes:
-                self.log.appendPlainText(note)
+                seconds = review.cd.meta.get("seconds", {})
+                self.log.appendPlainText("Stage timings: " + ", ".join(
+                    f"{stage} {value:.2f} s" for stage, value in seconds.items() if isinstance(value, (int, float))))
+            for text in warnings:
+                self.log.appendPlainText("Warning: " + text)
+            for text in review.notes:
+                self.log.appendPlainText(text)
         self._method_changed()
         if not len(review.seeds_xy):
-            self.feature_label.setText("No features found. Review segmentation, area limits, polarity and region.")
-            self.metrics.setRowCount(0)
-            self.comparison.setRowCount(0)
-            self.detail_label.setText("No feature input is available for this calculation.")
-            self.profile_plot.clear()
-            for canvas in (self.raw_canvas, self.input_canvas):
-                canvas.image_item.clear()
-                canvas.clear_overlays()
-        if review.patterns:
-            self.diagnostics.setCurrentWidget(self.pitch_tab)
-            self.layer_checks["Pitch pairs"].setChecked(True)
-        else:
-            self.diagnostics.setCurrentWidget(self.table_tab)
-        if self.task.currentData() == "detect":
-            self.stage.setCurrentIndex(1)
+            self._clear_detail("No holes found. Review segmentation, area limits, polarity and region.")
+            self.detail_label.setText("No hole input is available for this calculation.")
+        if not restoring:
+            if review.patterns:
+                self.diagnostics.setCurrentWidget(self.pitch_tab)
+                self.layer_checks["Pitch pairs"].setChecked(True)
+            elif self.diagnostics.currentWidget() in (self.log, self.alignment_tab):
+                self.diagnostics.setCurrentWidget(self.table_tab)
         self._update_overlay_controls()
         current = self.parameters(validate_pitch=False)
         relevant = COMMON_SETTINGS + (("refine",) if review.detection is not None else CD_SETTINGS)
@@ -1310,7 +1719,10 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self._render_image()
         self._update_table()
         self._draw_pitch()
-        self.select_feature(self.selected, reveal=False)
+        if self.selected is not None:
+            self.select_feature(self.selected, reveal=False)
+        elif self.review is not None and len(self.review.seeds_xy):
+            self._clear_detail("Click a hole on the image or a row of the table.")
 
     def _update_overlay_controls(self):
         has_review = self.review is not None
@@ -1358,15 +1770,19 @@ class InspectionWindow(QtWidgets.QMainWindow):
                 message = "This background mode has no global background map. "
         offset = self._display_offset()
         display_origin = review.origin_xy + offset if review is not None else offset
-        canvas.set_image(data, origin + offset, fit=False, categorical=categorical)
+        locked = self.lock_levels.isChecked() and self._locked_levels is not None and stage == "Loaded image"
+        canvas.set_image(data, origin + offset, fit=False, categorical=categorical, keep_levels=locked)
+        if locked:
+            canvas.histogram.setLevels(*self._locked_levels)
         if self._pages is not None and self.stack_pages.isChecked():
             self._render_pages()
         self.roi.setZValue(50)
         if review is None or not len(review.seeds_xy) or self.method.currentData() not in review.measurements:
+            self.failure_label.clear()
             if self.task.currentData() == "register":
                 self.summary_label.setText("Reference: active page. Open a matching moving image, then Align images.")
             elif review is not None and not len(review.seeds_xy):
-                self.summary_label.setText("No features found. Inspect the threshold mask, area limits, polarity and region.")
+                self.summary_label.setText("No holes found. Inspect the threshold mask, area limits, polarity and region.")
             elif message:
                 self.summary_label.setText(message)
             return
@@ -1418,14 +1834,30 @@ class InspectionWindow(QtWidgets.QMainWindow):
                     canvas.add_overlay(f"pairs_{axis}", pg.PlotDataItem(segments[:, 0], segments[:, 1], connect="pairs", pen=pg.mkPen(color, width=1)))
             ref = seeds[pattern.reference_index]
             canvas.add_overlay("reference", pg.ScatterPlotItem(pos=[ref], symbol="star", size=18, brush="#ffce73", pen="#fff3cf"))
-        if 0 <= self.selected < len(seeds):
+        if self.selected is not None and 0 <= self.selected < len(seeds):
             canvas.add_overlay("selected", pg.ScatterPlotItem(pos=[seeds[self.selected]], symbol="o", size=20,
                 brush=None, pen=pg.mkPen("#ffffff", width=2)))
-        summary = f"Page {self.loaded.page + 1} | {valid.sum():,} measured, {len(valid) - valid.sum():,} failed"
+        page = f"Page {self.loaded.page} | " if self.loaded.pages > 1 else ""
+        summary = f"{page}{len(valid):,} holes | {method_name(name)}: {valid.sum():,} measured"
         values = measured.metrics.get("cd_equivalent_px")
         if values is not None and valid.any():
-            summary += f" | Mean CD {np.mean(values[valid]) * review.parameters['pixel_size']:.4g} {review.parameters['unit']}"
+            summary += f", mean CD {np.mean(values[valid]) * review.parameters['pixel_size']:.4g} {review.parameters['unit']}"
         self.summary_label.setText(message + summary + color_message)
+        self.failure_label.setText(self._failure_summary(review))
+
+    @staticmethod
+    def _failure_summary(review):
+        """Failed holes of every method, largest first; always on screen (the shown method is only one of them)."""
+        if review.cd is None:
+            return "<span style='color:#a9bbce'>Detection only: measure CD to see failures per method.</span>"
+        total = max(len(review.seeds_xy), 1)
+        failed = sorted(((int((~measured.valid).sum()), name) for name, measured in review.measurements.items()),
+                        reverse=True)
+        parts = [f"{html_escape(method_name(name))} {count:,} ({100 * count / total:.0f} %)"
+                 for count, name in failed if count]
+        if not parts:
+            return "<span style='color:#9be28a'>No method failed on any hole.</span>"
+        return "<span style='color:#ffce73'>Failed: " + " &middot; ".join(parts) + "</span>"
 
     def _render_pages(self):
         canvas = self.canvas
@@ -1449,7 +1881,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
             border.setPen(pg.mkPen("#56d6cf" if active else "#354a60", width=2 if active else 1))
             border.setZValue(10)
             canvas.add_overlay(f"page_border_{page.page}", border)
-            label = pg.TextItem(f"Page {page.page + 1}" + (" · active" if active else " · click to select"),
+            label = pg.TextItem(f"Page {page.page}" + (" · active" if active else " · click to select"),
                                 color="#56d6cf" if active else "#a9bbce", anchor=(0, 1), fill="#151e2b")
             label.setPos(0, offset - .5)
             label.setZValue(11)
@@ -1467,20 +1899,27 @@ class InspectionWindow(QtWidgets.QMainWindow):
             return
         if page.page != self.loaded.page:
             if not self.busy:
-                self.page_spin.setValue(page.page + 1)
+                self.page_spin.setValue(page.page)
             return
-        if self.review is None or not len(self.review.seeds_xy):
-            return
-        local = np.array([x, local_y]) - self.review.origin_xy
-        h, w = self.review.image.shape
-        if not (-0.5 <= local[0] < w - 0.5 and -0.5 <= local[1] < h - 0.5):
-            return
-        index = -1
-        if self.review.cd is not None:
-            index = int(self.review.cd.cell_labels[int(np.floor(local[1] + .5)), int(np.floor(local[0] + .5))])
-        if index < 0:
-            index = int(np.argmin(np.sum((self.review.seeds_xy - local) ** 2, axis=1)))
-        self.select_feature(index)
+        index = self._hole_near(self.review, (x, local_y))
+        if index >= 0:
+            self.select_feature(index)
+
+    @staticmethod
+    def _hole_near(review, xy):
+        """The hole whose cell holds the loaded-page point xy, else the nearest within 3/4 of a pitch; -1: none."""
+        if review is None or xy is None or not len(review.seeds_xy):
+            return -1
+        local = np.asarray(xy, float) - review.origin_xy
+        h, w = review.image.shape
+        if review.cd is not None and -0.5 <= local[0] < w - 0.5 and -0.5 <= local[1] < h - 0.5:
+            index = int(review.cd.cell_labels[int(np.floor(local[1] + .5)), int(np.floor(local[0] + .5))])
+            if index >= 0:
+                return index
+        distance = np.hypot(*(review.seeds_xy - local).T)
+        nearest = int(np.argmin(distance))
+        spacing = np.sqrt(review.image.size / len(review.seeds_xy))
+        return nearest if distance[nearest] <= 0.75 * spacing else -1
 
     def _hover_image(self, x, y):
         if self.loaded is None:
@@ -1488,23 +1927,28 @@ class InspectionWindow(QtWidgets.QMainWindow):
         page, local_y = self._page_at(x, y)
         if page is not None:
             ix, iy = int(np.floor(x + .5)), int(np.floor(local_y + .5))
-            self.statusBar().showMessage(f"Page {page.page + 1} | x={x:.2f}, y={local_y:.2f} px | pixel [{iy}, {ix}] = {page.image[iy, ix]:.6g} | wheel: zoom, drag: pan, click: inspect")
+            prefix = f"Page {page.page} | " if self.loaded.pages > 1 else ""
+            self.hover_label.setText(f"{prefix}x={x:.2f}, y={local_y:.2f} px | pixel [{iy}, {ix}] = {page.image[iy, ix]:.6g}")
 
-    def select_feature(self, index, *, reveal=True):
+    def select_feature(self, index, *, reveal=True, pan=False):
+        """Select hole ``index``. ``reveal`` opens the hole tab (image clicks); ``pan`` brings it into view."""
         review = self.review
-        if review is None or not len(review.seeds_xy) or self.method.currentData() not in review.measurements:
+        if index is None or review is None or not len(review.seeds_xy) or self.method.currentData() not in review.measurements:
             return
         self.selected = max(0, min(int(index), len(review.seeds_xy) - 1))
+        self._selected_xy = review.seeds_xy[self.selected] + review.origin_xy
         if reveal:
             self.diagnostics.setCurrentWidget(self.feature_tab)
-            sizes = self.vertical_splitter.sizes()
-            detail_height = min(370, round(self.height() * .4))
-            if sizes[1] < detail_height:
-                self.vertical_splitter.setSizes([max(180, sum(sizes) - detail_height), detail_height])
-        for row, values in enumerate(self.table_model.rows):
-            if values[0] == self.selected:
+        row = self.table_model.row_of.get(self.selected)
+        self._syncing_table = True
+        try:
+            if row is None:
+                self.table.clearSelection()
+            elif self.table.currentIndex().row() != row:
                 self.table.selectRow(row)
-                break
+                self.table.scrollTo(self.table_model.index(row, 0))
+        finally:
+            self._syncing_table = False
         self.feature_spin.blockSignals(True)
         self.feature_spin.setValue(self.selected)
         self.feature_spin.blockSignals(False)
@@ -1513,20 +1957,23 @@ class InspectionWindow(QtWidgets.QMainWindow):
         measured = review.measurements[method]
         point = measured.centers_xy[self.selected] + review.origin_xy
         seed = review.seeds_xy[self.selected] + review.origin_xy
-        self.feature_label.setText(f"Feature {self.selected} | {measured.status[self.selected]}\n"
+        self.feature_label.setText(f"Hole {self.selected} | {measured.status[self.selected]}\n"
                                   f"Seed x={seed[0]:.4f}, y={seed[1]:.4f} px\n"
-                                  f"Method x={point[0]:.4f}, y={point[1]:.4f} px")
-        self.method_help.setText(METHOD_HELP.get(method, METHOD_LABELS.get(method, "Subpixel center detection") + ". "
-                                               + (AREA_HELP if method != "detection" else "Review the threshold mask and area limits before measuring CD.")))
+                                  f"{method_name(method)} x={point[0]:.4f}, y={point[1]:.4f} px")
+        self.method_help.setText(f"{method_name(method)} ({method}). " + METHOD_HELP.get(
+            method, METHOD_LABELS.get(method, "Subpixel center detection") + ". "
+            + (AREA_HELP if method != "detection" else "Review the threshold mask and area limits before measuring CD.")))
         self.comparison.setRowCount(len(review.measurements))
         self.comparison.setVisible(review.cd is not None)
         scale, unit = review.parameters["pixel_size"], review.parameters["unit"]
         for row, (name, measurement) in enumerate(review.measurements.items()):
             cd = measurement.metrics.get("cd_equivalent_px")
-            values = [name, f"{cd[self.selected] * scale:.5g} {unit}" if cd is not None and np.isfinite(cd[self.selected]) else "--",
+            values = [method_name(name), f"{cd[self.selected] * scale:.5g} {unit}" if cd is not None and np.isfinite(cd[self.selected]) else "--",
                       str(measurement.status[self.selected])]
             for column, value in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(value)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, name)
+                item.setToolTip(f"{name}: {METHOD_LABELS.get(name, name)}")
                 item.setForeground(QtGui.QColor(COLORS[row % len(COLORS)] if measurement.valid[self.selected] else "#ff748a"))
                 self.comparison.setItem(row, column, item)
         rows = list(measured.metrics.items())
@@ -1545,23 +1992,33 @@ class InspectionWindow(QtWidgets.QMainWindow):
             self.metrics.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{value:.6g}" if np.isfinite(value) else "--"))
         self._render_image()
         self._draw_detail()
+        if pan:
+            self._reveal(seed + self._display_offset())
         if self.reference_selected.isChecked() and method in review.patterns and not self.busy:
             if review.patterns[method].reference_index != self.selected:
-                self.state_label.setText("Reference changed | rerun Pitch + placement")
+                self._set_state("Reference changed | rerun Pitch + placement", "warning")
+
+    def _reveal(self, point):
+        """Pan, keeping the zoom, when the point lies outside the view."""
+        view = self.canvas.plot.getViewBox()
+        (x0, x1), (y0, y1) = view.viewRange()
+        if not (x0 <= point[0] <= x1 and y0 <= point[1] <= y1):
+            dx, dy = (x1 - x0) / 2, (y1 - y0) / 2
+            view.setRange(xRange=(point[0] - dx, point[0] + dx), yRange=(point[1] - dy, point[1] + dy), padding=0)
 
     def next_failed(self):
         if self.review is None or self.method.currentData() not in self.review.measurements:
             return
         bad = np.flatnonzero(~self.review.measurements[self.method.currentData()].valid)
         if len(bad):
-            later = bad[bad > self.selected]
-            self.select_feature(later[0] if len(later) else bad[0])
+            later = bad[bad > (-1 if self.selected is None else self.selected)]
+            self.select_feature(later[0] if len(later) else bad[0], reveal=False)
             self.zoom_selected()
         else:
-            self.statusBar().showMessage("No failed measurements for the selected method.", 5000)
+            self.statusBar().showMessage(f"No failed holes for {method_name(self.method.currentData())}.", 5000)
 
     def zoom_selected(self):
-        if self.review is None or not len(self.review.seeds_xy):
+        if self.review is None or self.selected is None or not len(self.review.seeds_xy):
             return
         point = self.review.seeds_xy[self.selected] + self.review.origin_xy + self._display_offset()
         radius = 15
@@ -1572,18 +2029,31 @@ class InspectionWindow(QtWidgets.QMainWindow):
 
     def _update_table(self, *args):
         if self.review is not None and self.method.currentData() in self.review.measurements:
-            self.table_model.set_review(self.review, self.method.currentData(), self.failed_only.isChecked())
+            self._syncing_table = True
+            try:
+                self.table_model.set_review(self.review, self.method.currentData(), self.failed_only.isChecked())
+            finally:
+                self._syncing_table = False
+            if self.selected is not None and self.selected in self.table_model.row_of:
+                self.select_feature(self.selected, reveal=False)
+
+    def _table_row_changed(self, current, previous):
+        # Clicks, arrow keys and Page keys in the table select the hole of the current row; the table stays.
+        if self._syncing_table or not current.isValid():
+            return
+        feature = int(self.table_model.data(current, QtCore.Qt.ItemDataRole.UserRole))
+        if feature != self.selected:
+            self.select_feature(feature, reveal=False, pan=True)
 
     def _select_table(self, index):
-        feature = int(self.table_model.data(index, QtCore.Qt.ItemDataRole.UserRole))
+        # A click on another method's CD column shows that method too.
         if index.column() >= 7:
-            method = self.table_model.extra_methods[index.column() - 7]
-            self.method.setCurrentIndex(self.method.findData(method))
-        self.select_feature(feature)
+            self.selected = int(self.table_model.data(index, QtCore.Qt.ItemDataRole.UserRole))
+            self.method.setCurrentIndex(self.method.findData(self.table_model.extra_methods[index.column() - 7]))
 
     def _draw_detail(self, *args):
         review = self.review
-        if review is None or not len(review.seeds_xy):
+        if review is None or self.selected is None or not len(review.seeds_xy):
             return
         index, method = self.selected, self.method.currentData()
         if method not in review.measurements:
@@ -1761,58 +2231,89 @@ class InspectionWindow(QtWidgets.QMainWindow):
             + f"\nError bars: spread across contributing pairs per interval. Baseline: {pattern.meta['nominal_source']}. "
               f"Unindexed: {pattern.meta['unindexed_seeds']}. Gaps interrupt integration.")
 
+    def _sync_moving_controls(self):
+        """Moving page box: the moving file's pages, or the open file's until a moving image is chosen."""
+        moving = self.moving
+        pages = moving.pages if moving is not None else self.loaded.pages if self.loaded is not None else 1
+        with QtCore.QSignalBlocker(self.moving_page_spin):
+            self.moving_page_spin.setRange(0, max(0, pages - 1))
+            if moving is not None:
+                self.moving_page_spin.setValue(moving.page)
+        if moving is None:
+            self.moving_label.setText("Open a moving image of the same size, or 'Use this file' for a page of the "
+                                      "open file. The active page is the fixed reference.")
+        else:
+            self.moving_label.setText(f"Moving: {moving.name} | page {moving.page}"
+                                      + (f"\n{moving.conversion}" if moving.conversion else ""))
+
     def _moving_page_changed(self, value):
-        if self.moving is not None and self.moving.path and value - 1 != self.moving.page and not self.busy:
-            self.open_moving(path=self.moving.path, page=value - 1)
+        if self.moving is not None and self.moving.path and value != self.moving.page and not self.busy:
+            self.open_moving(path=self.moving.path, page=value)
+
+    def _use_this_file(self):
+        if self.loaded is not None and self.loaded.path and not self.busy:
+            self.open_moving(path=self.loaded.path, page=min(self.moving_page_spin.value(), self.loaded.pages - 1))
 
     def open_moving(self, checked=False, *, path=None, page=0):
         if self.loaded is None:
             self.statusBar().showMessage("Open the fixed reference image first.", 5000)
             return
         if path is None:
-            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open moving image", "",
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open moving image", self._last_folder(),
                 "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.npy);;All files (*)")
         if not path:
             return
+        self._remember_folder(path)
 
         def accept(image):
             if image.image.shape != self.loaded.image.shape:
-                raise ValueError(f"Moving image shape {image.image.shape} must match reference {self.loaded.image.shape}.")
+                (mh, mw), (h, w) = image.image.shape, self.loaded.image.shape
+                raise ValueError(f"The moving image is {mw} x {mh} px; the reference page is {w} x {h} px.")
             self.moving = image
             self.registration = None
-            self.moving_page_spin.blockSignals(True)
-            self.moving_page_spin.setRange(1, image.pages)
-            self.moving_page_spin.setValue(image.page + 1)
-            self.moving_page_spin.blockSignals(False)
-            self.moving_label.setText(f"Moving: {image.name} | page {image.page + 1}\n{image.conversion}")
-            self.state_label.setText("Moving image ready")
-            self.registration_label.setText("Ready to register. The fixed image is the loaded reference.")
+            self._sync_moving_controls()
+            self._set_state("Moving image ready")
+            self.registration_label.setText("Ready to align. The fixed image is the active page.")
             for canvas in self.registration_canvases:
                 canvas.image_item.clear()
             self.registration_canvases[0].set_image(image.image)
             self.registration_canvases[0].plot.setTitle("Moving image before alignment")
             self.diagnostics.setCurrentWidget(self.alignment_tab)
 
-        self._run_job("Loading moving image...", lambda: load_image(path, page), accept)
+        self._run_job("Loading moving image", lambda: load_image(path, page), accept)
 
     def run_registration(self):
         if self.loaded is None or self.moving is None or self.busy:
             return
+        problem = self._run_problems()[0]["register"]
+        if problem:
+            self._show_error(problem)
+            return
         reference, moving, factor = self.loaded.image, self.moving.image, self.upsample.value()
+        mode = self.hole_check_mode.currentData()
 
         def accept(result):
             self.registration = result
             dy, dx = result.result.shift_yx
-            self.registration_label.setText(f"Apply [dy, dx] = [{dy:.5f}, {dx:.5f}] px\n"
-                f"Overlap RMSE: {result.rmse_before:.5g} > {result.rmse_after:.5g} intensity units\n"
-                f"Phase-correlation normalized error: {result.result.error:.5g}\n"
-                "RMSE compares the same overlap before and after translation. A lower RMSE does not resolve periodic-peak ambiguity.")
+            limit = HOLE_CHECK_MAX_ERROR[result.hole_check_mode]
+            passes = result.hole_check_error < limit
+            verdict = (f"below {limit}: the batch would measure this page" if passes else
+                       f"not below {limit}: the batch would skip it as 'no holes'; this shift may mean nothing")
+            self.registration_label.setText(
+                f"Move the moving image by [dy, dx] = [{dy:.4f}, {dx:.4f}] px\n"
+                f"Overlap RMSE: {result.rmse_before:.4g} → {result.rmse_after:.4g} (intensity units)\n"
+                f"Hole check ({result.hole_check_mode}, as the batch): {result.hole_check_error:.3f}, {verdict}\n"
+                "A lower RMSE does not rule out a shift by whole pitches on a repeating pattern.")
             self._draw_registration()
             self.log.appendPlainText(self.registration_label.text())
-            self.state_label.setText(f"Registered | dy={dy:.4f}, dx={dx:.4f} px")
+            if passes:
+                self._set_state(f"Aligned | dy={dy:.4f}, dx={dx:.4f} px")
+            else:
+                self._set_state(f"Aligned, hole check failed ({result.hole_check_error:.2f})", "warning")
             self.diagnostics.setCurrentWidget(self.alignment_tab)
 
-        self._run_job("Registering images...", lambda: register_images(reference, moving, upsample_factor=factor), accept)
+        self._run_job("Aligning images", lambda: register_images(reference, moving, upsample_factor=factor,
+                                                                   hole_check_mode=mode), accept)
 
     def _draw_registration(self, *args):
         result = self.registration
@@ -1846,11 +2347,10 @@ class InspectionWindow(QtWidgets.QMainWindow):
     def export_results(self):
         if self.busy or (self.review is None and self.registration is None):
             return
-        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose export parent folder")
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose export parent folder", self._last_folder())
         if not directory:
             return
         from datetime import datetime
-        import json
 
         output = Path(directory) / ("inspection_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
         review, registration = self.review, self.registration
@@ -1871,16 +2371,17 @@ class InspectionWindow(QtWidgets.QMainWindow):
                     difference_before=registration.difference_before, difference_after=registration.difference_after)
                 source["registration"] = dict(shift_yx=registration.result.shift_yx.tolist(),
                     rmse_before=registration.rmse_before, rmse_after=registration.rmse_after,
-                    normalized_error=registration.result.error, **registration.result.meta)
+                    hole_check_error=registration.hole_check_error, hole_check_mode=registration.hole_check_mode,
+                    **registration.result.meta)
             (output / "source.json").write_text(json.dumps(source, indent=2), encoding="utf-8")
             return output
 
         def accept(path):
             self.log.appendPlainText(f"Exported results to {path}")
-            self.state_label.setText("Results exported")
+            self._set_state("Results exported")
             self.statusBar().showMessage(f"Saved: {path}", 20000)
 
-        self._run_job("Exporting results...", save, accept)
+        self._run_job("Exporting results", save, accept)
 
     def save_screenshot(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save workbench screenshot", "inspection.png", "PNG (*.png)")
@@ -1892,32 +2393,30 @@ class InspectionWindow(QtWidgets.QMainWindow):
 
     def show_guide(self):
         QtWidgets.QMessageBox.information(self, "Inspection workflow",
-            "Choose a task tab. Its controls and action stay beside the image, with results below.\n\n"
-            "Find features: set polarity, threshold and area limits; check the segmentation preview. "
-            "These settings also feed CD.\n\n"
-            "Measure CD: choose a comparison preset, set the pixel scale and click Measure CD. "
-            "Choose methods and parameters customizes the selection and shows only relevant parameters. "
-            "Calibrated hole methods show their required calibration directly in the task panel.\n\n"
-            "Results compare methods side by side. Click a CD value to inspect that method and feature. "
-            "The Selected feature tab shows pixels, contours, profiles and method comparisons. "
-            "Metrics and notes provides the full diagnostic values.\n\n"
-            "Pitch + placement: choose centers, lattice, averaging and design pitch. "
-            "Matching CD or detection results are reused. Align images: open a moving image, "
-            "choose its page, then align it to the active reference. Shifts use [dy, dx] pixels.\n\n"
-            "Multipage TIFFs: Previous / Next, the page number, or Page Up / Page Down navigate. "
-            "Stack vertically displays every page. Click a page to make it active. "
-            "Analysis, regions and exports stay local to that page. Completed analyses are retained "
-            "when switching tasks and pages; opening another file clears them. "
-            "Stacked pages and saved analyses are held in memory.\n\n"
-            "Wheel zooms, drag pans, F fits visible pages, Z zooms to the selected feature. "
-            "Analysis region limits measurements to a crop. The histogram changes display contrast only. "
-            "Ctrl+Enter runs the current task. Export includes parameters, failures, arrays and tables.")
+            "Choose a task tab. Its settings and Run button stay beside the image, with results below. "
+            "A disabled Run button says why under it.\n\n"
+            "Find features: polarity, threshold and area limits; check the holes before measuring.\n\n"
+            "Measure CD: the default preset is the batch's ten methods with the batch's settings. "
+            "'Choose methods and parameters' ticks other methods. The line above the image lists the failed "
+            "holes of every method.\n\n"
+            "The table lists the holes; click a row or use the arrow keys to select a hole, click another "
+            "method's CD to show that method. Clicking a hole on the image opens 'Selected feature' with its "
+            "pixels, contours and profile.\n\n"
+            "Pitch + placement: centers, lattice, averaging and design pitch. Align images: open a moving image "
+            "or use a page of this file; the shift, RMSE and the batch's hole check are shown.\n\n"
+            "Pages are counted from 0, as in the batch's pages.csv. Page Up / Page Down on the image change the "
+            "page; the zoom, analysis region, selected position and moving image stay. 'Lock' keeps the contrast. "
+            "Stack vertically shows every page; click a page to make it active.\n\n"
+            "Wheel zooms, drag pans, F fits, Z zooms to the selected hole, Ctrl+Enter runs the task. "
+            "Drop a file on the window to open it. Settings are remembered; 'Reset settings' restores the defaults.")
 
     def closeEvent(self, event):
         if self.busy:
             self.statusBar().showMessage("The background job is still running. Close after it completes.", 8000)
             event.ignore()
         else:
+            self.save_settings()
+            _WINDOWS.discard(self)
             event.accept()
 
 

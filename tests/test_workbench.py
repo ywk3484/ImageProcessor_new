@@ -12,18 +12,24 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtTest import QTest
 from subpx._workbench_data import LoadedImage, analyze_image
 from subpx.workbench import InspectionWindow
 
 
+def settings_file(path):
+    # Never the user's own settings (the registry on Windows).
+    return QtCore.QSettings(str(path / "workbench.ini"), QtCore.QSettings.Format.IniFormat)
+
+
 @pytest.fixture
-def window(monkeypatch):
+def window(monkeypatch, tmp_path):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     errors = []
     monkeypatch.setattr(sys, "excepthook", lambda *error: errors.append(error))
-    widget = InspectionWindow()
+    widget = InspectionWindow(settings=settings_file(tmp_path))
+    widget.backend.setCurrentIndex(widget.backend.findData("cpu"))  # the same numbers on every machine
     widget.show()
     y, x = np.mgrid[:80, :100]
     image = np.full((80, 100), 10.)
@@ -104,7 +110,7 @@ def test_all_stages_methods_roi_and_display_contrast(window):
     assert widget.table_model.rowCount() == np.count_nonzero(~measured.valid)
 
 
-def test_detection_pitch_reuse_and_worker_error_recovery(window):
+def test_detection_pitch_reuse_and_worker_error_recovery(window, monkeypatch):
     widget, app = window
     widget.pitch_source.setCurrentIndex(widget.pitch_source.findData("detection"))
     widget.run_analysis("pitch")
@@ -116,11 +122,29 @@ def test_detection_pitch_reuse_and_worker_error_recovery(window):
     wait_for_job(widget, app)
     assert widget.review.detection is original
     assert widget.review.patterns["detection"].meta["average_rows"] == 2
-    widget.area_max.setValue(1)
+    review = widget.review
+    widget.area_max.setValue(1)  # below area min: checked as typed, Run disabled with the reason under it
+    assert not widget.detect_button.isEnabled() and not widget.cd_button.isEnabled()
+    assert "Area min (3) is above area max (1)" in widget.run_reasons["detect"].text()
+    assert widget.area_max.property("invalid")
+    widget.run_analysis("detect")
+    assert not widget.busy and widget.review is review
+    assert "Area min" in widget.error_label.text()
+    widget.area_max.setValue(200)
+    assert widget.cd_button.isEnabled() and not widget.run_reasons["cd"].isVisible()
+
+    def fail(*args, **kwargs):
+        raise ValueError("Unreadable page")
+
+    monkeypatch.setattr("subpx.workbench.analyze_image", fail)
+    widget.diagnostics.setCurrentWidget(widget.table_tab)
     widget.run_analysis("detect")
     wait_for_job(widget, app)
-    assert "Action failed" in widget.state_label.text()
-    assert widget.cd_button.isEnabled()
+    # One plain line over the results, which stay; the traceback is in the log, which does not open by itself.
+    assert widget.error_banner.isVisible() and widget.error_label.text() == "Finding holes failed: Unreadable page"
+    assert "Traceback" in widget.log.toPlainText()
+    assert widget.review is review and widget.diagnostics.currentWidget() is widget.table_tab
+    assert widget.state_label.text() == "Failed" and widget.cd_button.isEnabled()
 
 
 def test_registration_job_and_pixel_center_mapping(window):
@@ -155,7 +179,7 @@ def test_actual_canvas_click_and_empty_result_clear_inspector(window):
     widget.run_analysis("detect")
     wait_for_job(widget, app)
     assert len(widget.review.seeds_xy) == 0
-    assert "No features" in widget.feature_label.text()
+    assert "No holes" in widget.feature_label.text()
     assert widget.comparison.rowCount() == 0
 
 
@@ -183,13 +207,13 @@ def test_tiff_page_navigation_and_gui_export(window, tmp_path, monkeypatch):
         writer.write(image + 5)
     widget.open_image(path=path)
     wait_for_job(widget, app)
-    widget.page_spin.setValue(2)
+    widget.page_spin.setValue(1)  # pages are counted from 0, like the batch
     wait_for_job(widget, app)
     assert widget.loaded.page == 1
     np.testing.assert_array_equal(widget.loaded.image, image + 5)
     widget.open_moving(path=path)
     wait_for_job(widget, app)
-    widget.moving_page_spin.setValue(2)
+    widget.moving_page_spin.setValue(1)
     wait_for_job(widget, app)
     assert widget.moving.page == 1
     widget.run_analysis("detect")
@@ -228,6 +252,7 @@ def test_task_workflow_keeps_controls_and_results_available(window):
 
 def test_measurement_recipes_comparison_and_calibration_guidance(window):
     widget, app = window
+    widget.recipe.setCurrentIndex(widget.recipe.findData("spot"))
     widget.run_button.click()
     wait_for_job(widget, app)
     assert tuple(widget.review.measurements) == ("gaussian", "logquad", "gradient", "halfmax")
@@ -239,7 +264,7 @@ def test_measurement_recipes_comparison_and_calibration_guidance(window):
     assert "Gaussian FWHM" in widget.table_model.data(index, QtCore.Qt.ItemDataRole.ToolTipRole)
     widget._select_table(widget.table_model.index(3, 8))
     assert widget.method.currentData() == "gradient" and widget.selected == 3
-    assert widget.diagnostics.currentWidget() is widget.feature_tab
+    assert widget.diagnostics.currentWidget() is widget.table_tab  # the table stays after a row click
 
     widget.recipe.setCurrentIndex(widget.recipe.findData("local"))
     assert widget.parameters()["methods"] == ("local_projection", "local_half_area")
@@ -249,10 +274,16 @@ def test_measurement_recipes_comparison_and_calibration_guidance(window):
     wait_for_job(widget, app)
     assert tuple(widget.review.measurements) == ("local_projection", "local_half_area")
 
-    widget.recipe.setCurrentIndex(widget.recipe.findData("hole"))
+    assert widget.recipe.findData("hole") < 0  # calibrated methods are in the full list only
+    for i in range(widget.method_list.count()):
+        item = widget.method_list.item(i)
+        if item.data(QtCore.Qt.ItemDataRole.UserRole) in ("disk", "flux_ratio"):
+            item.setCheckState(QtCore.Qt.CheckState.Checked)
+    assert widget.recipe.currentData() == "custom"
     assert widget.hole_group.isVisible() and widget.hole_note.isVisible()
     assert not widget.cd_button.isEnabled()
     assert "nominal CD or PSF" in widget.cd_button.toolTip()
+    assert "nominal CD or PSF" in widget.run_reasons["cd"].text() and widget.run_reasons["cd"].isVisible()
     widget.nominal_cd.setValue(5)
     assert widget.cd_button.isEnabled()
     assert widget.background.currentData() == "model"
@@ -325,8 +356,8 @@ def test_stack_navigation_analysis_roi_and_export(window, tmp_path, monkeypatch)
     assert widget.selected == 3
     np.testing.assert_allclose(widget.canvas.overlays["selected"].getData()[1], [point[1] + offset])
     widget._hover_image(2, offset + 3)
-    assert "Page 2" in widget.statusBar().currentMessage()
-    assert "pixel [3, 2]" in widget.statusBar().currentMessage()
+    assert "Page 1" in widget.hover_label.text()
+    assert "pixel [3, 2]" in widget.hover_label.text()
     widget.canvas.histogram.setLevels(20, 130)
     for item in widget.canvas.context_images:
         np.testing.assert_allclose(item.getLevels(), [20, 130])
@@ -403,3 +434,208 @@ def test_stack_load_failure_restores_navigation_and_current_review(window, tmp_p
     assert widget._pages is None and not widget.stack_pages.isChecked()
     assert widget.next_page.isEnabled()
     assert "Unreadable TIFF page" in widget.log.toPlainText()
+
+
+def write_pages(path, *images):
+    tifffile = pytest.importorskip("tifffile")
+    with tifffile.TiffWriter(path) as writer:
+        for image in images:
+            writer.write(image)
+    return path
+
+
+def test_every_method_has_one_display_name_and_errors_read_plainly():
+    from subpx.cd import METHOD_LABELS
+    from subpx.workbench import METHOD_NAMES, plain_error
+
+    assert set(METHOD_LABELS) <= set(METHOD_NAMES)
+    names = [METHOD_NAMES[key] for key in METHOD_LABELS]
+    assert len(set(names)) == len(names)
+    detail = 'Traceback (most recent call last):\n  File "x.py", line 1\ntifffile.TiffFileError: not a TIFF file\n'
+    assert plain_error(detail) == "not a TIFF file"
+    assert plain_error("Area min is above area max.") == "Area min is above area max."
+
+
+def test_defaults_are_the_batch_defaults(window, tmp_path):
+    import inspect
+    from scripts.cd_batch import argument_parser, build_settings
+    from subpx.cd import measure_cds
+
+    widget, app = window
+    widget.reset_settings()
+    batch = build_settings(argument_parser().parse_args(["in", "--output", str(tmp_path), "--no-hole-check"]))["measure"]
+    parameters = widget.parameters()
+    assert widget.recipe.currentData() == "batch" and parameters["methods"] == tuple(batch["methods"])
+    for key in ("seeds", "invert", "area_min", "area_max", "pixel_size", "unit", "half_area_level",
+                "half_area_peak_pixels", "tail_area_level", "tail_window", "deblend_iterations", "deblend_tolerance"):
+        assert parameters[key] == batch[key], key
+    library = inspect.signature(measure_cds).parameters  # the batch leaves these at measure_cds's defaults
+    for key in ("threshold", "pad", "background"):
+        assert parameters[key] == library[key].default, key
+    assert parameters["backend"] == "auto"
+    assert widget.recipe.findData("hole") < 0  # no calibrated preset: disk and flux_ratio need a nominal CD
+
+
+def test_settings_survive_a_new_window_and_reset_restores_defaults(window, tmp_path):
+    widget, app = window
+    widget.area_max.setValue(150)
+    widget.recipe.setCurrentIndex(widget.recipe.findData("spot"))
+    widget.unit.setText("nm")
+    widget.pixel_size.setValue(21)
+    widget.layer_checks["Voronoi edges"].setChecked(True)
+    widget.close()
+    again = InspectionWindow(settings=settings_file(tmp_path))
+    try:
+        assert again.area_max.value() == 150 and again.recipe.currentData() == "spot"
+        assert again.parameters()["methods"] == ("gaussian", "logquad", "gradient", "halfmax")
+        assert again.unit.text() == "nm" and again.pixel_size.value() == 21
+        assert again.layer_checks["Voronoi edges"].isChecked() and again.backend.currentData() == "cpu"
+        again.reset_settings()
+        assert again.area_max.value() == 200 and again.recipe.currentData() == "batch"
+        assert again.backend.currentData() == "auto" and again.unit.text() == "px"
+        assert not again.layer_checks["Voronoi edges"].isChecked()
+    finally:
+        again.close()
+
+
+def test_disabled_controls_look_disabled(window):
+    widget, app = window
+    button = widget.cd_button
+
+    def fill():
+        app.processEvents()
+        image = button.grab().toImage()
+        return image.pixelColor(image.width() // 2, 4).name()
+
+    enabled = fill()
+    widget.area_max.setValue(1)
+    assert not button.isEnabled() and fill() != enabled
+    assert widget.run_reasons["cd"].isVisible()
+
+
+def test_no_hole_is_selected_until_a_click_and_failures_are_counted_per_method(window):
+    widget, app = window
+    widget.run_analysis("detect")
+    wait_for_job(widget, app)
+    assert widget.selected is None and "selected" not in widget.canvas.overlays
+    widget._select_at(*widget.review.seeds_xy[4])
+    assert widget.selected == 4 and "selected" in widget.canvas.overlays
+    parameters = widget.parameters()
+    parameters["methods"] = ("gaussian", "projection", "half_area")
+    review = analyze_image(widget.loaded.image, parameters)
+    assert "No method failed" in widget._failure_summary(review)
+    review.measurements["half_area"].valid[:3] = False
+    widget._accept_review(review)
+    widget.method.setCurrentIndex(widget.method.findData("gaussian"))
+    assert widget.selected == 4  # still the hole at the clicked position
+    text = widget.failure_label.text()
+    assert f"Failed: Half area 3 ({100 * 3 / len(review.seeds_xy):.0f} %)" in text and "Projection 0" not in text
+    assert "Gaussian fit:" in widget.summary_label.text()
+
+
+def test_table_keys_select_holes_keep_the_table_and_pan_to_them(window):
+    widget, app = window
+    widget.run_analysis("cd")
+    wait_for_job(widget, app)
+    review = widget.review
+    view = widget.canvas.plot.getViewBox()
+    view.setRange(xRange=(0, 20), yRange=(0, 16), padding=0)
+    app.processEvents()
+    width = np.diff(view.viewRange()[0])[0]
+    widget.table.setFocus()
+    widget.table.setCurrentIndex(widget.table_model.index(0, 0))
+    assert widget.selected == widget.table_model.rows[0][0]
+    QTest.keyClick(widget.table, QtCore.Qt.Key.Key_Down)
+    assert widget.selected == widget.table_model.rows[1][0]
+    assert widget.diagnostics.currentWidget() is widget.table_tab
+    far = int(np.argmax(review.seeds_xy.sum(axis=1)))
+    widget.table.setCurrentIndex(widget.table_model.index(widget.table_model.row_of[far], 0))
+    (x0, x1), (y0, y1) = view.viewRange()
+    point = review.seeds_xy[far] + review.origin_xy
+    assert widget.selected == far and x0 <= point[0] <= x1 and y0 <= point[1] <= y1
+    assert x1 - x0 == pytest.approx(width)  # panned, not zoomed
+    assert not widget.feature_spin.keyboardTracking()
+    assert not widget.canvas.plot.getAxis("bottom").autoSIPrefix
+
+
+def test_page_keys_act_on_the_image_not_the_table(window, tmp_path):
+    widget, app = window
+    image = widget.loaded.image
+    widget.open_image(path=write_pages(tmp_path / "pages.tif", image, image + 5, image + 10))
+    wait_for_job(widget, app)
+    assert widget.page_spin.minimum() == 0 and "page 0 of 3" in widget.source_label.text()
+    widget.run_analysis("detect")
+    wait_for_job(widget, app)
+    widget.activateWindow()
+    widget.table.setFocus()
+    QTest.keyClick(widget.table, QtCore.Qt.Key.Key_PageDown)
+    app.processEvents()
+    assert widget.loaded.page == 0 and not widget.busy
+    widget.canvas.plot.setFocus()
+    QTest.keyClick(widget.canvas.plot, QtCore.Qt.Key.Key_PageDown)
+    wait_for_job(widget, app)
+    assert widget.loaded.page == 1
+
+
+def test_page_change_keeps_view_region_tab_selection_contrast_and_moving_image(window, tmp_path):
+    widget, app = window
+    image = widget.loaded.image
+    widget.open_image(path=write_pages(tmp_path / "pages.tif", image, image + 5))
+    wait_for_job(widget, app)
+    widget.run_analysis("detect")
+    wait_for_job(widget, app)
+    review = widget.review
+    widget._select_at(*review.seeds_xy[7])
+    position = review.seeds_xy[7] + review.origin_xy
+    widget.roi_action.setChecked(True)
+    widget.roi.setPos((7.5, 7.5))
+    widget.roi.setSize((80, 64))
+    view = widget.canvas.plot.getViewBox()
+    view.setRange(xRange=(10, 40), yRange=(10, 30), padding=0)
+    app.processEvents()
+    zoom = view.viewRange()
+    widget.canvas.histogram.setLevels(20, 120)
+    widget.lock_levels.setChecked(True)
+    widget._use_this_file()
+    wait_for_job(widget, app)
+    assert widget.moving.page == 0
+    widget.diagnostics.setCurrentWidget(widget.pitch_tab)
+    widget.next_page.click()
+    wait_for_job(widget, app)
+    assert widget.loaded.page == 1
+    np.testing.assert_allclose(view.viewRange(), zoom)
+    assert widget._bounds() == [8, 8, 88, 72] and widget.roi_action.isChecked()
+    assert widget.diagnostics.currentWidget() is widget.pitch_tab
+    np.testing.assert_allclose(widget.canvas.image_item.getLevels(), [20, 120])
+    assert widget.moving is not None and widget.register_button.isEnabled()
+    widget.run_analysis("detect")
+    wait_for_job(widget, app)
+    moved = widget.review.seeds_xy[widget.selected] + widget.review.origin_xy
+    np.testing.assert_allclose(moved, position, atol=0.5)
+    widget.run_registration()
+    wait_for_job(widget, app)
+    assert widget.registration.hole_check_error < 0.8
+    assert "below 0.8" in widget.registration_label.text()
+
+
+def test_handler_errors_reach_the_banner_and_dropped_files_open(window, tmp_path, monkeypatch):
+    import subpx.workbench as workbench
+
+    widget, app = window
+    assert sys.excepthook is workbench._exception_hook
+    monkeypatch.setattr(workbench, "_previous_hook", lambda *error: None)  # not the fixture's error check
+    try:
+        raise RuntimeError("redraw broke")
+    except RuntimeError:
+        workbench._exception_hook(*sys.exc_info())
+    assert widget.error_label.text() == "Unexpected error: redraw broke"
+    assert "redraw broke" in widget.log.toPlainText()
+    path = tmp_path / "dropped.npy"
+    np.save(path, widget.loaded.image + 1)
+    mime = QtCore.QMimeData()
+    mime.setUrls([QtCore.QUrl.fromLocalFile(str(path))])
+    event = QtGui.QDropEvent(QtCore.QPointF(10, 10), QtCore.Qt.DropAction.CopyAction, mime,
+                             QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.KeyboardModifier.NoModifier)
+    widget.dropEvent(event)
+    wait_for_job(widget, app)
+    assert widget.loaded.name == "dropped.npy" and not widget.error_banner.isVisible()

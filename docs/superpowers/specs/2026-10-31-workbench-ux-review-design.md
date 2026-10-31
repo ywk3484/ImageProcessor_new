@@ -487,25 +487,25 @@ Each phase ends with the tests passing (`$env:QT_QPA_PLATFORM = "offscreen"; pyt
 commit + push.
 
 **P0. Fixes in the current window** (no new layout)
-- [ ] D1 disabled styles (main button, checkboxes) and the reason under the button; F13 visible spin-box arrows
-- [ ] F3 "Pitch && placement" and one task name; F4 no SI prefixes on pixel axes; H4 arrow text; F12 "Placement
+- [x] D1 disabled styles (main button, checkboxes) and the reason under the button; F13 visible spin-box arrows
+- [x] F3 "Pitch && placement" and one task name; F4 no SI prefixes on pixel axes; H4 arrow text; F12 "Placement
       error" vs "Align"
-- [ ] E1 PageUp/PageDown scoped to the image and page bar; E2 table keyboard selection; E10 pan to an off-screen
+- [x] E1 PageUp/PageDown scoped to the image and page bar; E2 table keyboard selection; E10 pan to an off-screen
       selection; B7 hole box keyboard tracking off
-- [ ] C1 interim: clicking a table row keeps the table visible (only image clicks open the hole tab)
-- [ ] A2 / D4 summary shows failed counts per method; notes listed with a level
-- [ ] D3 live checks (area limits, pitch pairs), Run disabled with reason, plain error, no jump to Activity; D8
+- [x] C1 interim: clicking a table row keeps the table visible (only image clicks open the hole tab)
+- [x] A2 / D4 summary shows failed counts per method; notes listed with a level
+- [x] D3 live checks (area limits, pitch pairs), Run disabled with reason, plain error, no jump to Activity; D8
       exception hook to the log
-- [ ] D5 hover readout in a permanent status field
-- [ ] H1 replace the always-1.0 error with the batch's hole-check error; H5 keep the moving image when the page
+- [x] D5 hover readout in a permanent status field
+- [x] H1 replace the always-1.0 error with the batch's hole-check error; H5 keep the moving image when the page
       changes
-- [ ] G4 keep zoom, region, bottom tab and selected position across pages
-- [ ] A1 / A3 / A6 "Batch default" preset (test pins it to `scripts.cd_batch`), calibrated preset removed from
+- [x] G4 keep zoom, region, bottom tab and selected position across pages
+- [x] A1 / A3 / A6 "Batch default" preset (test pins it to `scripts.cd_batch`), calibrated preset removed from
       presets, compute default Auto
-- [ ] A4 settings and window layout saved with `QSettings`; "Reset to defaults"
-- [ ] F1 one display-name table for all methods, used everywhere
-- [ ] E4 no pre-selected hole; A5 pages counted from 0 (page box, page labels, hover, status line, exports)
-- [ ] E9 (part) drop a file on the window to open it (testing many sample files)
+- [x] A4 settings and window layout saved with `QSettings`; "Reset to defaults"
+- [x] F1 one display-name table for all methods, used everywhere
+- [x] E4 no pre-selected hole; A5 pages counted from 0 (page box, page labels, hover, status line, exports)
+- [x] E9 (part) drop a file on the window to open it (testing many sample files)
 
 Done when: tests cover each fix (style differs when disabled, PageDown in the table keeps the page, arrow keys select,
 failed counts shown, zoom and region survive a page change, settings survive a new window, batch preset equals

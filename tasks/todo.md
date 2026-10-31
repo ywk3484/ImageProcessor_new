@@ -88,7 +88,25 @@ testing interactively on sample images.
 
 - [x] Decisions (user, 2026-10-31): pages counted from 0 like pages.csv; page navigation AND "Stack vertically" both
       kept (the stack made to handle many pages); opening a batch run later
-- [ ] P0 fixes in the current window (spec section 5)
+- [x] Baseline: the user's pending workbench files committed unchanged (e99feb5, user's choice 2026-10-31)
+- [x] P0 fixes in the current window (spec section 5)
+  - [x] D1/F13 disabled styles + reason under Run; spin-box arrows
+  - [x] F3/F4/H4/F12 one task name, no SI prefixes, arrow text, "Placement error" vs "Align"
+  - [x] E1/E2/E10/B7 PageUp/Down scoped, arrow keys select, pan to off-screen hole, hole box tracking off
+  - [x] C1 table clicks keep the table; A2/D4 failed counts per method, notes with a level
+  - [x] D3/D8/D5 live checks + Run reasons, plain errors without the Activity jump, exception hook, hover field
+  - [x] H1/H5 batch hole-check error in Align; moving image kept across pages, "use this file"
+  - [x] G4 zoom, region, bottom tab, selected position (and locked contrast) kept across pages
+  - [x] A1/A3/A6 Batch default preset pinned to cd_batch, calibrated preset dropped, compute Auto, area 3-200
+  - [x] A4 QSettings (controls, window layout) + Reset to defaults; F1 display names for all 19 methods
+  - [x] E4 no pre-selected hole; A5 pages from 0; E9 drop a file to open
+  - [x] tests, timing on the 39k page, screenshots, docs/workbench.md, commit + push
+  P0 review: the batch preset gives the batch's failures on the 39,042-hole page (projection 2,048, foot area
+  471, foot area ratio 430, tail area norm 23, tail area 9; gaussian and the half areas 0); Measure CD 10.1 s
+  in the window (10 methods, GPU); click 0.8-1.3 s, method switch 0.8 s, CD colors 1.9 s, repaint 0.53 s:
+  unchanged, that is P1. Found on the way: tests must never use the real QSettings (they wrote area max 1
+  into the registry; cleared, the fixture now uses a temp file); the summary above the image is two fixed
+  rows so the zoom does not shift when its text changes. Not done in P0 (P2): C3 sizes, C11 pinned Run.
 - [ ] P1 speed at 40k holes: click < 0.1 s, method switch / layer toggle < 0.2 s, full-view repaint < 0.05 s; the
       stack decoded on demand with a memory cap
 - [ ] P2 new layout: session object, Setup steps, hole inspector, bottom tabs, page list next to the stack, Align view

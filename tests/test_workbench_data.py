@@ -173,6 +173,24 @@ def test_projection_samples_and_wide_window_origin(spots):
 def test_empty_detection_and_label_boundaries():
     review = analyze_image(np.ones((32, 32), np.uint8), parameters(), operation="detect")
     assert len(review.seeds_xy) == 0
-    assert any("No features" in note for note in review.notes)
+    assert any("No holes" in note for note in review.warnings)
     edges = cell_boundary(np.array([[0, 0, 1], [0, 2, 1]]))
     np.testing.assert_array_equal(edges, [[False, False, True], [False, True, True]])
+
+
+def test_hole_check_is_the_batch_hole_check():
+    from scripts.cd_batch import PccCheck
+    from subpx._workbench_data import HOLE_CHECK_MAX_ERROR, demo_image, hole_check_error
+
+    reference = demo_image().astype(float)
+    shifted = np.roll(reference, (3, -5), axis=(0, 1))
+    noise = np.random.default_rng(1).normal(100, 10, reference.shape)
+    for mode in ("centered", "raw"):
+        for image in (shifted, noise, reference[:150, :300], np.full(reference.shape, 7.0)):
+            assert hole_check_error(reference, image, mode) == pytest.approx(
+                PccCheck(reference, mode=mode)(image), abs=1e-12)
+    assert hole_check_error(reference, shifted) < 0.1
+    assert hole_check_error(reference, noise) >= HOLE_CHECK_MAX_ERROR["centered"]
+    assert HOLE_CHECK_MAX_ERROR == {"centered": 0.8, "raw": 0.3}  # the batch's --max-error defaults
+    review = register_images(reference, shifted)
+    assert review.hole_check_mode == "centered" and review.hole_check_error < 0.1
