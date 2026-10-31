@@ -124,5 +124,35 @@ testing interactively on sample images.
   sizes read in 0.1 s, view filled in 0.3-1.2 s between events, repaint 0.004 s, hole click 0.04 s, another page
   0.12 s, 5 MB of page images. Found on the way: Qt elides a two-line header badly (it cut the unit line), so
   columns are sized to their names; previews must be averaged like the active page or pages look different.
-- [ ] P2 new layout: session object, Setup steps, hole inspector, bottom tabs, page list next to the stack, Align view
+- [x] P2 new layout: session object, Setup steps, hole inspector, bottom tabs, page list next to the stack, Align view
+  - [x] Package `subpx/workbench/` (names, settings, jobs, session, canvas, window, panels/*); entry points unchanged;
+        `subpx/_workbench_data.py` stays where it is (Qt-free, used by examples and tests) instead of `data.py`
+  - [x] Session: open file with the TIFF kept open, page, results per page {holes preview, CD, pitch} (shown = the
+        latest of preview and CD; pitch never replaces it), selection, method, moving image, alignment; signals
+  - [x] Docks: Setup (steps Image / Holes / CD methods / Pitch with marks, pinned Run, live checks; methods grouped
+        with all / none and a Parameters fold; pitch Advanced fold) + Pages tab; Inspector; bottom tabs Holes /
+        CD distribution / Pitch / Log; dialogs gone; Ctrl+1/2/3; layout remembered
+  - [x] Stale banner (what changed, Re-run, Revert); job progress with elapsed time and Cancel (Esc, result
+        discarded); errors as one line with Details
+  - [x] Page list (from 0, thumbnails on demand, measured / failed marks) linked with Stack vertically
+  - [x] Align view (flicker with Space, differences with a colorbar, checkerboard, blend; shift, RMSE, hole check,
+        correlation peak with the runner-up); moving page from a list, kept across reference pages
+  - [x] Pitch tab: method choice, plain summary, larger plots, a click selects the holes of that point; pitch uses
+        the result on screen (no hidden re-measure; "Measure CD first")
+  - [x] Menus, recent files, keys of spec 4.10 with keys in tooltips, table right-click / Ctrl+C copy, export
+        dialog, ask before discarding results
+  - [x] Tests moved to the new widgets; the 7 walk-throughs with screenshots; timing script; docs; commit + push
+  P2 review: the 7 walk-throughs pass on the 48-page file (GPU, 1440 x 900, screenshots in
+  artifacts/workbench_p2): page 5 from the page list, batch methods in 7.3 s, failures of every method in the status
+  bar, N x10 through Projection's failures 0.04 s each with the table following; area max banner, Revert, Re-run;
+  ten methods compared on one hole; a corner kept over five pages (0.02-0.07 s each); pitch from the shown CD in
+  0.6 s (same arrays), a placement point picks its 162 holes; three moving pages aligned to page 5 with one click
+  each (1.0 s), the moving page kept across reference pages; stack Shift+F / F, page 20 clicked, list follows.
+  Timing as P1 (click 0.03-0.05 s, method switch 0.04-0.06 s, repaint 0.003 s, memory stops at 4.4 GB).
+  Found on the way: an empty page counted as a kept result page and dropped another page's result; Shift+N
+  extended the table selection (Ctrl+C then copied a range); the table did not tell J / N its order after a
+  header sort; panels appearing beside the image rescaled it (the image now keeps center and zoom); page-list rows
+  without a thumbnail did not line up; wide spin-box ranges widened Setup. Not done: stage progress inside a CD
+  run (the library reports none), a typed region. 9 GPU / library tests (tiled GPU pipeline, pitch GPU, radial
+  symmetry, isophote) fail, the same at 6aca236 without any pending edits: not from the workbench.
 - [ ] P3 later: open a cd_batch run (run.json settings, pages.csv page list, batch vs workbench mean)

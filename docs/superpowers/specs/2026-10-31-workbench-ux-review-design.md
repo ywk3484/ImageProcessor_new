@@ -524,13 +524,14 @@ instead of a solid block. Stack vertically on the 48-page test file: click < 0.1
 does not grow with the number of pages beyond the reduced previews.
 
 **P2. New layout**
-- [ ] Session object and package split (4.11); tests moved to the new widgets
-- [ ] Docks: Setup steps with status marks and a pinned Run button (4.3, C11), hole inspector (4.5), bottom tabs
+- [x] Session object and package split (4.11); tests moved to the new widgets
+- [x] Docks: Setup steps with status marks and a pinned Run button (4.3, C11), hole inspector (4.5), bottom tabs
       (4.6); dialogs removed (C7)
-- [ ] Stale banner with Re-run / Revert (D2); Cancel and stage progress (B5)
-- [ ] Page list next to "Stack vertically", the two linked (4.7, G5); TIFF kept open (G2)
-- [ ] Align view (4.8); Pitch tab with method choice and clickable points (I1-I3)
-- [ ] Menus, recent files, drop to open, shortcuts in tooltips, table right-click menu (E9, E11); export dialog and
+- [x] Stale banner with Re-run / Revert (D2); Cancel and stage progress (B5; the job and its elapsed
+      time, no stages: the library reports none)
+- [x] Page list next to "Stack vertically", the two linked (4.7, G5); TIFF kept open (G2)
+- [x] Align view (4.8); Pitch tab with method choice and clickable points (I1-I3)
+- [x] Menus, recent files, drop to open, shortcuts in tooltips, table right-click menu (E9, E11); export dialog and
       copy rows (J1); ask before discarding results (J2)
 
 Done when these walk-throughs work by keyboard and mouse as described, each checked with a screenshot:
@@ -569,5 +570,5 @@ Not changed by this plan: CD methods and their numbers, method keys and library 
 ```
 
 Prints the timing table of section 2 and the failed counts for the default preset, and saves two screenshots. For
-other states, drive `InspectionWindow` the same way (`window.task`, `window.run_button`, `window.select_feature`,
-...); offscreen on Windows needs `QT_QPA_FONTDIR=C:/Windows/Fonts`.
+other states, drive `InspectionWindow` the same way (`window.setup.run_button`, `window.session`,
+`window.select_feature`, ...); offscreen on Windows needs `QT_QPA_FONTDIR=C:/Windows/Fonts`.

@@ -53,7 +53,11 @@ def main(argv=None):
     settings_dir = tempfile.TemporaryDirectory()
     settings = QtCore.QSettings(str(Path(settings_dir.name) / "workbench.ini"), QtCore.QSettings.Format.IniFormat)
     window = InspectionWindow(settings=settings)
+    window.ask_before_discard = False
+    window.resize(1440, 900)
+    window.setup_dock.show()
     window.show()
+    setup = window.setup
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)
 
@@ -93,9 +97,9 @@ def main(argv=None):
         return time.perf_counter() - start
 
     timed("open page", lambda: window.open_image(path=str(args.tiff), page=args.page), job=True)
-    window.backend.setCurrentIndex(window.backend.findData(args.backend))
-    window.task.setCurrentIndex(window.task.findData("cd"))
-    timed(f"Measure CD, default preset ({args.backend})", window.run_button.click, job=True)
+    setup.backend.setCurrentIndex(setup.backend.findData(args.backend))
+    setup.steps.setCurrentIndex(setup.step_keys.index("cd"))
+    timed(f"Measure CD, default preset ({args.backend})", setup.run_button.click, job=True)
     review = window.review
     print(f"holes: {len(review.seeds_xy):,}   memory {memory_gb():.2f} GB")
     for name, measured in review.measurements.items():
@@ -105,73 +109,82 @@ def main(argv=None):
     app.processEvents()
     shot("full_view")
     repaint("repaint at full view (default layers)")
-    timed("toggle CD colors on", lambda: window.layer_checks["CD colors"].setChecked(True))
+    timed("toggle CD colors on", lambda: window.measure.layer_checks["CD colors"].setChecked(True))
     shot("full_view_cd")
     repaint("repaint at full view, CD colors")
     middle = len(review.seeds_xy) // 2
     timed("select a hole", lambda: window.select_feature(middle))
     timed("select the next hole", lambda: window.select_feature(middle + 1))
-    timed("click a hole on the image", lambda: window._select_at(*(review.seeds_xy[middle + 2] + review.origin_xy)))
-    timed("switch method", lambda: window.method.setCurrentIndex(1))
-    timed("switch method back", lambda: window.method.setCurrentIndex(0))
+    timed("click a hole on the image", lambda: window.measure._clicked(*(review.seeds_xy[middle + 2] + review.origin_xy)))
+    timed("next hole (J)", lambda: window.session.step_hole(1))
+    timed("next failed hole (N)", lambda: window.session.step_failed(1))
+    timed("switch method", lambda: window.measure.method.setCurrentIndex(1))
+    timed("switch method back", lambda: window.measure.method.setCurrentIndex(0))
     for name in ("Voronoi edges", "CD colors", "Failed cells", "Centers"):
-        check = window.layer_checks[name]
+        check = window.measure.layer_checks[name]
         timed(f"toggle {name}", lambda: check.setChecked(not check.isChecked()))
         timed(f"toggle {name} back", lambda: check.setChecked(not check.isChecked()))
-    timed("zoom to the selected hole", window.zoom_selected)
+    timed("zoom to the selected hole", window.measure.zoom_selected)
     view = window.canvas.plot.getViewBox()
     center = review.seeds_xy[middle] + review.origin_xy
     view.setRange(xRange=(center[0] - 200, center[0] + 200), yRange=(center[1] - 130, center[1] + 130), padding=0)
     app.processEvents()
-    print(f"holes in view at 400 x 260 px: {window.layers.in_view:,} (vectors drawn: {window.layers.near})")
+    print(f"holes in view at 400 x 260 px: {window.measure.layers.in_view:,} (vectors drawn: {window.measure.layers.near})")
     shot("zoomed_400px")
     repaint("repaint zoomed in, vectors drawn")
-    window.zoom_selected()
+    window.measure.zoom_selected()
     app.processEvents()
     shot("selected_hole")
-    timed("show failed only", lambda: window.failed_only.setChecked(True))
-    timed("show all", lambda: window.failed_only.setChecked(False))
-    column = window.table_model.METHOD_COLUMNS
-    timed("sort table by the first method's CD", lambda: window.table.sortByColumn(column, QtCore.Qt.SortOrder.DescendingOrder))
-    timed("switch method (sort kept)", lambda: window.method.setCurrentIndex(2))
-    values = [window.table_model.value(row, column) for row in range(50)]
+    holes = window.holes
+    filters = holes.filter
+    timed("show failed only", lambda: filters.setCurrentIndex(filters.findData("failed")))
+    timed("show all", lambda: filters.setCurrentIndex(filters.findData("all")))
+    column = holes.model.METHOD_COLUMNS
+    timed("sort table by the first method's CD", lambda: holes.table.sortByColumn(column, QtCore.Qt.SortOrder.DescendingOrder))
+    timed("switch method (sort kept)", lambda: window.measure.method.setCurrentIndex(2))
+    values = [holes.model.value(row, column) for row in range(50)]
     print(f"  still sorted after the switch: {all(a >= b for a, b in zip(values, values[1:]))}")
-    window.table.sortByColumn(0, QtCore.Qt.SortOrder.AscendingOrder)
+    holes.table.sortByColumn(0, QtCore.Qt.SortOrder.AscendingOrder)
+    window.bottom.setCurrentWidget(window.distribution)
+    timed("show the CD distribution tab", app.processEvents)
+    window.bottom.setCurrentWidget(holes)
 
     pages = window.loaded.pages
     for page in range(args.page + 1, min(pages, args.page + 1 + args.more_pages)):
         window.page_spin.setValue(page)
         wait()
         start = time.perf_counter()
-        window.run_button.click()
+        setup.run_button.click()
         wait()
-        kept = sorted({key[0] for key in window._task_reviews})
+        kept = sorted(window.session.results)
         print(f"page {page}: measured in {time.perf_counter() - start:5.1f} s, results kept for pages {kept}, "
               f"memory {memory_gb():.2f} GB", flush=True)
 
     if not args.no_stack and pages > 1:
         before = memory_gb()
-        timed("Stack vertically on (read page sizes)", lambda: window.stack_pages.setChecked(True), job=True)
+        timed("Stack vertically on", lambda: window.pages.stack_pages.setChecked(True), job=True)
         print(f"  pages decoded while filling the view: {drain_stack():.2f} s")
         shot("stack_full")
         repaint("repaint, whole stack in view")
-        timed("click a hole on the active page", lambda: window._select_at(
-            *(window.review.seeds_xy[100] + window.review.origin_xy + window._display_offset())))
+        timed("click a hole on the active page", lambda: window.measure._clicked(
+            *(window.review.seeds_xy[100] + window.review.origin_xy + window.measure.offset())))
         other = (window.loaded.page + 1) % pages
-        timed("click another page (make it active)", lambda: window._select_at(10, window.stack.offsets[other] + 10),
+        timed("click another page (make it active)", lambda: window.measure._clicked(10, window.stack.offsets[other] + 10),
               job=True)
-        timed("Shift+F, then F", lambda: (window.fit_stack(), window.canvas.fit_image()))
+        print(f"  page list follows: row {window.pages.list.currentRow()} = page {window.loaded.page}")
+        timed("Shift+F, then F", lambda: (window.measure.fit_stack(), window.measure.fit_page()))
         drain_stack()
         repaint("repaint, active page fitted")
-        window.fit_stack()
+        window.measure.fit_stack()
         for _ in range(3):  # pan through the stack
             view = window.canvas.plot.getViewBox()
             (x0, x1), (y0, y1) = view.viewRange()
             view.setRange(yRange=(y0 + (y1 - y0) / 3, y1 + (y1 - y0) / 3), padding=0)
             drain_stack()
         stack = window.stack
-        print(f"stack: {len(stack.previews)} previews, {len(stack.full)} full pages, {stack.memory() / 1e6:.0f} MB in "
-              f"the stack; memory {before:.2f} -> {memory_gb():.2f} GB")
+        source = window.session.source
+        print(f"stack: {len(source.previews)} previews, {len(source.full)} full pages, {stack.memory() / 1e6:.0f} MB "
+              f"of pages; memory {before:.2f} -> {memory_gb():.2f} GB")
     window.close()
     settings_dir.cleanup()
 
