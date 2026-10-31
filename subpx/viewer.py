@@ -21,7 +21,7 @@ import math
 import numpy as np
 import pyqtgraph.opengl as gl
 
-from matplotlib import cm
+from matplotlib import colormaps
 
 try:
     from PyQt6 import QtCore, QtWidgets, QtGui
@@ -138,7 +138,7 @@ def robust_levels_sample_rgb(img, p=(1, 99), step_y=512, step_x=64):
 
 def make_lut_rgba_u8(cmap_name="gray"):
     """256x4 uint8 LUT using matplotlib colormap."""
-    cmap = cm.get_cmap(cmap_name)
+    cmap = colormaps.get_cmap(cmap_name)
     lut = (cmap(np.linspace(0, 1, 256)) * 255).astype(np.uint8)  # RGBA
     return lut
 
@@ -362,9 +362,13 @@ class GLOrtho2D(gl.GLViewWidget):
     def viewMatrix(self):
         return QtGui.QMatrix4x4()  # identity
 
-    def projectionMatrix(self, region=None):
-        w = max(1, int(self.width()))
-        h = max(1, int(self.height()))
+    def projectionMatrix(self, region=None, viewport=None):
+        # pyqtgraph 0.14 supplies both region and viewport when painting.
+        if viewport is None:
+            viewport = (0, 0, self.width(), self.height())
+        vx, vy, vw, vh = viewport
+        w = max(1, int(vw))
+        h = max(1, int(vh))
         aspect = w / h
 
         cx, cy = float(self._center[0]), float(self._center[1])
@@ -373,6 +377,14 @@ class GLOrtho2D(gl.GLViewWidget):
 
         left, right = cx - hw, cx + hw
         top, bottom = cy - hh, cy + hh
+
+        if region is not None:
+            rx, ry, rw, rh = region
+            left = cx - hw + 2 * hw * (rx - vx) / w
+            right = cx - hw + 2 * hw * (rx + rw - vx) / w
+            # OpenGL regions start at bottom-left; image y grows downward.
+            bottom = cy + hh - 2 * hh * (ry - vy) / h
+            top = cy + hh - 2 * hh * (ry + rh - vy) / h
 
         m = QtGui.QMatrix4x4()
         # bottom, top swapped => y-down

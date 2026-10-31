@@ -203,3 +203,203 @@ def test_tiff_page_navigation_and_gui_export(window, tmp_path, monkeypatch):
     assert source["page"] == 1 and source["moving_page"] == 1
     assert (directories[0] / "centers_global_xy.npy").is_file()
     assert widget.state_label.text() == "Results exported"
+
+
+def test_task_workflow_keeps_controls_and_results_available(window):
+    widget, app = window
+    assert widget.controls.isVisible() and widget.diagnostics.isVisible()
+    assert widget.canvas.histogram.isVisible() and widget.page_bar.isHidden()
+    assert widget.recipe.isVisible() and widget.cd_button.isVisible()
+    assert widget.diagnostics.currentWidget() is widget.table_tab
+    widget.task.setCurrentIndex(widget.task.findData("detect"))
+    assert widget.threshold.isVisible() and widget.area_min.isVisible()
+    assert not widget.recipe.isVisible()
+    assert widget.run_button is widget.detect_button
+    widget.run_button.click()
+    wait_for_job(widget, app)
+    assert widget.review.detection is not None
+    assert widget.diagnostics.currentWidget() is widget.table_tab
+    assert widget.table_model.columnCount() == 4
+    widget._select_at(*widget.review.seeds_xy[2])
+    assert widget.inspector.isVisible() and widget.diagnostics.isVisible()
+    assert widget.diagnostics.currentWidget() is widget.feature_tab
+    assert widget.table.selectionModel().selectedRows()[0].row() == 2
+
+
+def test_measurement_recipes_comparison_and_calibration_guidance(window):
+    widget, app = window
+    widget.run_button.click()
+    wait_for_job(widget, app)
+    assert tuple(widget.review.measurements) == ("gaussian", "logquad", "gradient", "halfmax")
+    assert widget.table_model.columnCount() == 10
+    assert widget.table_model.extra_methods == ["logquad", "gradient", "halfmax"]
+    index = widget.table_model.index(0, 7)
+    value = widget.review.measurements["logquad"].metrics["cd_equivalent_px"][0]
+    assert widget.table_model.rows[0][7] == pytest.approx(value)
+    assert "Gaussian FWHM" in widget.table_model.data(index, QtCore.Qt.ItemDataRole.ToolTipRole)
+    widget._select_table(widget.table_model.index(3, 8))
+    assert widget.method.currentData() == "gradient" and widget.selected == 3
+    assert widget.diagnostics.currentWidget() is widget.feature_tab
+
+    widget.recipe.setCurrentIndex(widget.recipe.findData("local"))
+    assert widget.parameters()["methods"] == ("local_projection", "local_half_area")
+    radial_group = next(group for group, methods in widget.method_groups if methods == {"gradient", "halfmax"})
+    assert radial_group.isHidden()
+    widget.run_button.click()
+    wait_for_job(widget, app)
+    assert tuple(widget.review.measurements) == ("local_projection", "local_half_area")
+
+    widget.recipe.setCurrentIndex(widget.recipe.findData("hole"))
+    assert widget.hole_group.isVisible() and widget.hole_note.isVisible()
+    assert not widget.cd_button.isEnabled()
+    assert "nominal CD or PSF" in widget.cd_button.toolTip()
+    widget.nominal_cd.setValue(5)
+    assert widget.cd_button.isEnabled()
+    assert widget.background.currentData() == "model"
+
+
+def test_task_switches_preserve_results_and_ignore_unrelated_settings(window):
+    widget, app = window
+    widget.run_button.click()
+    wait_for_job(widget, app)
+    original = widget.review.cd
+    widget.task.setCurrentIndex(widget.task.findData("pitch"))
+    assert widget.review.cd is original
+    assert widget.average_rows.isVisible() and widget.nominal_x.isVisible()
+    widget.run_button.click()
+    wait_for_job(widget, app)
+    assert widget.review.cd is original and widget.review.patterns
+    assert widget.diagnostics.currentWidget() is widget.pitch_tab
+    widget.task.setCurrentIndex(widget.task.findData("detect"))
+    widget.run_button.click()
+    wait_for_job(widget, app)
+    assert widget.review.detection is not None
+    widget.task.setCurrentIndex(widget.task.findData("cd"))
+    assert widget.review.cd is original
+    widget.task.setCurrentIndex(widget.task.findData("pitch"))
+    widget.nominal_x.setValue(5)  # An incomplete pitch setting must not prevent CD.
+    widget.task.setCurrentIndex(widget.task.findData("cd"))
+    widget.run_button.click()
+    wait_for_job(widget, app)
+    assert widget.review.cd is not None
+    assert "Action failed" not in widget.state_label.text()
+    widget.task.setCurrentIndex(widget.task.findData("register"))
+    assert widget.moving_button.isVisible() and widget.register_button.isVisible()
+    assert not widget.register_button.isEnabled()
+    assert not widget.recipe.isVisible() and not widget.scale_group.isVisible()
+
+
+def test_stack_navigation_analysis_roi_and_export(window, tmp_path, monkeypatch):
+    tifffile = pytest.importorskip("tifffile")
+    widget, app = window
+    image = widget.loaded.image
+    path = tmp_path / "stack.tif"
+    with tifffile.TiffWriter(path) as writer:
+        writer.write(image)
+        writer.write(image + 5)
+        writer.write(image[:60, :90] + 10)
+    widget.open_image(path=path, page=1)
+    wait_for_job(widget, app)
+    assert widget.page_bar.isVisible()
+    widget.run_analysis("detect")
+    wait_for_job(widget, app)
+    review = widget.review
+    widget.canvas.histogram.setLevels(15, 150)
+    widget.roi_action.setChecked(True)
+    widget.roi.setPos((7.5, 7.5))
+    widget.roi.setSize((80, 64))
+    widget.stack_pages.setChecked(True)
+    assert widget.busy and not widget.page_bar.isEnabled()
+    wait_for_job(widget, app)
+    assert len(widget._pages) == 3
+    assert widget.review is review
+    offset = widget._page_offsets[1]
+    assert offset > image.shape[0]
+    assert widget._bounds() == [8, 8, 88, 72]
+    np.testing.assert_allclose(widget.canvas.image_item.getLevels(), [15, 150])
+    assert len(widget.canvas.context_images) == 2
+    assert widget.canvas._image_bounds.bottom() == widget._page_offsets[-1] + 60 - .5
+    assert widget.canvas._image_bounds.top() < -.5  # Reserve room for the first page label.
+    point = review.seeds_xy[3]
+    widget._select_at(point[0], point[1] + offset)
+    assert widget.selected == 3
+    np.testing.assert_allclose(widget.canvas.overlays["selected"].getData()[1], [point[1] + offset])
+    widget._hover_image(2, offset + 3)
+    assert "Page 2" in widget.statusBar().currentMessage()
+    assert "pixel [3, 2]" in widget.statusBar().currentMessage()
+    widget.canvas.histogram.setLevels(20, 130)
+    for item in widget.canvas.context_images:
+        np.testing.assert_allclose(item.getLevels(), [20, 130])
+
+    # A stack is a display layout; crop coordinates and exports stay page-local.
+    widget.run_analysis("detect")
+    wait_for_job(widget, app)
+    np.testing.assert_array_equal(widget.review.origin_xy, [8, 8])
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *args: str(tmp_path))
+    widget.export_results()
+    wait_for_job(widget, app)
+    output = next(tmp_path.glob("inspection_*"))
+    source = json.loads((output / "source.json").read_text())
+    assert source["page"] == 1 and source["pages"] == 3 and source["display_mode"] == "stack"
+    np.testing.assert_allclose(np.load(output / "centers_global_xy.npy"), widget.review.seeds_xy + [8, 8])
+
+    widget.run_analysis("cd")
+    wait_for_job(widget, app)
+    review = widget.review
+    contours = review.measurements[widget.method.currentData()].contours_xy
+    xs, ys = widget.canvas.overlays["contours"].getData()
+    first = np.column_stack((xs, ys))[:contours.shape[1]]
+    np.testing.assert_allclose(first, contours[0] + review.origin_xy + [0, offset], equal_nan=True)
+    widget.layer_checks["Voronoi edges"].setChecked(True)
+    for stage in range(widget.stage.count()):
+        widget.stage.setCurrentIndex(stage)
+        app.processEvents()
+        origin = review.origin_xy if stage else np.zeros(2)
+        point = widget.canvas.image_item.mapToParent(QtCore.QPointF(.5, .5))
+        np.testing.assert_allclose([point.x(), point.y()], origin + [0, offset])
+    widget.stage.setCurrentIndex(0)
+    widget.zoom_selected()
+    center_y = np.mean(widget.canvas.plot.getViewBox().viewRange()[1])
+    assert center_y == pytest.approx(review.seeds_xy[widget.selected, 1] + review.origin_xy[1] + offset)
+
+    widget.stack_pages.setChecked(False)
+    assert widget._bounds() == [8, 8, 88, 72]
+    assert not widget.canvas.context_images
+    widget.stack_pages.setChecked(True)
+    assert not widget.busy  # Already decoded; toggling does not reload the file.
+    view_range = widget.canvas.plot.getViewBox().viewRange()
+    widget._select_at(2, widget._page_offsets[2] + 3)
+    assert widget.loaded.page == 2 and widget.review is None
+    assert widget.stack_pages.isChecked() and not widget.next_page.isEnabled()
+    assert widget.loaded.image.shape == (60, 90)
+    np.testing.assert_allclose(widget.canvas.plot.getViewBox().viewRange(), view_range)
+    widget.previous_page.click()
+    assert widget.loaded.page == 1 and widget.next_page.isEnabled()
+    assert widget.review is review
+    assert widget._bounds() == [8, 8, 88, 72]
+    widget.set_image(image)
+    assert widget._pages is None and widget.page_bar.isHidden()
+    assert not widget.stack_pages.isChecked()
+
+
+def test_stack_load_failure_restores_navigation_and_current_review(window, tmp_path, monkeypatch):
+    tifffile = pytest.importorskip("tifffile")
+    widget, app = window
+    path = tmp_path / "pages.tif"
+    tifffile.imwrite(path, np.stack([widget.loaded.image] * 3), photometric="minisblack")
+    widget.open_image(path=path)
+    wait_for_job(widget, app)
+    widget.run_analysis("detect")
+    wait_for_job(widget, app)
+    review = widget.review
+
+    def fail(path):
+        raise ValueError("Unreadable TIFF page")
+
+    monkeypatch.setattr("subpx.workbench.load_pages", fail)
+    widget.stack_pages.setChecked(True)
+    wait_for_job(widget, app)
+    assert widget.review is review and widget.loaded.page == 0
+    assert widget._pages is None and not widget.stack_pages.isChecked()
+    assert widget.next_page.isEnabled()
+    assert "Unreadable TIFF page" in widget.log.toPlainText()

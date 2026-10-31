@@ -101,6 +101,22 @@ class TestOverlayMethods:
         assert isinstance(name, str)
         assert name in viewer._overlays
 
+    def test_projection_accepts_viewport_and_preserves_image_coordinates(self, viewer):
+        from subpx.viewer import QtGui
+
+        view = viewer.view
+        view.resize(200, 100)
+        view.set_image_bounds(100, 200)
+        view.set_view_full_image(100, 200, pad=0)
+        viewport = (0, 0, 200, 100)
+        full = view.projectionMatrix(viewport, viewport)
+        center = full.map(QtGui.QVector3D(100, 50, 0))
+        np.testing.assert_allclose([center.x(), center.y()], [0, 0], atol=1e-6)
+        # The lower-left quarter in OpenGL corresponds to the image's lower-left.
+        cropped = view.projectionMatrix((0, 0, 100, 50), viewport)
+        crop_center = cropped.map(QtGui.QVector3D(50, 75, 0))
+        np.testing.assert_allclose([crop_center.x(), crop_center.y()], [0, 0], atol=1e-6)
+
     def test_add_points_bad_shape_raises(self, viewer):
         with pytest.raises(ValueError, match="N, 2"):
             viewer.add_points(np.array([1.0, 2.0, 3.0]))

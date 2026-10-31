@@ -18,39 +18,73 @@ python -m pip install -e ".[analysis,viewer]"
 subpx-workbench
 ```
 
-![Workbench showing Voronoi cells, CD contours and a selected radial sample](images/workbench.png)
+![Workbench with the image and default CD contours](images/workbench.png)
 
-The left panel holds settings; the center holds the image and diagnostic tabs;
-the right panel compares methods for the selected feature. Drag the splitters
-to give an image or diagnostic more room, or use **Expand** beside the diagnostic
-tabs. The toolbar's **Guide** explains the
-workflow inside the application.
+Choose a task tab: **Find features**, **Measure CD**, **Pitch + placement** or
+**Align images**. Its controls and named action stay beside the image; results
+stay below it. **Ctrl+Enter** runs the current task. Image overlays and the
+contrast histogram are directly available beside the image.
+
+CD offers three measurement presets: **Compare spot widths** (Gaussian,
+log-quadratic, gradient and half-height), **Compare raw-cell widths** (local
+projection and half-area), and **Calibrated hole diameter** (disk and flux ratio).
+Presets select compatible methods and background settings together. Calibration
+fields appear for calibrated methods, and measurement waits for the required
+nominal CD or PSF value. **Choose methods and parameters** customizes methods;
+only parameters used by the selected methods appear in that dialog.
+
+The **Results** table compares CDs across methods. Click a CD value to select
+that method and feature in the **Selected feature** tab, with its original pixels,
+method input, contour and profile. **Metrics and notes** contains all numerical
+diagnostics; **Method definition** explains assumptions. Drag the splitters or
+use **Expand** for more diagnostic room. Completed measurements are retained
+when switching tasks or pages, until another image is opened.
 
 ## Image review
 
-- Open TIFF, PNG, JPEG, BMP or a two-dimensional `.npy` array. TIFF pages are
-  selected individually with the one-based **Page** control. A multichannel
-  scientific stack must first be reduced to a two-dimensional image.
+- Open TIFF, PNG, JPEG, BMP or a two-dimensional `.npy` array. Multipage files
+  reveal a navigation bar above the image. Use **Previous**, **Next**, the
+  one-based **Page** control, or **Page Up / Page Down**.
+- Enable **Stack vertically** to display all pages together, in file order.
+  Click any page to make it active; its outline turns teal. Pages may have
+  different dimensions or numeric types. They are displayed separately, with
+  space between them, rather than concatenated into one measurement image.
+  Analysis, regions, feature selection, registration and export use the active
+  page only. Overlays appear on that page. Hover reports the page number and
+  coordinates local to that page. The image axes show the stacked layout's
+  coordinates. **Fit image** fits all displayed pages.
+- Stacking loads all pages in a background worker and caches them until another
+  file is opened. Turning it off returns to the active page without discarding
+  its measurements. Returning to a measured page restores its analysis, selected
+  feature and analysis region. Registration resets when the reference page changes.
+  For files too large to hold all pages in memory, use individual-page mode.
+  A multidimensional array within a single TIFF page must first be reduced to
+  a two-dimensional or RGB(A) image.
+
 - Grayscale data retain their original precision. RGB is converted to luminance
   with `0.2126 R + 0.7152 G + 0.0722 B`; alpha is ignored. The conversion is
   displayed beside the image name. Nonfinite and complex images are rejected.
   Boolean arrays are converted to uint8 with their 0/1 intensities preserved.
 - Wheel to zoom, drag to pan, press **F** to fit and **Z** to zoom to the selected
   feature. Hover reports image coordinates and the original pixel intensity.
-  The histogram to the right adjusts display contrast without changing data or
-  measurements. Layer toggles preserve the chosen contrast.
+  The histogram adjusts display levels without changing data or measurements.
+  Layer toggles preserve the chosen contrast.
 - Toggle **Analysis region**, then move or resize the gold rectangle. The next
   analysis uses only that crop. Its boundaries can clip features, affect seed
   detection and exclude cells; review the region edges. Pixel centers have
   integer coordinates, x is the column and y increases down the image.
-- Set **Length / pixel** and **Length unit** together before measurement. The UI
-  displays calibrated lengths and areas; original repository result arrays
+- In **Scale and compute**, set the length per pixel and its unit together before
+  measurement. The UI displays calibrated lengths and areas; original result arrays
   retain pixel units. CPU is the default; Auto and GPU use existing dispatch.
+
+![TIFF pages stacked vertically with an outlined active page](images/workbench_stack.png)
 
 ## Find patterns
 
-Set threshold, polarity, component area limits and center refinement, then click
-**Find patterns**. Switch the image view to **Threshold mask** or **Component
+Choose **Find features**, adjust threshold, component area limits and center
+refinement, then click **Find features**. The preview switches to the threshold
+mask. **Adjust** beside CD's feature filter takes you directly to this task.
+Switch the image view to **Threshold mask** or **Component
 labels** and enable **Rejected boxes** to see components outside the area limits.
 Click the image or a measurement-table row to select a feature. The inspector
 shows seed and refined coordinates; the lower tab shows original pixels,
@@ -62,12 +96,13 @@ replace the original image used for CD.
 
 ## CD and intermediate steps
 
-Select methods in the **CD** settings and click **Measure CD**. All methods in
+Choose the **Measure CD** task and a measurement preset, then click **Measure CD**.
+Select additional methods in **Choose methods and parameters**. All methods in
 `subpx.cd.METHOD_LABELS` are available. Each has its existing prerequisites:
 Gaussian and invariant methods require model background; disk/flux ratio require
 nominal CD or PSF calibration. The Activity tab reports invalid combinations
 without discarding the previous results. Local-only methods bypass deblending.
-The detection refinement control applies to **Find patterns**; CD independently
+The detection refinement control applies to **Find features**; CD independently
 constructs its own seed list using its selected threshold or peak pipeline.
 
 Use **Contours**, **Voronoi edges**, **CD colors**, and the stage selector to
@@ -81,7 +116,7 @@ the selected method's metrics, full cell area and mean original cell intensity.
 **Next failed** and **Show failed measurements only** help review problems.
 Failed measurements retain their status and NaN values, with no seed fallback.
 
-The **Feature / CD steps** tab shows original pixels, the method's input and
+The **Selected feature** tab shows original pixels, the method's input and
 overlaid method contours. The emphasized contour is the selected method.
 
 - **Gaussian:** input row, fitted Gaussian on that same row and the row residual.
@@ -110,8 +145,10 @@ Convergence and a successful status do not establish measurement accuracy.
 
 ## Pitch and placement error
 
-Choose **CD method centers** or **Detection centers** in the **Pitch** settings,
-then click **Pitch + placement**. The workbench reuses matching measurements
+Choose **Pitch + placement**, select **CD measurements** or **Detected features**,
+then click **Measure pitch**. Averaging, lattice, design pitch and the selected
+reference are directly available; **Indexing options** holds pitch hints and
+stagger direction. The workbench reuses matching measurements
 when only pitch settings changed; otherwise it calculates the required source.
 It supports square/rectangular and staggered indexing, row/column averaging,
 pitch hints, a selected reference feature and a nominal x/y pitch.
@@ -132,9 +169,10 @@ indexing; the CD results and diagnostic notes remain available.
 
 ## Image registration
 
-In **Register**, open a moving image of the same dimensions as the loaded fixed
-reference, select its page if needed, then click **Register images**. Registration
-always uses the full loaded images, independently of the analysis region.
+Choose **Align images**, open a moving image, select its page and subpixel factor,
+then click **Align images**. The action is enabled once a moving image is ready. The two pages
+must have matching dimensions. Registration always uses those full pages,
+independently of the analysis region or stacked display.
 
 The CPU phase-correlation result is the shift **to apply** to the moving image,
 in `[dy, dx]` pixels. The lower tab shows before/after differences on the same
@@ -153,25 +191,33 @@ ambiguous correlation peaks.
 - Per-method, per-axis pitch CSVs, including node positions, pitch, pair spread,
   counts, integrated distance and placement error.
 - `workbench.json` with analysis parameters, elapsed time, notes and crop origin;
-  `source.json` with image paths/pages and registration metadata when present.
+  `source.json` with image paths, zero-based active page, total page count,
+  display mode (`page` or `stack`) and registration metadata when present.
 - `registration.npz` with shift, aligned image, valid overlap, difference images
   and correlation when image registration has been calculated.
 
 CD exports use crop-local `[x, y]` coordinates. Add `origin_xy` from
 `workbench.json` for coordinates in the loaded image. The detection-only center
 file is explicitly named `centers_global_xy.npy` and already includes the origin.
-**Save screenshot** saves the current window as a PNG.
+**Screenshot** saves the current window as a PNG.
 
 Loading, measurement, registration and exports run in a single background Qt
-worker. Image navigation and diagnostics remain available while a job runs;
+worker. Image zooming, panning and diagnostics remain available while a job runs;
 input changes and new jobs are disabled until it finishes. Closing waits for
 completion by keeping the window open; there is no forced worker termination.
-This workbench holds one image/page and its diagnostic arrays in memory. It uses
-pyqtgraph display downsampling, not the huge-image viewer's tiled storage path.
+Individual-page mode loads the current page and retains completed task/page
+analyses in memory. Stacked mode additionally retains all decoded pages; returning to page mode keeps this
+cache for navigation until another file is opened. Decoded pixel memory is the
+sum of each page's `image.nbytes`, plus display buffers and retained diagnostics;
+there is no additional combined image array. It uses pyqtgraph display
+downsampling, not the huge-image viewer's tiled storage path.
 
 Changes to parameters are labelled as pending until the next run. Results on
-screen continue to describe the last completed calculation. A new image/page
-clears all dependent measurements and registration results.
+screen continue to describe the last completed calculation. Switching tasks and
+pages restores completed results; input changes are marked pending when they
+differ from the restored calculation. Opening another image clears all cached
+measurements and registration results. Exports contain the active analysis and
+page, rather than a batch of cached results.
 
 ## NumPy / notebook use
 
@@ -192,7 +238,10 @@ $env:QT_QPA_PLATFORM = "offscreen"
 .\.venv\Scripts\python.exe -m pytest tests/test_workbench_data.py tests/test_workbench.py -q
 ```
 
-Tests cover scientific image precision, pages, crops and coordinate origins,
+Tests cover scientific image precision, mixed-size/mixed-dtype TIFF pages,
+page navigation and vertical stacking, page-local overlays/crops/exports,
+stack loading failures, task controls, compatible presets, calibration guidance,
+method comparison selection, task/page result retention, crops and coordinate origins,
 exports, radial/projection diagnostic agreement, raw and wide method inputs,
 known registration shifts, actual Qt workers, method/stage switching, selection,
 contrast preservation, reuse, error recovery and state reset. Qt tests skip if

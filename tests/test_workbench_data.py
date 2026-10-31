@@ -7,7 +7,7 @@ import pytest
 
 from subpx._workbench_data import (
     analyze_image, analyze_patterns, cell_boundary, crop_image, export_review,
-    feature_input, feature_origin, grayscale, load_image, projection_diagnostic, radial_diagnostic, register_images,
+    feature_input, feature_origin, grayscale, load_image, load_pages, projection_diagnostic, radial_diagnostic, register_images,
 )
 
 
@@ -63,6 +63,26 @@ def test_rgb_and_invalid_images():
     for invalid in (np.zeros((2, 5, 7)), np.full((5, 7), np.nan), np.ones((5, 7), complex)):
         with pytest.raises(ValueError):
             grayscale(invalid)
+
+
+def test_load_all_tiff_pages_keeps_shapes_dtypes_and_order(tmp_path):
+    tifffile = pytest.importorskip("tifffile")
+    images = [np.arange(120, dtype=np.uint16).reshape(10, 12) * 32,
+              np.arange(48, dtype=np.float64).reshape(8, 6) + .000123,
+              np.full((5, 9, 3), [100, 20, 0], dtype=np.uint8)]
+    path = tmp_path / "mixed_pages.tiff"
+    with tifffile.TiffWriter(path) as writer:
+        for image in images:
+            writer.write(image, photometric="rgb" if image.ndim == 3 else "minisblack")
+    pages = load_pages(path)
+    assert len(pages) == 3
+    for index, (page, image) in enumerate(zip(pages, images)):
+        expected, conversion = grayscale(image)
+        np.testing.assert_array_equal(page.image, expected)
+        assert page.image.dtype == expected.dtype
+        assert (page.page, page.pages) == (index, 3)
+        assert page.conversion == conversion
+        assert page.path == str(path.resolve())
 
 
 def test_crop_detection_and_export_keep_global_origin(spots, tmp_path):

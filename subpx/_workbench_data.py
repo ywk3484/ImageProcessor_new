@@ -126,6 +126,27 @@ def load_image(path, page=0):
     return LoadedImage(data, path.name, str(path.resolve()), page, pages, conversion)
 
 
+def load_pages(path):
+    """Load all file pages separately, retaining precision and page coordinates.
+
+    Pages may have different shapes and dtypes. They are never concatenated or
+    padded into an analysis image. TIFF decoding uses one open file handle.
+    """
+    path = Path(path)
+    frames = []
+    if path.suffix.lower() in (".tif", ".tiff"):
+        import tifffile
+
+        with tifffile.TiffFile(path) as tif:
+            for index, page in enumerate(tif.pages):
+                data, conversion = grayscale(page.asarray())
+                frames.append(LoadedImage(data, path.name, str(path.resolve()), index, len(tif.pages), conversion))
+    else:
+        first = load_image(path)
+        frames = [first] + [load_image(path, page) for page in range(1, first.pages)]
+    return frames
+
+
 def crop_image(image, bounds=None):
     """Return a crop and its [x, y] origin; bounds are half-open xyxy pixels."""
     if bounds is None:
