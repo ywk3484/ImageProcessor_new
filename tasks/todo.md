@@ -156,3 +156,11 @@ testing interactively on sample images.
   run (the library reports none), a typed region. 9 GPU / library tests (tiled GPU pipeline, pitch GPU, radial
   symmetry, isophote) fail, the same at 6aca236 without any pending edits: not from the workbench.
 - [ ] P3 later: open a cd_batch run (run.json settings, pages.csv page list, batch vs workbench mean)
+
+# Fix: "Voronoi cells" view showed rows of holes as one cell (2026-11-01, bug report)
+
+- [x] Cause: the view coloured cells by hole number on viridis; neighbours in a row differ by 1 and look alike.
+  Every workbench version did this (5d61ece, e99feb5, a9e5659: same screenshots on the demo). Calculation not
+  involved: old and new defaults give the same cells (demo 204/204, example 2,805, 39,042-hole page, GPU = CPU).
+- [x] Fix: `cell_colors_map` colours touching cells apart (greedy, 5 colours on the 39k page, 0.08 s); the view
+  shows it on a fixed 0-1 scale, unreported holes' cells clear. Test; 43 workbench tests pass.

@@ -148,3 +148,6 @@
   vertically" with a page list because it was slow and narrow at full view; the user needs both. When an existing
   feature is slow or awkward, propose making it work (load on demand, a better fit) and add the new one beside it;
   removing it is the user's call, asked as a plain question with what it would cost them.
+- **For a "looks wrong" report, ask where and on which image before reproducing.** "The Voronoi cells differ from
+  before" sent me through settings, padding, GPU vs CPU and the stack for an hour; one question (which view, which
+  image, what is wrong) pointed at the display of one view, which no calculation check could find.
