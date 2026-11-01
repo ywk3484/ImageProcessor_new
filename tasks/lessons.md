@@ -156,3 +156,10 @@
   "Voronoi edges" layer (boundaries on the image), which the new layout hid in a menu. Before claiming "it was always
   like this", list every way the old UI could show the thing (stages, layers, overlays) and screenshot each; and a
   view meant for judging a result must show it on the image, never a picture without the image.
+- **An explainer must answer the next question with a tested payoff, not redraw the doc.** The picture page for the
+  ACTIS proposal re-illustrated each sentence ("stack the holes into one average hole") and added an astronomy
+  analogy; the user asked what you do after the average hole, whether fitting each hole to it improves the
+  measurement, and said other fields are none of their business. Before explaining a method, simulate what it
+  buys on the user's own numbers and against their existing methods (here: no per-hole gain while each hole's
+  brightness is unknown, 2x once it is known), lead with that result and the condition it depends on, and leave
+  out analogies from other fields.
