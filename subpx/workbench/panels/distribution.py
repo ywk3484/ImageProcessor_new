@@ -1,5 +1,5 @@
-"""CD distribution (bottom): the current method's CDs as a histogram; dragging a range picks those holes in the
-table and on the image."""
+"""CD distribution (bottom): the current method's CDs as a histogram, with the other page version's (raw or
+preprocessed) as an outline; dragging a range picks those holes in the table and on the image."""
 
 from __future__ import annotations
 
@@ -39,6 +39,8 @@ class DistributionPanel(QtWidgets.QWidget):
         self.region.hide()
         self.mean_line = pg.InfiniteLine(angle=90, pen=pg.mkPen("#ffffff", style=QtCore.Qt.PenStyle.DashLine))
         self.plot.addItem(self.mean_line)
+        self.other = pg.PlotDataItem(stepMode="center", pen=pg.mkPen("#ffffff", width=1.5))  # the other version
+        self.plot.addItem(self.other)
         self._values = None  # (CDs in the length unit, NaN where failed)
         session.results_changed.connect(self.refresh)
         session.method_changed.connect(self.refresh)
@@ -49,6 +51,7 @@ class DistributionPanel(QtWidgets.QWidget):
         review, method = session.review, session.method
         measured = review.measurements.get(method) if review is not None else None
         values = measured.metrics.get("cd_equivalent_px") if measured is not None else None
+        self.other.setData([], [])
         if values is None or not len(values):
             self._values = None
             self.bars.setOpts(x=[], height=[])
@@ -83,14 +86,35 @@ class DistributionPanel(QtWidgets.QWidget):
         self.mean_line.setValue(mean)
         self.mean_line.show()
         outside = int(((valid < low) | (valid > high)).sum())
+        version = "preprocessed page" if session.version == "pre" else "raw page"
         self.summary.setText(
-            f"<b>{method_name(method)}</b>: {len(valid):,} measured, "
+            f"<b>{method_name(method)}</b>, {version}: {len(valid):,} measured, "
             + (f"<span style='color:#ff5c74'>{failed:,} failed</span>" if failed else "none failed")
             + f" | mean {mean:.4g} {unit}, sd {spread:.3g} {unit} | 1-99 %: "
               f"{np.percentile(valid, 1):.4g} to {np.percentile(valid, 99):.4g} {unit}"
-            + (f" | {outside:,} beyond the plot, counted at its ends" if outside else ""))
+            + (f" | {outside:,} beyond the plot, counted at its ends" if outside else "")
+            + self._other(method, edges))
         if self.pick.isChecked():
             self.region.setRegion(np.percentile(valid, (25, 75)))
+
+    def _other(self, method, edges):
+        """The other version's CDs of this method as an outline on the same bins; its line of the summary."""
+        session = self.session
+        other = session.other_review()
+        measured = other.measurements.get(method) if other is not None and other.cd is not None else None
+        values = measured.metrics.get("cd_equivalent_px") if measured is not None else None
+        if values is None:
+            return ""
+        scale, unit = other.parameters["pixel_size"], other.parameters["unit"]
+        valid = values[measured.valid & np.isfinite(values)] * scale
+        if not len(valid):
+            return ""
+        counts, _ = np.histogram(np.clip(valid, edges[0], edges[-1]), edges)
+        self.other.setData(edges, counts)
+        name = "raw page" if session.version == "pre" else "preprocessed page"
+        return (f"<br><span style='color:#ffffff'>&#9473; outline: {name}</span>, {len(valid):,} measured, "
+                f"mean {np.mean(valid):.4g} {unit}, sd {np.std(valid):.3g} {unit}. A smaller sd is better "
+                "precision only if the CDs still follow the true size one to one.")
 
     def _pick_toggled(self, picking):
         if picking and self._values is not None:

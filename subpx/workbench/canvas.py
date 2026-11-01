@@ -1,5 +1,5 @@
-"""The image view: the page (or every page, stacked), pipeline stages, the result's layers with a level of
-detail, the CD colour scale and the analysis region."""
+"""The image view: the page (or every page, stacked), raw or preprocessed, pipeline stages, the result's layers
+with a level of detail, the CD colour scale and the analysis region."""
 
 from __future__ import annotations
 
@@ -91,8 +91,9 @@ class ImageCanvas(QtWidgets.QWidget):
             point = self.plot.getViewBox().mapSceneToView(event[0])
             self.hovered.emit(point.x(), point.y())
 
-    def set_image(self, data, origin=(0, 0), *, fit=True, categorical=False, keep_levels=False):
-        key = (id(data), categorical)
+    def set_image(self, data, origin=(0, 0), *, fit=True, categorical=False, keep_levels=False, diverging=False):
+        """Show ``data``; new data is stretched to 1-99.5 % (``diverging``: symmetric about 0, blue-black-red)."""
+        key = (id(data), categorical, diverging)
         preserve_levels = key == self._image_key or keep_levels
         self._image_key = key
         data = np.asarray(data)
@@ -108,14 +109,18 @@ class ImageCanvas(QtWidgets.QWidget):
             sample = data[::max(1, data.shape[0] // 512), ::max(1, data.shape[1] // 512)]
             finite = sample[np.isfinite(sample)]
             low, high = np.percentile(finite, (1, 99.5)) if finite.size else (0, 1)
+            if diverging:
+                high = float(np.percentile(np.abs(finite), 99.5)) if finite.size else 1.0
+                low = -high
             if high <= low:
                 high = low + 1
             self.image_item.setLevels((float(low), float(high)))
+            preset = "bipolar" if diverging else "viridis" if categorical else "grey"
             if self.histogram:
                 self.histogram.setLevels(float(low), float(high))
-                self.histogram.gradient.loadPreset("viridis" if categorical else "grey")
+                self.histogram.gradient.loadPreset(preset)
             else:
-                self.image_item.setLookupTable(pg.colormap.get("viridis").getLookupTable() if categorical else None)
+                self.image_item.setLookupTable(pg.colormap.get(preset).getLookupTable() if preset != "grey" else None)
         if fit:
             self.fit_image()
 
@@ -550,8 +555,10 @@ LAYERS = (
     ("Pitch pairs", False, "The hole pairs of the pitch result and its reference hole"),
     ("CD colors", False, "Each cell colored by the shown method's CD (scale beside the image)"),
 )
-STAGES = ("Image", "Threshold mask", "Component labels", "Voronoi cells", "Background model")
+REMOVED = "Removed by preprocessing"
+STAGES = ("Image", "Threshold mask", "Component labels", "Voronoi cells", "Background model", REMOVED)
 IMAGE_STAGES = ("Image", "Voronoi cells")  # the stages that show the image itself
+PAGE_STAGES = IMAGE_STAGES + (REMOVED,)  # the stages drawn over the whole page (the others over the result)
 PAN_REASONS = {"table", "key", "failed", "inspector", "pitch", "distribution"}
 
 
@@ -568,10 +575,20 @@ class MeasureView(QtWidgets.QWidget):
         layout.setSpacing(3)
         row = QtWidgets.QHBoxLayout()
         row.setContentsMargins(4, 0, 4, 0)
+        self.preprocessed = QtWidgets.QToolButton()
+        self.preprocessed.setObjectName("view")
+        self.preprocessed.setText("Preprocessed")
+        self.preprocessed.setCheckable(True)
+        self.preprocessed.setToolTip("On: the preprocessed page and its results (Setup > Preprocess); off: the raw "
+                                     "page and its results. Runs measure the page shown (P)")
+        self.preprocessed.toggled.connect(lambda on: session.set_version("pre" if on else "raw"))
+        row.addWidget(self.preprocessed)
         row.addWidget(QtWidgets.QLabel("Show"))
         self.stage = QtWidgets.QComboBox()
         self.stage.addItems(STAGES)
         self.stage.setToolTip("The image or a stage of the hole finding and measurement")
+        self.stage.setItemData(STAGES.index(REMOVED), "Raw minus preprocessed page: red where preprocessing lowered "
+                               "the pixels, blue where it raised them", QtCore.Qt.ItemDataRole.ToolTipRole)
         self.stage.currentIndexChanged.connect(self.render)
         row.addWidget(self.stage)
         row.addWidget(QtWidgets.QLabel("Method"))
@@ -658,6 +675,9 @@ class MeasureView(QtWidgets.QWidget):
         session.selection_changed.connect(self._selection_changed)
         session.highlight_changed.connect(self._highlight_changed)
         session.stacked_changed.connect(self._stacked_changed)
+        session.version_changed.connect(self._version_changed)
+        self._removed = (None, None)  # (preprocessed page, raw minus preprocessed)
+        self._drawn = (None, False)  # (page drawn last, whether as the image itself)
 
     # ------------------------------------------------------------------------------------------ pages
     def offset(self):
@@ -764,10 +784,18 @@ class MeasureView(QtWidgets.QWidget):
         if loaded is None:
             return
         review = session.review
-        data, origin, categorical = loaded.image, np.zeros(2), False
+        data, origin, categorical, diverging = session.shown_image(), np.zeros(2), False, False
         stage = self.stage.currentText()
         message = ""
-        if stage != "Image":
+        if stage == REMOVED:
+            processed = session.processed
+            if processed is None:
+                message = "Preprocess this page to see what it removes (Setup > Preprocess)."
+            else:
+                if self._removed[0] is not processed:
+                    self._removed = (processed, loaded.image.astype(np.float32) - processed.image)
+                data, diverging = self._removed[1], True
+        elif stage != "Image":
             if review is None:
                 message = "Preview holes or measure CD to see this stage."
             elif stage == "Threshold mask":
@@ -786,9 +814,18 @@ class MeasureView(QtWidgets.QWidget):
                 data, origin = review.cd.background_map, review.origin_xy
             else:
                 message = "This background mode has no background map."
+        if session.version == "pre":
+            note = "Raw page shown: this page is not preprocessed yet." if session.processed is None else ""
+            if self.stack is not None:
+                note += (" " if note else "") + "Other pages of the stack are raw."
+            message = (message + " " if message else "") + note
         offset = self.offset()
         locked = self.lock_levels.isChecked() and self._locked_levels is not None and stage in IMAGE_STAGES
-        self.canvas.set_image(data, origin + offset, fit=False, categorical=categorical, keep_levels=locked)
+        # Raw <-> preprocessed of the same page keep the contrast, so the two compare in place.
+        keep = locked or (stage in IMAGE_STAGES and self._drawn[0] is loaded and self._drawn[1])
+        self._drawn = (loaded, stage in IMAGE_STAGES)
+        self.canvas.set_image(data, origin + offset, fit=False, categorical=categorical, keep_levels=keep,
+                              diverging=diverging)
         if locked:
             self.canvas.histogram.setLevels(*self._locked_levels)
         if self.stack is not None and stage in IMAGE_STAGES:
@@ -872,6 +909,12 @@ class MeasureView(QtWidgets.QWidget):
             self.layers.set_selection(review.seeds_xy[session.selected] + review.origin_xy + self.offset())
 
     # -------------------------------------------------------------------------------- session events
+    def _version_changed(self):
+        on = self.session.version == "pre"
+        if self.preprocessed.isChecked() != on:
+            with QtCore.QSignalBlocker(self.preprocessed):
+                self.preprocessed.setChecked(on)
+
     def _results_changed(self):
         names = self.session.methods()
         with QtCore.QSignalBlocker(self.method):
@@ -949,6 +992,9 @@ class MeasureView(QtWidgets.QWidget):
         # Other pages of the stack: the value when the page is in memory at full resolution.
         loaded = session.loaded if page == session.loaded.page else session.source.cached(page)
         value = f" = {loaded.image[iy, ix]:.6g}" if loaded is not None else ""
+        processed = session.processed if page == session.loaded.page else None
+        if processed is not None and value:
+            value = f" = raw {loaded.image[iy, ix]:.6g}, preprocessed {processed.image[iy, ix]:.6g}"
         self.hovered.emit(f"{prefix}x={x:.2f}, y={local_y:.2f} px | pixel [{iy}, {ix}]{value}")
 
     # ---------------------------------------------------------------------------------------- region

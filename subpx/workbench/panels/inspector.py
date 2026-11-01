@@ -68,8 +68,9 @@ class HoleInspector(QtWidgets.QWidget):
         layout.addWidget(self.info)
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self.splitter = splitter
-        self.comparison = QtWidgets.QTableWidget(0, 5)
-        self.comparison.setHorizontalHeaderLabels(["Method", "CD", "x (px)", "y (px)", "Status"])
+        self.comparison = QtWidgets.QTableWidget(0, 6)
+        self.comparison.setHorizontalHeaderLabels(["Method", "CD", "CD other", "x (px)", "y (px)", "Status"])
+        self.comparison.setColumnHidden(2, True)  # shown when the other page version has a result
         header_view = self.comparison.horizontalHeader()
         header_view.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
         header_view.setStretchLastSection(True)
@@ -202,15 +203,28 @@ class HoleInspector(QtWidgets.QWidget):
                           + (state if measured.valid[index] else f"<span style='color:{FAILED_COLOR}'>{state}</span>"))
         self.info.setTextFormat(QtCore.Qt.TextFormat.RichText)
         scale, unit = review.parameters["pixel_size"], review.parameters["unit"]
-        self.comparison.setHorizontalHeaderLabels(["Method", f"CD ({unit})", "x (px)", "y (px)", "Status"])
+        # The same hole (by position) in the other page version: raw beside preprocessed.
+        other, match = session.other_hole(index)
+        other_name = "raw" if session.version == "pre" else "pre"
+        self.comparison.setHorizontalHeaderLabels(["Method", f"CD ({unit})", f"CD {other_name}", "x (px)", "y (px)",
+                                                   "Status"])
+        self.comparison.setColumnHidden(2, other is None)
+        if other is not None:
+            self.comparison.horizontalHeaderItem(2).setToolTip(
+                f"The same hole measured on the {'raw' if other_name == 'raw' else 'preprocessed'} page "
+                "(the hole whose cell holds this centre)")
         self.comparison.setRowCount(len(review.measurements))
         bold = QtGui.QFont(self.comparison.font())
         bold.setBold(True)
         for row, (name, measurement) in enumerate(review.measurements.items()):
             cd = measurement.metrics.get("cd_equivalent_px")
             center = measurement.centers_xy[index] + review.origin_xy
+            twin = other.measurements.get(name) if other is not None and match >= 0 else None
+            twin_cd = twin.metrics.get("cd_equivalent_px") if twin is not None else None
             values = [method_name(name),
                       f"{cd[index] * scale:.4g}" if cd is not None and np.isfinite(cd[index]) else "--",
+                      f"{twin_cd[match] * other.parameters['pixel_size']:.4g}"
+                      if twin_cd is not None and twin.valid[match] and np.isfinite(twin_cd[match]) else "--",
                       f"{center[0]:.3f}" if np.isfinite(center[0]) else "--",
                       f"{center[1]:.3f}" if np.isfinite(center[1]) else "--",
                       status_text(measurement.status[index])]
@@ -220,7 +234,7 @@ class HoleInspector(QtWidgets.QWidget):
                 item.setToolTip(f"{name}: {METHOD_LABELS.get(name, name)} | status {measurement.status[index]}")
                 if column == 0:
                     item.setIcon(dot_icon(method_color(row)))
-                if column == 4 and not measurement.valid[index]:
+                if column == 5 and not measurement.valid[index]:
                     item.setForeground(QtGui.QColor(FAILED_COLOR))
                 if name == method:
                     item.setFont(bold)
@@ -240,6 +254,11 @@ class HoleInspector(QtWidgets.QWidget):
                                 + method_help(method))
         self.definition.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self.draw()
+
+    @staticmethod
+    def _pixels(review):
+        """What the result was measured on: the original or the preprocessed pixels."""
+        return "Preprocessed pixels" if review.parameters.get("preprocess") else "Original pixels"
 
     def _method_clicked(self, row, column):
         item = self.comparison.item(row, 0)
@@ -272,7 +291,7 @@ class HoleInspector(QtWidgets.QWidget):
         origin = np.array([ox, oy]) + review.origin_xy
         self.raw_canvas.set_image(np.where(in_image, raw, np.nan), origin)
         self.input_canvas.set_image(np.where(mask, data, np.nan), origin)
-        self.crop_title.setText(f"Original pixels | method input: {description}")
+        self.crop_title.setText(f"{self._pixels(review)} | method input: {description}")
         self.crop_title.setToolTip(description)
         labels = result.cell_labels[np.clip(yy + oy, 0, result.image.shape[0] - 1),
                                     np.clip(xx + ox, 0, result.image.shape[1] - 1)]
@@ -363,8 +382,9 @@ class HoleInspector(QtWidgets.QWidget):
         origin = np.array([x0, y0]) + review.origin_xy
         self.raw_canvas.set_image(review.image[y0:y1, x0:x1], origin)
         self.input_canvas.set_image(review.detection.binary[y0:y1, x0:x1], origin)
-        self.crop_title.setText("Original pixels | threshold mask")
-        self.profile_title.setText(f"Center row y = {y + review.origin_xy[1]:.0f} px | " + _legend((method_color(0), "original pixels")))
+        self.crop_title.setText(f"{self._pixels(review)} | threshold mask")
+        self.profile_title.setText(f"Center row y = {y + review.origin_xy[1]:.0f} px | "
+                                   + _legend((method_color(0), self._pixels(review).lower())))
         self.profile_plot.plot(np.arange(x0, x1) + review.origin_xy[0], review.image[y, x0:x1], pen=method_color(0),
                                symbol="o", symbolSize=3)
 

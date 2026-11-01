@@ -4,12 +4,15 @@ moving image and the alignment.
 Panels read the session and listen to its signals; they never call each other. Results are kept per page:
 the previewed holes, the CD measurement and the pitch, side by side. The method box decides which of the first
 two is on screen ("Previewed holes" or a CD method); running a step never hides another step's result.
+
+Each page has two versions: the raw page and the preprocessed page (Setup > Preprocess). The Preprocessed switch
+picks the version on screen; runs measure that version, and each version keeps its own results.
 """
 
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 import threading
@@ -19,12 +22,13 @@ import numpy as np
 from PyQt6 import QtCore
 
 from .._workbench_data import (
-    HOLE_CHECK_MAX_ERROR, AnalysisReview, LoadedImage, PageReader, analyze_image, analyze_patterns, array_bytes,
-    demo_image, export_review, grayscale, page_preview, register_images,
+    HOLE_CHECK_MAX_ERROR, AnalysisReview, LoadedImage, PageReader, Preprocessed, analyze_image, analyze_patterns,
+    array_bytes, demo_image, export_review, grayscale, page_preview, preprocess_page, register_images,
 )
 from .jobs import JobRunner
 from .names import method_name, plain_error
-from .settings import RESULT_KEYS, STEP_KEYS, changes, run_problems
+from .settings import (HOLE_KEYS, RESULT_KEYS, STEP_KEYS, changes, preprocess_settings, preprocess_summary,
+                       preprocess_text, run_problems)
 
 # Results are kept for the open page and the most recent other pages: at most this many pages and bytes.
 RESULT_PAGES = 3
@@ -91,8 +95,8 @@ class PageSource:
 
 
 @dataclass
-class PageResults:
-    """One page's results: previewed holes, CD and pitch live together."""
+class Results:
+    """One version of a page (raw or preprocessed): previewed holes, CD and pitch live together."""
 
     detect: AnalysisReview | None = None
     cd: AnalysisReview | None = None
@@ -102,8 +106,27 @@ class PageResults:
     def reviews(self):
         return [review for review in (self.detect, self.cd, self.pitch) if review is not None]
 
+
+@dataclass
+class PageResults:
+    """One page's results on the raw page and on the preprocessed page, and the preprocessed page itself."""
+
+    raw: Results = field(default_factory=Results)
+    pre: Results = field(default_factory=Results)
+    processed: Preprocessed | None = None
+
+    def version(self, name):
+        return self.pre if name == "pre" else self.raw
+
+    def reviews(self):
+        return self.raw.reviews() + self.pre.reviews()
+
     def nbytes(self):
-        return array_bytes(*self.reviews())
+        return array_bytes(*self.reviews(), self.processed)
+
+
+def other_version(version):
+    return "raw" if version == "pre" else "pre"
 
 
 def hole_near(review, xy):
@@ -131,6 +154,7 @@ def failure_counts(review):
 class Session(QtCore.QObject):
     image_changed = QtCore.pyqtSignal(bool)  # True: another file or image; False: another page of the open file
     results_changed = QtCore.pyqtSignal()  # the active page's results or the result on screen changed
+    version_changed = QtCore.pyqtSignal()  # the Preprocessed switch: raw or preprocessed page on screen
     method_changed = QtCore.pyqtSignal()
     selection_changed = QtCore.pyqtSignal(str)  # why: image, table, key, failed, inspector, pitch, result
     highlight_changed = QtCore.pyqtSignal()
@@ -166,15 +190,64 @@ class Session(QtCore.QObject):
         self.registration = None
         self.parameters = {}  # the Setup settings as analysis parameters
         self.bounds = None  # analysis region, page-local [x0, y0, x1, y1], or None
+        self.version = "raw"  # the page version on screen and measured by runs: "raw" or "pre" (preprocessed)
 
     # ------------------------------------------------------------------------------------------- state
     @property
     def busy(self):
         return self.jobs.busy
 
+    def page_entry(self, page=None):
+        """PageResults of the active page (or ``page``): both versions and the preprocessed page, or None."""
+        if self.loaded is None:
+            return None
+        return self.results.get(self.loaded.page if page is None else page)
+
     @property
     def page_results(self):
-        return self.results.get(self.loaded.page) if self.loaded is not None else None
+        """The results of the version on screen (raw or preprocessed page)."""
+        entry = self.page_entry()
+        return entry.version(self.version) if entry is not None else None
+
+    @property
+    def other_results(self):
+        """The results of the version not on screen."""
+        entry = self.page_entry()
+        return entry.version(other_version(self.version)) if entry is not None else None
+
+    @property
+    def processed(self):
+        """The active page's Preprocessed (made with the Preprocess settings), or None."""
+        entry = self.page_entry()
+        return entry.processed if entry is not None else None
+
+    def processed_stale(self):
+        """True when the preprocessed page was made with other settings than the current ones."""
+        processed = self.processed
+        return processed is not None and (preprocess_settings(processed.parameters)
+                                          != preprocess_settings(self.parameters))
+
+    def shown_image(self):
+        """The page as on screen: the preprocessed page in the preprocessed version (when made), else the raw."""
+        if self.loaded is None:
+            return None
+        processed = self.processed
+        return processed.image if self.version == "pre" and processed is not None else self.loaded.image
+
+    def other_review(self):
+        """The other version's result of the kind on screen (CD or previewed holes), or None."""
+        review, other = self.review, self.other_results
+        if review is None or other is None:
+            return None
+        return other.cd if review.cd is not None else other.detect
+
+    def other_hole(self, index=None):
+        """(the other version's result, its hole at the position of hole ``index`` on screen; -1: none)."""
+        review, other = self.review, self.other_review()
+        index = self.selected if index is None else index
+        if other is None or review is None or index is None:
+            return other, -1
+        return other, hole_near(other, review.seeds_xy[index] + review.origin_xy)
 
     @property
     def review(self):
@@ -209,7 +282,9 @@ class Session(QtCore.QObject):
         return any(results.reviews() for results in self.results.values()) or self.registration is not None
 
     def current_parameters(self):
-        return dict(self.parameters, bounds=self.bounds)
+        """The settings runs use now; the Preprocess settings only for the preprocessed version."""
+        return dict(self.parameters, bounds=self.bounds,
+                    preprocess=self.parameters.get("preprocess") if self.version == "pre" else None)
 
     def problems(self):
         return run_problems(self.parameters, loaded=self.loaded, results=self.page_results, moving=self.moving)
@@ -237,6 +312,12 @@ class Session(QtCore.QObject):
             found += [item for item in changes(pitch.parameters, current, RESULT_KEYS["pitch"]) if item not in found]
             if results.pitch_from is not self._pitch_source(results, pitch.parameters.get("pitch_source")):
                 found.append(("pitch_from", "pitch measured on an earlier result"))
+        if self.version == "pre" and self.processed_stale():
+            old, keys = self.processed.parameters, {key for key, _ in found}
+            mean_hole = (old.get("preprocess") or {}).get("method") == "mean_hole"
+            for key, text in changes(old, self.parameters, ("preprocess",) + (HOLE_KEYS if mean_hole else ())):
+                if key not in keys:  # 'preprocessed page: Gaussian 0.6 px -> Gaussian 1 px'
+                    found.append((key, "preprocessed page: " + text.removeprefix("preprocessing ")))
         return found
 
     def step_states(self):
@@ -257,6 +338,7 @@ class Session(QtCore.QObject):
             if step == "pitch":
                 changed |= results.pitch_from is not self._pitch_source(results, target.parameters.get("pitch_source"))
             states[step] = "changed" if changed else "ok"
+        states["preprocess"] = "none" if self.processed is None else "changed" if self.processed_stale() else "ok"
         return states
 
     def revert_parameters(self):
@@ -265,6 +347,10 @@ class Session(QtCore.QObject):
         parameters = dict(review.parameters) if review is not None else {}
         if pitch is not None:
             parameters.update({key: pitch.parameters.get(key) for key in RESULT_KEYS["pitch"]})
+        if self.version == "pre" and self.processed is not None and not parameters.get("preprocess"):
+            parameters["preprocess"] = self.processed.parameters.get("preprocess")
+        if not parameters.get("preprocess"):
+            parameters.pop("preprocess", None)  # results of the raw page: the Preprocess settings stay
         return parameters
 
     def rerun(self):
@@ -273,6 +359,8 @@ class Session(QtCore.QObject):
         if review is not None and changes(review.parameters, current,
                                           RESULT_KEYS["detect" if review.cd is None else "cd"]):
             self.run("detect" if review.cd is None else "cd")
+        elif self.version == "pre" and self.processed_stale():
+            self.run("preprocess")
         elif results is not None and results.pitch is not None:
             self.run("pitch")
 
@@ -361,6 +449,24 @@ class Session(QtCore.QObject):
         self.registration_changed.emit()
         self._results_updated()
         self._keep_results()
+        self._preprocess_shown()
+
+    # ----------------------------------------------------------------------------------- page versions
+    def set_version(self, version):
+        """Show the raw ('raw') or the preprocessed page ('pre'); a page not preprocessed yet is made now."""
+        version = "pre" if version == "pre" else "raw"
+        if version == self.version:
+            return
+        self.version = version
+        self.version_changed.emit()
+        self._results_updated()
+        self._preprocess_shown()
+
+    def _preprocess_shown(self):
+        """The preprocessed version is on screen but the page has no preprocessed image: make it."""
+        if (self.version == "pre" and self.loaded is not None and self.processed is None and not self.busy
+                and not self.problems()[0]["preprocess"]):
+            self.run("preprocess", show=False)
 
     def _close_sources(self):
         self._close_moving_source()
@@ -377,18 +483,28 @@ class Session(QtCore.QObject):
         self._close_sources()
 
     # ------------------------------------------------------------------------------------------ measuring
-    def run(self, step):
-        """Preview holes ('detect'), measure CD ('cd') or pitch ('pitch') on the active page."""
+    def run(self, step, *, show=True):
+        """Preprocess the active page ('preprocess'), or preview holes ('detect'), measure CD ('cd') or pitch
+        ('pitch') on the version on screen; on the preprocessed version a missing or out-of-date preprocessed
+        page is made first. Preprocessing with ``show`` turns the preprocessed version on when it is done."""
         if self.loaded is None or self.busy:
             return
-        problem = self.problems()[0][step]
+        version, setup = self.version, dict(self.parameters)
+        processed = self.processed
+        remake = step == "preprocess" or (step in ("detect", "cd") and version == "pre"
+                                          and (processed is None or self.processed_stale()))
+        problems = self.problems()[0]
+        problem = problems[step] or (problems["preprocess"] if remake else "")
         if problem:
             self.error.emit(problem)
             return
         parameters, bounds = self.current_parameters(), self.bounds
         image, page = self.loaded.image, self.loaded.page
         source = None
-        if step == "pitch":
+        if step == "preprocess":
+            def calculate():
+                return preprocess_page(image, setup), None
+        elif step == "pitch":
             results = self.page_results
             source = self._pitch_source(results, parameters["pitch_source"])
             options = dict(parameters["pitch_options"])
@@ -400,24 +516,51 @@ class Session(QtCore.QObject):
             def calculate():
                 started = perf_counter()
                 patterns = analyze_patterns(source, options)
-                return replace(source, patterns=patterns, seconds=perf_counter() - started,
-                               parameters=dict(source.parameters, operation="pitch", **pitch_keys))
+                return None, replace(source, patterns=patterns, seconds=perf_counter() - started,
+                                     parameters=dict(source.parameters, operation="pitch", **pitch_keys))
         else:
             def calculate():
-                return analyze_image(image, parameters, operation=step, bounds=bounds)
+                made = preprocess_page(image, setup) if remake else None
+                shown = image if version == "raw" else (made or processed).image
+                return made, analyze_image(shown, parameters, operation=step, bounds=bounds)
 
-        labels = {"detect": "Previewing holes", "cd": "Measuring CD", "pitch": "Measuring pitch"}
-        self._run(labels[step], calculate, lambda review: self._accept(page, step, review, source))
+        labels = {"preprocess": f"Preprocessing ({preprocess_text(setup.get('preprocess'))})",
+                  "detect": "Previewing holes", "cd": "Measuring CD", "pitch": "Measuring pitch"}
+        label = labels[step] + (" on the preprocessed page" if version == "pre" and step != "preprocess" else "")
+        self._run(label, calculate, lambda value: self._accept(page, step, value[1], source, version=version,
+                                                               processed=value[0], show=show))
 
-    def _accept(self, page, step, review, source):
-        results = self.results.setdefault(page, PageResults())
+    def _accept(self, page, step, review, source, *, version=None, processed=None, show=True):
+        """Keep a run's result in its page and version (and the preprocessed page it made, if any)."""
+        version = version or self.version
+        entry = self.results.setdefault(page, PageResults())
         self.results.move_to_end(page)
+        if processed is not None:
+            entry.processed = processed
+            self.log.emit(f"Preprocessed page {page} ({preprocess_text(processed.parameters.get('preprocess'))}) "
+                          f"in {processed.seconds:.2f} s: {preprocess_summary(processed.result, processed.centers)}.")
+        if step == "preprocess":
+            self._mark(page)
+            self.status.emit(f"Preprocessed | {preprocess_text(processed.parameters.get('preprocess'))} | "
+                             f"{processed.seconds:.1f} s", "info")
+            if show and self.version != "pre":  # running Preprocess shows the preprocessed page
+                self.version = "pre"
+                self.version_changed.emit()
+            self._results_updated()
+            self._keep_results()
+            return
+        results = entry.version(version)
+        if version != self.version:  # the switch was flipped while the job ran: the result waits in its version
+            self.log.emit(f"{step} result kept for the {'preprocessed' if version == 'pre' else 'raw'} page.")
         if step == "detect":
             results.detect = review
-            self.method = "detection"
+            if version == self.version:
+                self.method = "detection"
         elif step == "cd":
             results.cd = review
-            self.method = self._wanted_cd if self._wanted_cd in review.measurements else next(iter(review.measurements), None)
+            if version == self.version:
+                self.method = (self._wanted_cd if self._wanted_cd in review.measurements
+                               else next(iter(review.measurements), None))
         else:
             results.pitch, results.pitch_from = review, source
         self.log.emit(f"{step} done in {review.seconds:.2f} s; region origin [x, y] = {review.origin_xy.tolist()}.")
@@ -445,22 +588,28 @@ class Session(QtCore.QObject):
         self._keep_results()
 
     def _mark(self, page):
-        results = self.results.get(page)
-        if results is None:
+        entry = self.results.get(page)
+        if entry is None:
             return
         short, detail = [], []
-        if results.cd is not None:
-            failed = failure_counts(results.cd)
-            short.append(f"CD: most failed {failed[0][0]:,}" if failed else "CD: none failed")
-            detail.append(f"CD of {len(results.cd.seeds_xy):,} holes; " + (
-                "failed: " + ", ".join(f"{method_name(name)} {count:,}" for count, name in failed) if failed
-                else "no method failed"))
-        elif results.detect is not None:
-            short.append(f"{len(results.detect.seeds_xy):,} holes previewed")
-            detail.append(short[-1])
-        if results.pitch is not None:
-            short.append("pitch")
-            detail.append("pitch measured")
+        for prefix, results in (("", entry.raw), ("pre ", entry.pre)):
+            where = "preprocessed page: " if prefix else ""
+            if results.cd is not None:
+                failed = failure_counts(results.cd)
+                short.append(prefix + (f"CD: most failed {failed[0][0]:,}" if failed else "CD: none failed"))
+                detail.append(where + f"CD of {len(results.cd.seeds_xy):,} holes; " + (
+                    "failed: " + ", ".join(f"{method_name(name)} {count:,}" for count, name in failed) if failed
+                    else "no method failed"))
+            elif results.detect is not None:
+                short.append(prefix + f"{len(results.detect.seeds_xy):,} holes previewed")
+                detail.append(where + short[-1][len(prefix):])
+            if results.pitch is not None:
+                short.append(prefix + "pitch")
+                detail.append(where + "pitch measured")
+        if entry.processed is not None:
+            if not entry.pre.reviews():
+                short.append("preprocessed")
+            detail.append("Preprocessed: " + preprocess_text(entry.processed.parameters.get("preprocess")))
         self.marks[page] = (", ".join(short), "\n".join(detail))
 
     def _results_updated(self):
@@ -670,12 +819,29 @@ class Session(QtCore.QObject):
                       display_mode="stack" if self.stacked else "page", shape=list(loaded.image.shape),
                       dtype=str(loaded.image.dtype), conversion=loaded.conversion, method=self.method,
                       moving_path=moving.path if moving else None, moving_page=moving.page if moving else None,
-                      moving_conversion=moving.conversion if moving else None)
+                      moving_conversion=moving.conversion if moving else None,
+                      version="preprocessed" if self.version == "pre" else "raw")
+        processed = self.processed
+        curves = {}
+        if processed is not None:
+            result = processed.result
+            scalars = {key: value.item() if isinstance(value, np.generic) else value
+                       for key, value in result.meta.items() if np.ndim(value) == 0}
+            curves = {key: np.asarray(value) for key, value in result.meta.items() if np.ndim(value) > 0}
+            source["preprocess"] = dict(settings=processed.parameters.get("preprocess"), method=result.method,
+                                        parameters=result.parameters, meta=scalars, seconds=processed.seconds,
+                                        centers=processed.centers,
+                                        summary=preprocess_summary(result, processed.centers),
+                                        files="preprocessed_image.npy (float32, the whole page) and "
+                                              "preprocess_meta.npz (curves and per-hole values)" if arrays else "")
 
         def save():
             import csv
 
             folder.mkdir(parents=True, exist_ok=True)
+            if arrays and processed is not None:
+                np.save(folder / "preprocessed_image.npy", processed.image)
+                np.savez_compressed(folder / "preprocess_meta.npz", **curves)
             if arrays and review is not None:
                 if pitch is not None and results.pitch_from is review:
                     export_review(pitch, folder)  # the same arrays plus the pitch profiles
@@ -714,6 +880,10 @@ class Session(QtCore.QObject):
     # ----------------------------------------------------------------------------------------- jobs
     def _run(self, label, function, on_result):
         return self.jobs.run(label, function, on_result)
+
+    def run_job(self, label, function, on_result):
+        """Run a panel's calculation on the worker (one job at a time); False when another job runs."""
+        return self._run(label, function, on_result)
 
     def cancel(self):
         self.jobs.cancel()

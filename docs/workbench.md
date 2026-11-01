@@ -26,17 +26,20 @@ subpx-workbench
  File Edit View Run Holes Help
  [Measure|Align]  file.tif   ◀ Page 5 ▶ of 48   2048 x 1378 px | uint8        Compute: GPU (auto)
  ┌ Setup | Pages ┐ ┌ (error / "results are from earlier settings" banner) ┐ ┌ Hole inspector ─┐
- │ 1 Image     ● │ │ Show [Image]  Method [Gaussian fit]  Layers          │ │ Hole 812 of 39k │
- │ 2 Holes     ● │ │                                                      │ │ every method's  │
- │ 3 CD methods ●│ │            the active page (or the stack)            │ │ CD and status,  │
- │ 4 Pitch     ● │ │                                                      │ │ pixels, profile │
- │ [Measure CD]  │ ├ Holes | CD distribution | Pitch | Log ───────────────┤ │                 │
+ │ 1 Image     ● │ │ [Preprocessed] Show [Image] Method [Gaussian fit]    │ │ Hole 812 of 39k │
+ │ 2 Preprocess ●│ │                                                      │ │ every method's  │
+ │ 3 Holes     ● │ │     the active page, raw or preprocessed (or stack)  │ │ CD and status,  │
+ │ 4 CD methods ●│ │                                                      │ │ pixels, profile │
+ │ 5 Pitch     ● │ ├ Holes | CD distribution | Pitch | Average hole | Log ┤ │                 │
+ │ [Measure CD]  │ │                                                      │ │                 │
  └───────────────┘ └──────────────────────────────────────────────────────┘ └─────────────────┘
  status | hover position | job + elapsed + Cancel | holes, mean CD, failures of every method
 ```
 
 - **Setup** (left) holds the steps in pipeline order: **Image** (pixel size,
-  unit, polarity, compute device), **Holes** (seeds, threshold, area limits with
+  unit, polarity, compute device), **Preprocess** (Gaussian smoothing, Wiener
+  filter or mean hole and its settings; see [Preprocessing](#preprocessing)),
+  **Holes** (seeds, threshold, area limits with
   a histogram of the component areas and draggable limits), **CD methods**
   (preset, methods in groups with All / None, a *Parameters of the ticked
   methods* fold, calibration only when a calibrated method is ticked) and
@@ -58,7 +61,8 @@ subpx-workbench
   the method's input with all contours (current one thick), the profile, the
   metrics and the definition. Click a method there to show it everywhere.
 - The **bottom tabs** hold the **Holes** table, the **CD distribution**, the
-  **Pitch** result and the **Log**. The Log never opens by itself.
+  **Pitch** result, the **Average hole** and the **Log**. The Log never opens by
+  itself.
 - **Ctrl+1 / Ctrl+2 / Ctrl+3** show or hide Setup, the inspector and the bottom
   panel. Panel sizes, positions and the open tab are remembered. On a small
   screen (below 1300 x 800) Setup starts collapsed.
@@ -90,6 +94,7 @@ and results stay.
 | --- | --- |
 | Ctrl+O, or drop a file | open (File > Open recent lists the last 8) |
 | Ctrl+Enter (either Enter key) | run the open Setup step |
+| P | raw / preprocessed page, with their own results |
 | F / Shift+F / Z | fit the page / fit the whole stack / zoom to the selected hole |
 | J / K, Down / Up in the table | next / previous hole in the table's order (J = next, as in vim) |
 | N / Shift+N | next / previous hole the current method failed on (wraps) |
@@ -121,6 +126,43 @@ never taken by these keys. In the table, Page keys scroll the table.
   while a job runs.
 - Opening another file and closing ask before discarding results. Closing while
   a job runs is refused with a hint to press Esc first.
+
+## Preprocessing
+
+Setup step **2 Preprocess** makes a preprocessed copy of the active page. The
+choices are Gaussian smoothing (σ), the Wiener filter (noise level, Auto) or the
+mean hole (K, box radius, Auto). The mean hole finds its holes on the raw page
+with the Holes settings. The **Preprocessed** switch above the image (P, also
+View > Preprocessed page) flips between the raw and the preprocessed page in the
+same place, with the same contrast:
+
+- Each page keeps a raw and a preprocessed version, each with its own previewed
+  holes, CD and pitch. The switch flips the image, CD colours, holes table,
+  inspector, CD distribution and pitch together.
+- Runs measure the version on screen. On the preprocessed version, a missing or
+  out-of-date preprocessed page is made first, in the same job.
+- Turning the switch on makes the preprocessed page if there is none yet; so
+  does showing another page while it is on. That takes 0.1 s (Gaussian), about
+  2 s (Wiener) or about 5 s (mean hole, auto) for a 2048 x 1378 page on the CPU.
+- The step shows what the method found (K or noise level, holes rebuilt, grey
+  levels removed), and its help line gives the synthetic test's result.
+- The summary line shows the other version's mean CD. **CD distribution** draws
+  it as an outline with its mean and sd. The **hole inspector** adds a "CD raw"
+  or "CD pre" column for the same hole, matched by position. Hovering shows both
+  pixel values.
+- **Show > Removed by preprocessing** maps raw minus preprocessed (red where
+  preprocessing lowered the pixels, blue where it raised them).
+- The **Average hole** tab stacks every hole of the result on screen (the
+  current method's centres) on a 1/4 px grid, on the raw and on the preprocessed
+  page. It shows x and y profiles through the centre and the width at half
+  height of each.
+- Changing a Preprocess setting marks only the preprocessed version as out of
+  date. The banner offers Re-run and Revert.
+- The stack's other pages and Align use raw pages.
+
+What the methods do to CD, on synthetic truth and on a real page, is in
+[preprocess.md](preprocess.md). In short, the automatic settings lower the CD
+spread mostly by flattening real hole-to-hole differences.
 
 ## Image review
 
@@ -303,16 +345,21 @@ pitches.
   difference images and correlation.
 
 `source.json` is always written: file, zero-based active page, page count,
-display mode (`page` or `stack`), the method shown, the moving page and the
-alignment's shift, RMSE and hole check. CD exports use crop-local `[x, y]`
+display mode (`page` or `stack`), the method shown, the page version (`raw` or
+`preprocessed`), the moving page and the alignment's shift, RMSE and hole check.
+When the page is preprocessed, it also holds the preprocessing settings and
+findings. With the result arrays, `preprocessed_image.npy` (float32, the whole
+page) and `preprocess_meta.npz` (Noise2Self curves, per-hole brightness) are
+written. CD exports use crop-local `[x, y]`
 coordinates; add `origin_xy` from `workbench.json` for page coordinates. The
 detection-only `centers_global_xy.npy` already includes the origin. **Save
 screenshot** saves the window as a PNG.
 
 ## Memory
 
-Results are kept per page (previewed holes, CD and pitch together) for the open
-page and the most recently measured other pages: at most 3 pages and 3 GB (one
+Results are kept per page (previewed holes, CD and pitch of the raw and the
+preprocessed version, and the preprocessed page, 11 MB for 2048 x 1378) for the
+open page and the most recently measured other pages: at most 3 pages and 3 GB (one
 39,042-hole page measured with the ten batch methods holds about 1.25 GB, so
 then the open page and the one before). Pages without results take no place.
 Older pages' results are dropped, with a line in the Log; the page list keeps
@@ -337,7 +384,7 @@ results per page, method, selection, moving page, alignment, settings) and runs
 the jobs (`jobs.py`); `window.py` builds menus, header, docks, banners and the
 status bar; `canvas.py` the image view, its layers and the stack;
 `panels/` the Setup steps, page list, hole inspector, holes table, CD
-distribution, pitch, Align view and log. Panels listen to the session's signals
+distribution, pitch, average hole, Align view and log. Panels listen to the session's signals
 and call its methods, never each other. `names.py` and `settings.py` (method
 names, settings labels, run checks) do not import Qt. The Qt-free data layer
 stays in `subpx/_workbench_data.py`.
@@ -373,7 +420,12 @@ failure counts, the state kept across pages, the Align view and the batch's
 hole check, the error banner, unreadable pages and files, page-local
 overlays/crops/exports, compatible presets, calibration guidance, method
 comparison, crops and coordinate origins, export, raw and wide method inputs,
-known registration shifts and actual Qt workers. Qt tests skip if PyQt6 or
+known registration shifts and actual Qt workers. For preprocessing they cover
+raw and preprocessed results kept apart, the switch and P keeping the contrast,
+the other version's CD in the inspector, summary and distribution, the stale
+banner, Revert and Re-run for the preprocessed version only, Removed by
+preprocessing, export of the preprocessed page, the mean hole and Wiener runs,
+preprocessing a page when it is shown, and the average hole of both versions. Qt tests skip if PyQt6 or
 pyqtgraph is not installed.
 
 ## Known gaps
@@ -382,5 +434,7 @@ pyqtgraph is not installed.
 - Progress shows the job and its elapsed time, not the stage inside a CD run:
   the library call reports no progress.
 - The analysis region is set by dragging only (no typed x0 y0 x1 y1).
+- Preprocessing runs on the CPU (NumPy). While the preprocessed version is on,
+  each newly shown page waits for its preprocessing (Esc cancels).
 - Previewed holes list their kept components; rejected components are counted
   in the Holes step and drawn with **Rejected boxes**, not listed in the table.

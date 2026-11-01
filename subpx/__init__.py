@@ -24,6 +24,7 @@ from .cd import load_cd_results, measure_cds, plot_cd_map, save_cd_results, save
 from .components import connected_components_stats
 from .pitch import estimate_pitch, estimate_pitch_lines, pitch_residuals
 from .pattern import analyze_pitch
+from .preprocess import average_hole, denoise_mean_hole, denoise_wiener, smooth_gaussian
 from ._pattern_report import plot_pitch_report, save_pitch_report
 from .registration import estimate_shift, apply_shift, crop_overlap
 from .spectra import (
@@ -90,6 +91,10 @@ __all__ = [
     "estimate_pitch_lines",
     "pitch_residuals",
     "analyze_pitch",
+    "smooth_gaussian",
+    "denoise_wiener",
+    "denoise_mean_hole",
+    "average_hole",
     "plot_pitch_report",
     "save_pitch_report",
     "estimate_shift",

@@ -16,7 +16,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtTest import QTest
 from subpx._workbench_data import LoadedImage, analyze_image, cell_boundary
 from subpx.workbench import InspectionWindow
-from subpx.workbench.canvas import IMAGE_STAGES
+from subpx.workbench.canvas import PAGE_STAGES
 
 
 def settings_file(path):
@@ -334,7 +334,8 @@ def test_layout_docks_steps_and_run_follow_the_open_step(window):
     for dock in (widget.setup_dock, widget.inspector_dock, widget.bottom_dock):
         assert dock.isVisible()
     assert widget.canvas.histogram.isVisible() and not widget.page_spin.isVisible()  # one page: no page bar
-    assert [widget.setup.steps.itemText(i).split("  ")[1] for i in range(4)] == ["Image", "Holes", "CD methods", "Pitch"]
+    assert [widget.setup.steps.itemText(i).split("  ")[1] for i in range(5)] == ["Image", "Preprocess", "Holes",
+                                                                                 "CD methods", "Pitch"]
     assert widget.bottom.currentWidget() is widget.holes
     focus_image(widget, app)
     QTest.keyClick(widget.canvas.plot, QtCore.Qt.Key.Key_2, QtCore.Qt.KeyboardModifier.ControlModifier)
@@ -354,7 +355,7 @@ def test_layout_docks_steps_and_run_follow_the_open_step(window):
     assert widget.holes.table.selectionModel().selectedRows()[0].row() == 2
     open_step(widget, "cd")
     assert widget.setup.recipe.isVisible() and widget.setup.run_button.text() == "Measure CD"
-    assert "· changed" not in widget.setup.steps.itemText(1)
+    assert "· changed" not in widget.setup.steps.itemText(widget.setup.step_keys.index("holes"))
 
 
 def test_measurement_recipes_comparison_and_calibration_guidance(window):
@@ -489,7 +490,7 @@ def test_stack_navigation_analysis_roi_and_export(window, tmp_path):
     for stage in range(view.stage.count()):
         view.stage.setCurrentIndex(stage)
         app.processEvents()
-        origin = np.zeros(2) if view.stage.currentText() in IMAGE_STAGES else review.origin_xy
+        origin = np.zeros(2) if view.stage.currentText() in PAGE_STAGES else review.origin_xy
         point = widget.canvas.image_item.mapToParent(QtCore.QPointF(.5, .5))
         np.testing.assert_allclose([point.x(), point.y()], origin + [0, offset])
     view.stage.setCurrentIndex(0)
@@ -742,7 +743,7 @@ def test_stale_banner_reverts_and_reruns(window):
     assert not widget.stale_banner.isVisible()
     widget.setup.area_max.setValue(150)
     assert widget.stale_banner.isVisible() and "area max 200 -> 150" in widget.stale_label.text()
-    assert widget.setup.steps.itemText(1).endswith("· changed")
+    assert widget.setup.steps.itemText(widget.setup.step_keys.index("holes")).endswith("· changed")
     widget.revert_button.click()
     assert widget.setup.area_max.value() == 200 and not widget.stale_banner.isVisible()
     widget.measure.region_action.setChecked(True)
@@ -1025,3 +1026,127 @@ def test_stack_draws_pages_in_view_at_their_resolution_with_a_memory_cap(window,
     wait_for_job(widget, app)
     assert widget.loaded.page == 9 and widget.pages.list.currentRow() == 9
     np.testing.assert_array_equal(widget.loaded.image, pages[9])
+
+
+def test_preprocessed_switch_keeps_raw_and_preprocessed_results_apart(window, tmp_path):
+    from subpx.preprocess import smooth_gaussian
+    from subpx.workbench.session import hole_near
+
+    widget, app = window
+    session, view, setup = widget.session, widget.measure, widget.setup
+    run(widget, app, "cd")
+    raw_cd = widget.review
+    levels = widget.canvas.image_item.getLevels()
+    open_step(widget, "preprocess")
+    assert setup.run_button.text() == "Preprocess" and setup.preprocess_sigma.isVisible()
+    setup.preprocess_sigma.setValue(1.0)
+    assert not widget.stale_banner.isVisible()  # results of the raw page ignore the Preprocess settings
+    widget.run_open_action.trigger()
+    wait_for_job(widget, app)
+    processed = session.processed
+    assert session.version == "pre" and view.preprocessed.isChecked() and widget.preprocessed_action.isChecked()
+    np.testing.assert_allclose(processed.image, smooth_gaussian(widget.loaded.image, 1.0).image)
+    np.testing.assert_array_equal(widget.canvas.image_item.image, processed.image)
+    np.testing.assert_allclose(widget.canvas.image_item.getLevels(), levels)  # the same contrast: compare in place
+    assert widget.review is None and session.step_states()["preprocess"] == "ok"
+    assert "This page" in setup.preprocess_result.text() and "removed" in setup.preprocess_result.text()
+
+    run(widget, app, "cd")
+    pre_cd = widget.review
+    assert pre_cd is not raw_cd and session.page_entry().raw.cd is raw_cd and session.page_entry().pre.cd is pre_cd
+    assert pre_cd.parameters["preprocess"] == {"method": "gaussian", "sigma": 1.0}
+    np.testing.assert_array_equal(pre_cd.image, processed.image)
+    widget.measure._clicked(*pre_cd.seeds_xy[5])
+    comparison, method = widget.inspector.comparison, session.method
+    assert not comparison.isColumnHidden(2) and comparison.horizontalHeaderItem(2).text() == "CD raw"
+    row = list(pre_cd.measurements).index(method)
+    twin = hole_near(raw_cd, pre_cd.seeds_xy[5] + pre_cd.origin_xy)
+    assert float(comparison.item(row, 2).text()) == pytest.approx(
+        raw_cd.measurements[method].metrics["cd_equivalent_px"][twin], rel=1e-3)
+    assert widget.inspector.crop_title.text().startswith("Preprocessed pixels")
+    assert "raw page:" in widget.summary_label.text() and "Preprocessed" in widget.summary_label.text()
+    assert "outline: raw page" in widget.distribution.summary.text()
+    assert len(widget.distribution.other.getData()[1])
+
+    focus_image(widget, app)
+    QTest.keyClick(widget.canvas.plot, QtCore.Qt.Key.Key_P)  # back to the raw page and its results
+    assert session.version == "raw" and widget.review is raw_cd and not view.preprocessed.isChecked()
+    np.testing.assert_array_equal(widget.canvas.image_item.image, widget.loaded.image)
+    np.testing.assert_allclose(widget.canvas.image_item.getLevels(), levels)
+    assert comparison.horizontalHeaderItem(2).text() == "CD pre"
+    view._hovered(20, 20)
+    assert "preprocessed" in widget.hover_label.text()
+
+    setup.preprocess_sigma.setValue(1.5)  # only the preprocessed version is out of date
+    assert not widget.stale_banner.isVisible() and session.step_states()["preprocess"] == "changed"
+    view.preprocessed.click()
+    assert session.version == "pre" and "Gaussian 1 px -> Gaussian 1.5 px" in widget.stale_label.text()
+    widget.revert_button.click()
+    assert setup.preprocess_sigma.value() == 1.0 and not widget.stale_banner.isVisible()
+    setup.preprocess_sigma.setValue(1.5)
+    widget.rerun_button.click()  # makes the preprocessed page again, then measures it
+    wait_for_job(widget, app)
+    assert not widget.stale_banner.isVisible() and widget.review.parameters["preprocess"]["sigma"] == 1.5
+    assert session.processed is not processed and session.processed.parameters["preprocess"]["sigma"] == 1.5
+
+    view.stage.setCurrentIndex(view.stage.findText("Removed by preprocessing"))
+    np.testing.assert_allclose(widget.canvas.image_item.image, widget.loaded.image - session.processed.image,
+                               atol=1e-4)
+    low, high = widget.canvas.image_item.getLevels()
+    assert low == pytest.approx(-high) and high > 0
+    view.stage.setCurrentIndex(0)
+
+    widget.export_results(folder=tmp_path / "out")
+    wait_for_job(widget, app)
+    source = json.loads((tmp_path / "out" / "source.json").read_text())
+    assert source["version"] == "preprocessed"
+    assert source["preprocess"]["settings"] == {"method": "gaussian", "sigma": 1.5}
+    np.testing.assert_array_equal(np.load(tmp_path / "out" / "preprocessed_image.npy"), session.processed.image)
+    manifest = json.loads((tmp_path / "out" / "workbench.json").read_text())
+    assert manifest["parameters"]["preprocess"] == {"method": "gaussian", "sigma": 1.5}
+    widget.reset_settings()
+    assert setup.preprocess_parameters() == {"method": "gaussian", "sigma": 0.6}
+
+
+def test_mean_hole_wiener_average_hole_and_preprocessing_on_page_change(window, tmp_path):
+    from subpx._workbench_data import demo_image
+
+    widget, app = window
+    session, setup = widget.session, widget.setup
+    image = demo_image()
+    widget.open_image(path=write_pages(tmp_path / "pages.tif", image, np.ascontiguousarray(image[::-1])))
+    wait_for_job(widget, app)
+    open_step(widget, "preprocess")
+    pick(setup.preprocess_method, "mean_hole")
+    assert setup.preprocess_components.isVisible() and not setup.preprocess_sigma.isVisible()
+    assert "K = 32" in setup.preprocess_help.text()
+    widget.measure.preprocessed.click()  # the page is not preprocessed yet: it is made now
+    assert widget.busy and session.version == "pre"
+    widget.measure.preprocessed.click()  # back to raw while it runs: the result does not flip the view again
+    wait_for_job(widget, app)
+    assert session.version == "raw" and session.processed is not None
+    widget.measure.preprocessed.click()  # made already: shown at once
+    assert not widget.busy and session.version == "pre"
+    first = session.processed
+    assert first.result.method == "mean_hole" and first.centers > 100
+    assert "Noise2Self" in setup.preprocess_result.text()
+    run(widget, app, "detect")
+    assert widget.review.parameters["preprocess"]["method"] == "mean_hole"
+    session.set_page(1)  # the next page is preprocessed when shown
+    wait_for_job(widget, app)
+    assert session.loaded.page == 1 and session.processed is not None and session.processed is not first
+    assert widget.pages.list.item(0).text().count("pre") >= 1
+
+    pick(setup.preprocess_method, "wiener")
+    run(widget, app, "preprocess")
+    assert session.processed.result.method == "wiener"
+    assert session.processed.result.parameters["noise_setting"] == "auto"
+    run(widget, app, "detect")
+    widget.bottom.setCurrentWidget(widget.average)
+    widget.average.make_button.click()
+    wait_for_job(widget, app)
+    made = widget.average._made
+    assert set(made["averages"]) == {"raw", "pre"} and made["holes"] == len(widget.review.seeds_xy)
+    assert "width at half height" in widget.average.summary.text()
+    session.set_version("raw")
+    assert widget.average.image_plot.getPlotItem().titleLabel.text.endswith("raw page")

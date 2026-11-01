@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import numpy as np
+
 from .names import CALIBRATED_METHODS, method_name
 
 SETTINGS_KEY = "workbench/v1"
-STEPS = ("image", "holes", "cd", "pitch")
-STEP_TITLES = {"image": "Image", "holes": "Holes", "cd": "CD methods", "pitch": "Pitch"}
+STEPS = ("image", "preprocess", "holes", "cd", "pitch")
+STEP_TITLES = {"image": "Image", "preprocess": "Preprocess", "holes": "Holes", "cd": "CD methods", "pitch": "Pitch"}
 # The settings of each Setup step, as analysis parameters.
 STEP_KEYS = {
     "image": ("pixel_size", "unit", "invert", "backend"),
+    "preprocess": ("preprocess",),
     "holes": ("seeds", "threshold", "area_min", "area_max", "pad", "refine", "bounds"),
     "cd": ("methods", "background", "n_angles", "radial_step", "smooth_sigma", "fit_fraction", "half_area_level",
            "half_area_peak_pixels", "tail_area_level", "tail_window", "deblend_iterations", "deblend_tolerance",
@@ -17,12 +20,17 @@ STEP_KEYS = {
     "pitch": ("pitch_source", "reference_selected", "pitch_options"),
 }
 # The settings each kind of result was made with (pitch also depends on the result it was made from).
+# "preprocess" is None for results of the raw page and the Preprocess settings for the preprocessed page.
 RESULT_KEYS = {
-    "detect": ("pixel_size", "unit", "invert", "backend", "threshold", "area_min", "area_max", "pad", "refine",
-               "bounds"),
-    "cd": tuple(key for key in STEP_KEYS["image"] + STEP_KEYS["holes"] + STEP_KEYS["cd"] if key != "refine"),
+    "detect": ("pixel_size", "unit", "invert", "backend", "preprocess", "threshold", "area_min", "area_max", "pad",
+               "refine", "bounds"),
+    "cd": tuple(key for key in STEP_KEYS["image"] + STEP_KEYS["preprocess"] + STEP_KEYS["holes"] + STEP_KEYS["cd"]
+                if key != "refine"),
     "pitch": STEP_KEYS["pitch"],
 }
+# The Holes settings the mean hole finds its centres with (on the raw page).
+HOLE_KEYS = ("seeds", "threshold", "invert", "area_min", "area_max", "pad")
+PREPROCESS_NAMES = {"gaussian": "Gaussian smoothing", "wiener": "Wiener filter", "mean_hole": "Mean hole"}
 LABELS = {
     "pixel_size": "pixel size", "unit": "unit", "invert": "dark holes", "backend": "compute", "seeds": "pattern",
     "threshold": "threshold", "area_min": "area min", "area_max": "area max", "pad": "padding",
@@ -33,7 +41,7 @@ LABELS = {
     "nominal_cd": "nominal CD", "psf_fwhm": "PSF FWHM", "dark_level": "dark level", "pitch_source": "pitch centers",
     "reference_selected": "reference at selected hole", "layout": "lattice", "stagger_axis": "stagger direction",
     "average_rows": "average rows", "average_columns": "average columns", "nominal_pitch_xy": "design pitch",
-    "pitch_hint_xy": "pitch hints",
+    "pitch_hint_xy": "pitch hints", "preprocess": "preprocessing",
 }
 VALUE_TEXT = {"otsu": "Otsu", "triangle": "Triangle", "threshold": "separate", "peaks": "touching", "auto": "Auto",
               "gpu": "GPU", "cpu": "CPU", "model": "neighbour model", "border": "cell border", "cd": "CD",
@@ -52,6 +60,53 @@ def _text(value):
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_text(item) for item in value) + "]"
     return VALUE_TEXT.get(value, str(value)) if isinstance(value, str) else str(value)
+
+
+def preprocess_text(settings):
+    """'Gaussian 0.6 px', 'Wiener, noise auto', 'mean hole, K 32' or 'none'."""
+    if not settings:
+        return "none"
+    method = settings.get("method")
+    if method == "gaussian":
+        return f"Gaussian {settings.get('sigma', 0):.3g} px"
+    if method == "wiener":
+        noise = settings.get("noise") or 0
+        return "Wiener, noise " + (f"{noise:.3g}" if noise else "auto")
+    if method == "mean_hole":
+        components, radius = settings.get("components") or 0, settings.get("radius") or 0
+        return ("mean hole, K " + (str(components) if components else "auto")
+                + (f", radius {radius:.3g} px" if radius else ""))
+    return str(method)
+
+
+def preprocess_summary(result, centers=0):
+    """One plain line on what a PreprocessResult found and removed."""
+    meta, parameters = result.meta, result.parameters
+    removed = f"removed {meta.get('removed_std', float('nan')):.3g} grey levels (sd)"
+    if result.method == "gaussian":
+        return f"Gaussian {parameters['sigma']:.3g} px; {removed}"
+    if result.method == "wiener":
+        auto = parameters.get("noise_setting") == "auto"
+        return (f"noise {meta['noise']:.3g} grey levels ({'picked by Noise2Self' if auto else 'as set'}); "
+                f"{100 * meta['kept_share']:.0f} % of the frequencies kept; {removed}"
+                + ("; the pick is at the end of the searched range" if auto and meta.get("at_edge") else ""))
+    if result.method == "mean_hole":
+        auto = parameters.get("components_setting") == "auto"
+        return (f"K = {meta['components']} ({'picked by Noise2Self' if auto else 'as set'}), box radius "
+                f"{meta['box_radius']} px; {meta['boxes']:,} of {centers or meta['boxes']:,} holes rebuilt, "
+                f"{100 * meta['covered_share']:.0f} % of the page; {removed} there"
+                + (f"; the pick is the largest K tried ({meta['limit']})"
+                   if auto and meta['components'] >= meta.get('limit', np.inf) else ""))
+    return removed
+
+
+def preprocess_settings(parameters):
+    """What a page's preprocessed image depends on: the Preprocess settings and, for the mean hole, the Holes
+    settings it finds its centres with."""
+    settings = dict(parameters.get("preprocess") or {})
+    if settings.get("method") == "mean_hole":
+        settings.update({key: parameters.get(key) for key in HOLE_KEYS})
+    return settings
 
 
 def _same(old, new):
@@ -76,7 +131,9 @@ def changes(old, new, keys):
             a, b = bool(a), bool(b)
         if _same(a, b):
             continue
-        if key == "methods":
+        if key == "preprocess":
+            found.append((key, f"preprocessing {preprocess_text(a)} -> {preprocess_text(b)}"))
+        elif key == "methods":
             a, b = list(a or ()), list(b or ())
             parts = [f"+{method_name(m)}" for m in b if m not in a] + [f"-{method_name(m)}" for m in a if m not in b]
             found.append((key, "methods " + (" ".join(parts[:3]) + (" ..." if len(parts) > 3 else "")
@@ -98,7 +155,7 @@ def run_problems(parameters, *, loaded=None, results=None, moving=None):
 
     ``results`` is the active page's PageResults (pitch uses its result on screen, never a hidden re-run).
     """
-    problems = dict(detect="", cd="", pitch="", register="")
+    problems = dict(preprocess="", detect="", cd="", pitch="", register="")
     invalid = set()
     if loaded is None:
         return dict.fromkeys(problems, "Open an image first."), invalid
@@ -130,5 +187,11 @@ def run_problems(parameters, *, loaded=None, results=None, moving=None):
     elif moving.image.shape != loaded.image.shape:
         (mh, mw), (h, w) = moving.image.shape, loaded.image.shape
         register = f"The moving image is {mw} x {mh} px; this page is {w} x {h} px."
-    problems.update(detect=segmentation, cd=cd, pitch=pitch, register=register)
+    preprocess = ""
+    method = (parameters.get("preprocess") or {}).get("method")
+    if method not in PREPROCESS_NAMES:
+        preprocess = "Pick a preprocessing method."
+    elif method == "mean_hole":
+        preprocess = segmentation  # the mean hole finds its centres with the Holes settings
+    problems.update(preprocess=preprocess, detect=segmentation, cd=cd, pitch=pitch, register=register)
     return problems, invalid

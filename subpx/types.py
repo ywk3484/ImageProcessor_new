@@ -14,6 +14,37 @@ class CenterResult:
 
 
 @dataclass
+class PreprocessResult:
+    """A processed image (float32, same shape as the input) and how it was made.
+
+    ``parameters`` are the settings as used (``'auto'`` choices resolved); ``meta`` holds what the method found,
+    e.g. the noise level or number of components picked by Noise2Self and its loss curve.
+    """
+
+    image: np.ndarray
+    method: str
+    parameters: dict[str, Any] = field(default_factory=dict)
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AverageHoleResult:
+    """Every feature of an image stacked at its own subpixel position on a finer grid.
+
+    ``image[i, j]`` is the mean brightness at offset ``(offsets[j], offsets[i])`` pixels (x, y) from the feature
+    centres, NaN where no pixel fell; ``counts`` holds the number of pixels averaged per bin. With normalisation
+    each feature's brightness and background are first matched to the population's mean, so the values stay in
+    the image's grey levels.
+    """
+
+    image: np.ndarray
+    counts: np.ndarray
+    offsets: np.ndarray
+    upsample: int
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class PitchResult:
     values: np.ndarray
     axis: str

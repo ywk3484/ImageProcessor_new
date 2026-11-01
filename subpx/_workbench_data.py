@@ -11,7 +11,7 @@ from time import perf_counter
 
 import numpy as np
 
-from .types import CDMethodResult, CDResult, CDSummary, CenterResult, PatternPitchResult, ShiftResult
+from .types import CDMethodResult, CDResult, CDSummary, CenterResult, PatternPitchResult, PreprocessResult, ShiftResult
 
 
 @dataclass
@@ -59,6 +59,20 @@ class AnalysisReview:
             "detection", points, np.empty((len(points), 0, 2)),
             np.ones(len(points), bool), np.full(len(points), "ok"), {},
         )}
+
+
+@dataclass
+class Preprocessed:
+    """A page made with the workbench's Preprocess settings: the processed page and how it was made."""
+
+    result: PreprocessResult
+    parameters: dict  # the Setup settings it was made with (the mean hole also used the Holes settings)
+    seconds: float = 0.0
+    centers: int = 0  # holes found for the mean hole
+
+    @property
+    def image(self):
+        return self.result.image
 
 
 @dataclass
@@ -243,19 +257,25 @@ def crop_image(image, bounds=None):
     return image[y0:y1, x0:x1], np.array([x0, y0])
 
 
+def segmentation_image(image, threshold):
+    """(image, rescaled): OpenCV's triangle threshold requires uint8, so other types are scaled to 0-255 (the CD
+    pipeline's rule, used for segmentation only)."""
+    rescaled = image.dtype != np.uint8 and not (image.dtype == np.uint16 and threshold == "otsu")
+    if not rescaled:
+        return image, False
+    data = np.asarray(image, dtype=np.float64)
+    span = float(data.max() - data.min())
+    return (np.rint((data - data.min()) * (255 / span)).astype(np.uint8) if span else np.zeros(data.shape, np.uint8),
+            True)
+
+
 def detect_review(image, parameters):
     from .centers import detect_centers
     from ._cpu.centers import _segment_components
 
-    # OpenCV's triangle threshold requires uint8. Use the CD pipeline's scaling
-    # rule for segmentation, and report this explicitly to the reviewer.
+    # Report the rescaling for segmentation explicitly to the reviewer.
     threshold = parameters["threshold"]
-    rescaled = image.dtype != np.uint8 and not (image.dtype == np.uint16 and threshold == "otsu")
-    segmentation = image
-    if rescaled:
-        data = np.asarray(image, dtype=np.float64)
-        span = float(data.max() - data.min())
-        segmentation = np.rint((data - data.min()) * (255 / span)).astype(np.uint8) if span else np.zeros(data.shape, np.uint8)
+    segmentation, rescaled = segmentation_image(image, threshold)
     kwargs = {key: parameters[key] for key in ("threshold", "invert", "area_min", "area_max", "pad", "refine")}
     result = detect_centers(segmentation, backend=parameters["backend"], **kwargs)
     _, binary, _, labels, stats = _segment_components(segmentation, threshold=threshold, invert=parameters["invert"])
@@ -314,6 +334,64 @@ def analyze_image(image, parameters, *, operation="cd", bounds=None):
             review.warnings.append(f"Pitch indexing failed: {exc}")
     review.seconds = perf_counter() - started
     return review
+
+
+def page_centers(image, parameters):
+    """Hole centres [x, y] of a whole page with the Holes settings: thresholded components with a weighted
+    centre, or intensity peaks for touching holes (the mean hole's boxes are placed at these)."""
+    if parameters.get("seeds") == "peaks":
+        from ._cpu.deblend import detect_peaks
+
+        signal = np.asarray(image, dtype=np.float64)
+        return detect_peaks(-signal if parameters["invert"] else signal)[0]
+    from .centers import detect_centers
+
+    segmentation, _ = segmentation_image(image, parameters["threshold"])
+    return detect_centers(segmentation, backend=parameters["backend"], threshold=parameters["threshold"],
+                          invert=parameters["invert"], area_min=parameters["area_min"],
+                          area_max=parameters["area_max"], pad=parameters["pad"], refine="weighted").centers_xy
+
+
+def preprocess_page(image, parameters):
+    """The whole page made with ``parameters['preprocess']`` (method and its settings; 0 = automatic)."""
+    from .preprocess import denoise_mean_hole, denoise_wiener, smooth_gaussian
+
+    started = perf_counter()
+    settings = parameters.get("preprocess") or {}
+    method, centers = settings.get("method"), 0
+    if method == "gaussian":
+        result = smooth_gaussian(image, settings["sigma"])
+    elif method == "wiener":
+        result = denoise_wiener(image, settings.get("noise") or "auto")
+    elif method == "mean_hole":
+        points = page_centers(image, parameters)
+        centers = len(points)
+        result = denoise_mean_hole(image, points, components=settings.get("components") or "auto",
+                                   radius=settings.get("radius") or "auto")
+    else:
+        raise ValueError(f"Unknown preprocessing method {method!r}: use gaussian, wiener or mean_hole.")
+    return Preprocessed(result, dict(parameters), perf_counter() - started, centers)
+
+
+def half_height_width(values, offsets):
+    """Width of the central peak of a profile at half its height above the profile's lowest value (the
+    background between holes; the ends may reach the neighbours), by linear interpolation; NaN if undefined."""
+    values, offsets = np.asarray(values, dtype=np.float64), np.asarray(offsets, dtype=np.float64)
+    if not np.isfinite(values).all() or len(values) < 3:
+        return float("nan")
+    peak = int(np.argmax(values))
+    base = float(values.min())
+    level = base + 0.5 * (values[peak] - base)
+    if values[peak] <= base:
+        return float("nan")
+    left = np.flatnonzero(values[:peak] < level)
+    right = np.flatnonzero(values[peak:] < level)
+    if not len(left) or not len(right):
+        return float("nan")
+    i, j = left[-1], peak + right[0]
+    x_left = offsets[i] + (level - values[i]) / (values[i + 1] - values[i]) * (offsets[i + 1] - offsets[i])
+    x_right = offsets[j - 1] + (level - values[j - 1]) / (values[j] - values[j - 1]) * (offsets[j] - offsets[j - 1])
+    return float(x_right - x_left)
 
 
 def analyze_patterns(review, options):

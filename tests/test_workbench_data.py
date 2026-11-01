@@ -221,3 +221,35 @@ def test_page_reader_previews_cell_maps_and_result_memory(tmp_path):
     np.testing.assert_array_equal(cell_mask_map(labels, [False, True]), [[0, 1], [0, 1]])
     shared = np.zeros(100)
     assert array_bytes({"a": shared, "b": [shared, np.zeros(10)]}) == 880
+
+
+def test_half_height_width_ignores_the_neighbours_at_the_profile_ends():
+    from subpx._workbench_data import half_height_width
+
+    x = np.linspace(-8.2, 8.2, 67)
+
+    def spot(center):
+        return np.exp(-(x - center) ** 2 / 2)  # sigma 1 px: full width at half height 2.355 px
+
+    alone = 10 + 100 * spot(0)
+    assert half_height_width(alone, x) == pytest.approx(2.3548, rel=0.01)
+    crowded = alone + 100 * (spot(-8.2) + spot(8.2))  # the profile ends on the neighbours' peaks
+    assert half_height_width(crowded, x) == pytest.approx(2.3548, rel=0.02)
+    assert np.isnan(half_height_width(np.full(9, 3.0), np.arange(9)))
+
+
+def test_preprocess_page_finds_the_mean_hole_centres_with_the_holes_settings():
+    from subpx._workbench_data import demo_image, page_centers, preprocess_page
+
+    image = demo_image()
+    holes = dict(seeds="threshold", threshold="otsu", invert=False, area_min=3, area_max=200, pad=3, backend="cpu")
+    made = preprocess_page(image, dict(holes, preprocess=dict(method="mean_hole", components=4, radius=0)))
+    assert made.result.method == "mean_hole" and made.result.meta["components"] == 4
+    assert made.image.shape == image.shape and made.image.dtype == np.float32
+    assert made.centers == len(page_centers(image, holes)) > 100
+    peaks = page_centers(image, dict(holes, seeds="peaks"))  # touching holes: intensity peaks
+    assert abs(len(peaks) - made.centers) <= 0.1 * made.centers
+    assert preprocess_page(image, dict(holes, preprocess=dict(method="wiener", noise=0))).result.parameters[
+        "noise_setting"] == "auto"
+    with pytest.raises(ValueError):
+        preprocess_page(image, dict(holes, preprocess=dict(method="bm3d")))

@@ -1,5 +1,6 @@
-"""Setup (left): the steps Image, Holes, CD methods and Pitch in pipeline order, each with a mark (not run, ok,
-changed), and the Run button of the open step pinned under them; in the Align view, the alignment settings."""
+"""Setup (left): the steps Image, Preprocess, Holes, CD methods and Pitch in pipeline order, each with a mark (not
+run, ok, changed), and the Run button of the open step pinned under them; in the Align view, the alignment
+settings."""
 
 from __future__ import annotations
 
@@ -9,12 +10,25 @@ import pyqtgraph as pg
 
 from ...cd import METHOD_LABELS
 from ..names import CALIBRATED_METHODS, METHOD_GROUPS, RECIPES, method_help, method_line, method_name
-from ..settings import STEP_TITLES
+from ..settings import PREPROCESS_NAMES, STEP_TITLES, preprocess_summary, preprocess_text
 from ..widgets import BACKGROUND, Fold, dot_icon, hint
 
 MARKS = {"none": ("#5d6f82", "not run"), "ok": ("#9be28a", "up to date"), "changed": ("#ffce73", "changed")}
-RUNS = {"image": ("Measure CD", "cd"), "holes": ("Preview holes", "detect"), "cd": ("Measure CD", "cd"),
-        "pitch": ("Measure pitch", "pitch"), "align": ("Align", "register")}
+RUNS = {"image": ("Measure CD", "cd"), "preprocess": ("Preprocess", "preprocess"), "holes": ("Preview holes", "detect"),
+        "cd": ("Measure CD", "cd"), "pitch": ("Measure pitch", "pitch"), "align": ("Align", "register")}
+# What each preprocessing does and what it did to CD on a synthetic page with known truth (half area method;
+# scripts/preprocess_check.py, docs/preprocess.md).
+PREPROCESS_HELP = {
+    "gaussian": "Averages every pixel with its neighbours (sigma in px). Synthetic test: a real +5 % CD step "
+                "measured +3.8 to +4.4 % (raw page: +4.7 to +4.9 %).",
+    "wiener": "Removes the noise the page's own spectrum shows. Auto picks the noise level by Noise2Self (least "
+              "pixel error). Synthetic test: a +5 % CD step measured +4.2 to +4.9 % (raw +4.7 to +4.9 %), but "
+              "hole-to-hole CD differences came out at about half their size.",
+    "mean_hole": "Rebuilds every hole from the average hole plus its K main shape differences; pixels away from "
+                 "the holes stay raw. Holes are found on the raw page with the Holes settings. Auto K "
+                 "(Noise2Self) gives the least pixel error, not the best CD: synthetic test, a +5 % CD step "
+                 "measured +1.0 to +2.2 % at auto K (3 to 5) and +4.3 to +4.6 % at K = 32.",
+}
 # Analysis parameter -> Setup control (Revert puts a result's parameters back into the controls).
 PARAMETER_CONTROLS = dict(
     invert="invert", threshold="threshold", area_min="area_min", area_max="area_max", pad="pad", refine="refine",
@@ -65,6 +79,7 @@ class SetupPanel(QtWidgets.QWidget):
         self.stacked.addWidget(self.steps)
         self.step_keys = []
         self._build_image()
+        self._build_preprocess()
         self._build_holes()
         self._build_methods()
         self._build_pitch()
@@ -152,6 +167,62 @@ class SetupPanel(QtWidgets.QWidget):
                                 ("Compute", self.backend)]))
         layout.addStretch()
         self._add_step("image", content)
+
+    def _build_preprocess(self):
+        self.preprocess_method = self._combo("preprocess_method",
+                                             [(text, key) for key, text in PREPROCESS_NAMES.items()])
+        self.preprocess_method.setToolTip("How the preprocessed page is made")
+        self.preprocess_method.currentIndexChanged.connect(self._update_preprocess)
+        self.preprocess_sigma = self._number("preprocess_sigma", 0.6, 0.1, 10, decimals=2, step=0.1)
+        self.preprocess_sigma.setToolTip("Gaussian width in pixels (the proposal's 0.5 to 0.7)")
+        self.preprocess_noise = self._number("preprocess_noise", 0, 0, 1e9, decimals=2, step=0.5,
+                                             special="Auto (Noise2Self)")
+        self.preprocess_noise.setToolTip("Noise standard deviation in grey levels; Auto picks it from the page")
+        self.preprocess_components = self._number("preprocess_components", 0, 0, 200, special="Auto (Noise2Self)")
+        self.preprocess_components.setToolTip("Shape differences kept per hole: more keeps more of each hole's own "
+                                              "shape (and noise)")
+        self.preprocess_radius = self._number("preprocess_radius", 0, 0, 1000, decimals=1, step=0.5,
+                                              special="Auto (3/4 spacing)")
+        self.preprocess_radius.setToolTip("Half width of the box rebuilt around each hole, in pixels")
+        self.preprocess_forms = {
+            "gaussian": _form([("Sigma (px)", self.preprocess_sigma)]),
+            "wiener": _form([("Noise level", self.preprocess_noise)]),
+            "mean_hole": _form([("Components K", self.preprocess_components), ("Box radius (px)", self.preprocess_radius)]),
+        }
+        self.preprocess_help = hint()
+        self.preprocess_result = hint("Not preprocessed yet: press Preprocess, or turn on Preprocessed above the "
+                                      "image (P).")
+        self.preprocess_result.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(_form([("Method", self.preprocess_method)]))
+        for form in self.preprocess_forms.values():
+            layout.addWidget(form)
+        layout.addWidget(self.preprocess_help)
+        layout.addWidget(self.preprocess_result)
+        layout.addWidget(hint("The Preprocessed switch above the image (P) flips between the raw and the "
+                              "preprocessed page, with their own results. Runs measure the page on screen. "
+                              "Show > Removed by preprocessing maps what was taken out."))
+        layout.addStretch()
+        self._add_step("preprocess", content)
+        self._update_preprocess()
+
+    def _update_preprocess(self, *args):
+        method = self.preprocess_method.currentData()
+        for key, form in self.preprocess_forms.items():
+            form.setVisible(key == method)
+        self.preprocess_help.setText(PREPROCESS_HELP.get(method, ""))
+
+    def preprocess_parameters(self):
+        """The Preprocess settings of the chosen method (0 = automatic)."""
+        method = self.preprocess_method.currentData()
+        if method == "gaussian":
+            return dict(method=method, sigma=self.preprocess_sigma.value())
+        if method == "wiener":
+            return dict(method=method, noise=self.preprocess_noise.value())
+        return dict(method=method, components=self.preprocess_components.value(),
+                    radius=self.preprocess_radius.value())
 
     def _build_holes(self):
         self.seeds = self._combo("seeds", [("Separate holes", "threshold"), ("Touching / dense holes", "peaks")])
@@ -461,6 +532,7 @@ class SetupPanel(QtWidgets.QWidget):
             for line, widget in zip(self.area_lines, (self.area_min, self.area_max)):
                 line.setValue(widget.value())
             self._update_methods()
+            self._update_preprocess()
         finally:
             self._building = building
         self._changed()
@@ -479,6 +551,12 @@ class SetupPanel(QtWidgets.QWidget):
             for key, (x, y) in (("nominal", options.get("nominal_pitch_xy") or (0, 0)),
                                 ("pitch_hint", options.get("pitch_hint_xy") or (0, 0))):
                 values[f"{key}_x"], values[f"{key}_y"] = x, y
+        settings = parameters.get("preprocess") or {}
+        if settings:
+            values["preprocess_method"] = settings.get("method")
+            for key in ("sigma", "noise", "components", "radius"):
+                if key in settings:
+                    values[f"preprocess_{key}"] = settings[key]
         if "methods" in parameters:
             values["methods"] = list(parameters["methods"])
             values["recipe"] = next((key for key, (label, methods) in RECIPES.items()
@@ -510,6 +588,7 @@ class SetupPanel(QtWidgets.QWidget):
                                pitch_hint_xy=hints if hints[0] and hints[1] else None),
             nominal_x=nominal[0], nominal_y=nominal[1], hint_x=hints[0], hint_y=hints[1],
             upsample=self.upsample.value(), hole_check_mode=self.hole_check_mode.currentData(),
+            preprocess=self.preprocess_parameters(),
         )
 
     def _changed(self, *args):
@@ -570,7 +649,22 @@ class SetupPanel(QtWidgets.QWidget):
             self.steps.setItemText(index, f"{index + 1}  {STEP_TITLES[key]}" + (" · changed" if states[key] == "changed" else ""))
             self.steps.setItemToolTip(index, f"{STEP_TITLES[key]}: {word}")
         self.moving_this_file.setEnabled(not busy and session.source is not None)
+        self._show_preprocessed()
         self.moving_other.setEnabled(not busy and session.loaded is not None)
+
+    def _show_preprocessed(self):
+        """What preprocessing made of this page, and whether the settings changed since."""
+        processed = self.session.processed
+        if processed is None:
+            self.preprocess_result.setText("Not preprocessed yet: press Preprocess, or turn on Preprocessed above "
+                                           "the image (P).")
+        else:
+            made = preprocess_text(processed.parameters.get("preprocess"))
+            self.preprocess_result.setText(
+                f"<b>This page</b>: {made}, {processed.seconds:.1f} s. "
+                + preprocess_summary(processed.result, processed.centers) + "."
+                + (" <span style='color:#ffce73'>Made with earlier settings.</span>"
+                   if self.session.processed_stale() else ""))
 
     def _results_changed(self):
         """The area histogram of the page's components against the area limits."""

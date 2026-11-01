@@ -38,7 +38,7 @@ class PitchPanel(QtWidgets.QWidget):
         self.view.idToggled.connect(lambda i, checked: checked and self.draw())
         row.addStretch()
         layout.addLayout(row)
-        self.summary = hint("Measure pitch to see it here. Pitch uses the CD result on screen (Setup, step 4).")
+        self.summary = hint("Measure pitch to see it here. Pitch uses the CD result on screen (Setup, step 5).")
         self.summary.setTextFormat(QtCore.Qt.TextFormat.RichText)
         layout.addWidget(self.summary)
         plots = QtWidgets.QHBoxLayout()
@@ -82,7 +82,7 @@ class PitchPanel(QtWidgets.QWidget):
         pattern = self.pattern()
         if pattern is None:
             results = self.session.page_results
-            self.summary.setText("Measure pitch to see it here. Pitch uses the CD result on screen (Setup, step 4)."
+            self.summary.setText("Measure pitch to see it here. Pitch uses the CD result on screen (Setup, step 5)."
                                  if results is None or results.pitch is None else
                                  "Pitch indexing gave no result for this method.")
             return

@@ -17,6 +17,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from .canvas import MeasureView
 from .names import method_name
 from .panels.align import AlignPanel, AlignView
+from .panels.average import AveragePanel
 from .panels.distribution import DistributionPanel
 from .panels.holes_table import HolesPanel
 from .panels.inspector import HoleInspector
@@ -32,7 +33,8 @@ IMAGE_FILTER = "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.npy);;All files 
 RECENT_FILES = 8
 GUIDE = """
 <h3>Workflow</h3>
-<p><b>Setup</b> (left) holds the steps in pipeline order: Image, Holes, CD methods, Pitch. Each step shows a mark
+<p><b>Setup</b> (left) holds the steps in pipeline order: Image, Preprocess, Holes, CD methods, Pitch. Each step
+shows a mark
 (grey: not run, green: up to date, amber: changed since the result) and the Run button of the open step stays
 under them. <b>Pages</b> (the tab next to Setup) lists the file's pages, counted from 0 like the batch's
 pages.csv; <b>Stack vertically</b> shows them all.</p>
@@ -40,12 +42,18 @@ pages.csv; <b>Stack vertically</b> shows them all.</p>
 <b>hole inspector</b> (right) compares the selected hole in every method; the bottom tabs hold the holes
 table, the CD distribution, the pitch and the log. When settings change after a run, a banner offers
 <b>Re-run</b> and <b>Revert</b>.</p>
+<p><b>Preprocessed</b> (above the image, P) flips between the raw page and the preprocessed page (Setup >
+Preprocess) in the same place, with the same contrast. Each version keeps its own results (holes, CD, pitch); runs
+measure the version on screen. The inspector, the CD distribution and the summary line also show the other
+version's CD. <b>Show > Removed by preprocessing</b> maps raw minus preprocessed; the <b>Average hole</b> tab
+stacks every hole on a 4x finer grid, raw and preprocessed. The stack's other pages and Align use raw pages.</p>
 <p><b>Align</b> (header): pick a moving page of this or another file; it is aligned to the active page and
 shown on the image (Space flickers).</p>
 <h3>Keys</h3>
 <table cellpadding="3">
 <tr><td>Ctrl+O, drop a file</td><td>open</td></tr>
 <tr><td>Ctrl+Enter</td><td>run the open Setup step</td></tr>
+<tr><td>P</td><td>raw / preprocessed page (and their results)</td></tr>
 <tr><td>F / Shift+F / Z</td><td>fit the page / fit the whole stack / zoom to the selected hole</td></tr>
 <tr><td>J / K, Down / Up in the table</td><td>next / previous hole in table order</td></tr>
 <tr><td>N / Shift+N</td><td>next / previous failed hole of the current method</td></tr>
@@ -216,10 +224,11 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.holes = HolesPanel(session)
         self.distribution = DistributionPanel(session)
         self.pitch = PitchPanel(session)
+        self.average = AveragePanel(session)
         self.log = LogPanel(session)
         self.bottom = QtWidgets.QTabWidget()
         for widget, title in ((self.holes, "Holes"), (self.distribution, "CD distribution"), (self.pitch, "Pitch"),
-                              (self.log, "Log")):
+                              (self.average, "Average hole"), (self.log, "Log")):
             self.bottom.addTab(widget, title)
         self.bottom_dock = self._dock("Results", "bottom", self.bottom, Area.BottomDockWidgetArea)
         self.resizeDocks([self.setup_dock, self.inspector_dock], [280, 380], QtCore.Qt.Orientation.Horizontal)
@@ -355,6 +364,10 @@ class InspectionWindow(QtWidgets.QMainWindow):
                                              "Fit the whole stack (Shift+F)")
         self.zoom_action = self._action(view, "&Zoom to hole", self.measure.zoom_selected, "Z",
                                         "Zoom to the selected hole (Z)")
+        self.preprocessed_action = self._action(
+            view, "&Preprocessed page", lambda on: session.set_version("pre" if on else "raw"), "P",
+            "Show and measure the preprocessed page; off: the raw page (P)", checkable=True)
+        session.version_changed.connect(lambda: self._set_checked(self.preprocessed_action, session.version == "pre"))
         self.stack_action = self._action(view, "Stack &vertically", session.set_stacked, checkable=True,
                                          tip="Every page in one view; analysis uses the active, outlined page")
         session.stacked_changed.connect(lambda stacked: self._set_checked(self.stack_action, stacked))
@@ -721,10 +734,18 @@ class InspectionWindow(QtWidgets.QMainWindow):
         measured = review.measurements[method]
         valid = measured.valid & np.isfinite(measured.centers_xy).all(axis=1)
         page = f"Page {session.loaded.page} | " if session.loaded.pages > 1 else ""
-        summary = f"{page}{len(valid):,} holes | {method_name(method)}: {valid.sum():,} measured"
+        version = "<b>Preprocessed</b> | " if session.version == "pre" else ""
+        summary = f"{version}{page}{len(valid):,} holes | {method_name(method)}: {valid.sum():,} measured"
         values = measured.metrics.get("cd_equivalent_px")
         if values is not None and valid.any():
             summary += f", mean CD {np.mean(values[valid]) * review.parameters['pixel_size']:.4g} {review.parameters['unit']}"
+            other = session.other_review()
+            twin = other.measurements.get(method) if other is not None and other.cd is not None else None
+            cds = twin.metrics.get("cd_equivalent_px") if twin is not None else None
+            if cds is not None and (twin.valid & np.isfinite(cds)).any():
+                good = twin.valid & np.isfinite(cds)
+                summary += (f" ({'raw' if session.version == 'pre' else 'preprocessed'} page: "
+                            f"{np.mean(cds[good]) * other.parameters['pixel_size']:.4g})")
         self.summary_label.setText(f"<span style='color:#dee7f2'>{summary}</span> &nbsp; " + self.failure_summary(review))
         self.summary_label.setToolTip(self.failure_summary(review, limit=None))
 
