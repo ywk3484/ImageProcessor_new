@@ -14,8 +14,9 @@ pytest.importorskip("pyqtgraph")
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtTest import QTest
-from subpx._workbench_data import LoadedImage, analyze_image
+from subpx._workbench_data import LoadedImage, analyze_image, cell_boundary
 from subpx.workbench import InspectionWindow
+from subpx.workbench.canvas import IMAGE_STAGES
 
 
 def settings_file(path):
@@ -140,6 +141,23 @@ def test_demo_loads_without_external_sample_files(window):
     run(widget, app, "pitch")
     assert len(widget.review.seeds_xy) > 100
     assert widget.session.pitch_review.patterns, widget.log.toPlainText()
+
+
+def test_voronoi_cells_view_draws_the_cell_boundaries_on_the_image(window):
+    widget, app = window
+    view = widget.measure
+    run(widget, app, "cd")
+    widget.canvas.histogram.setLevels(15, 150)
+    view.stage.setCurrentIndex(view.stage.findText("Voronoi cells"))
+    app.processEvents()
+    np.testing.assert_array_equal(widget.canvas.image_item.image, widget.loaded.image)
+    np.testing.assert_allclose(widget.canvas.image_item.getLevels(), [15, 150])  # the image's contrast
+    edges = view.layers.edges
+    assert not view.layer_checks["Voronoi edges"].isChecked() and edges.isVisible()
+    np.testing.assert_array_equal(edges.image, cell_boundary(widget.review.cd.cell_labels))
+    view.stage.setCurrentIndex(view.stage.findText("Image"))
+    app.processEvents()
+    assert not edges.isVisible()
 
 
 def test_all_stages_methods_roi_and_display_contrast(window):
@@ -471,7 +489,7 @@ def test_stack_navigation_analysis_roi_and_export(window, tmp_path):
     for stage in range(view.stage.count()):
         view.stage.setCurrentIndex(stage)
         app.processEvents()
-        origin = review.origin_xy if stage else np.zeros(2)
+        origin = np.zeros(2) if view.stage.currentText() in IMAGE_STAGES else review.origin_xy
         point = widget.canvas.image_item.mapToParent(QtCore.QPointF(.5, .5))
         np.testing.assert_allclose([point.x(), point.y()], origin + [0, offset])
     view.stage.setCurrentIndex(0)

@@ -9,7 +9,7 @@ import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from .._workbench_data import cell_boundary, cell_colors_map, cell_mask_map, cell_values_map
+from .._workbench_data import cell_boundary, cell_mask_map, cell_values_map
 from .names import FAILED_COLOR, method_color, method_name, method_line
 from .widgets import BACKGROUND, no_si_prefix
 
@@ -91,8 +91,7 @@ class ImageCanvas(QtWidgets.QWidget):
             point = self.plot.getViewBox().mapSceneToView(event[0])
             self.hovered.emit(point.x(), point.y())
 
-    def set_image(self, data, origin=(0, 0), *, fit=True, categorical=False, keep_levels=False, levels=None):
-        """Show ``data``; ``levels``: the contrast of a new image (default: its 1-99.5 % range)."""
+    def set_image(self, data, origin=(0, 0), *, fit=True, categorical=False, keep_levels=False):
         key = (id(data), categorical)
         preserve_levels = key == self._image_key or keep_levels
         self._image_key = key
@@ -106,11 +105,9 @@ class ImageCanvas(QtWidgets.QWidget):
         self._image_bounds = QtCore.QRectF(origin[0] - 0.5, origin[1] - 0.5, data.shape[1], data.shape[0])
         self.image_item.setRect(self._image_bounds)
         if data.ndim == 2 and not preserve_levels:
-            if levels is None:
-                sample = data[::max(1, data.shape[0] // 512), ::max(1, data.shape[1] // 512)]
-                finite = sample[np.isfinite(sample)]
-                levels = np.percentile(finite, (1, 99.5)) if finite.size else (0, 1)
-            low, high = levels
+            sample = data[::max(1, data.shape[0] // 512), ::max(1, data.shape[1] // 512)]
+            finite = sample[np.isfinite(sample)]
+            low, high = np.percentile(finite, (1, 99.5)) if finite.size else (0, 1)
             if high <= low:
                 high = low + 1
             self.image_item.setLevels((float(low), float(high)))
@@ -192,7 +189,7 @@ class HoleLayers(QtCore.QObject):
         self.cd_map.setOpacity(0.6)
         self.cd_map.setZValue(5)
         self.failures = _mask_item((255, 92, 116, 150), 6)
-        self.edges = _mask_item((86, 214, 207, 165), 7)
+        self.edges = _mask_item((102, 255, 247, 197), 7)  # as bright as the first workbench drew them
         self.highlight = _mask_item((255, 255, 255, 110), 8)
         self.highlight_points = pg.ScatterPlotItem(size=14, pen=pg.mkPen("#ffffff", width=1.5), brush=None)
         self.centers = pg.ScatterPlotItem(size=6, pen=pg.mkPen("#56d6cf", width=1), brush=pg.mkBrush(86, 214, 207, 60),
@@ -554,6 +551,7 @@ LAYERS = (
     ("CD colors", False, "Each cell colored by the shown method's CD (scale beside the image)"),
 )
 STAGES = ("Image", "Threshold mask", "Component labels", "Voronoi cells", "Background model")
+IMAGE_STAGES = ("Image", "Voronoi cells")  # the stages that show the image itself
 PAN_REASONS = {"table", "key", "failed", "inspector", "pitch", "distribution"}
 
 
@@ -618,7 +616,6 @@ class MeasureView(QtWidgets.QWidget):
         self.canvas.side_layout.addWidget(self.lock_levels)
         self.canvas.histogram.sigLevelsChanged.connect(self._levels_changed)
         self._locked_levels = None
-        self._cell_colors = (None, None)  # (CD result, its Voronoi cells view)
         self.layers = HoleLayers(self.canvas.plot)
         self.layers.changed.connect(self._update_hint)
         # CD color scale beside the image: 1-99 % of the shown method, drag its ends to set, Lock to compare.
@@ -767,7 +764,7 @@ class MeasureView(QtWidgets.QWidget):
         if loaded is None:
             return
         review = session.review
-        data, origin, categorical, levels = loaded.image, np.zeros(2), False, None
+        data, origin, categorical = loaded.image, np.zeros(2), False
         stage = self.stage.currentText()
         message = ""
         if stage != "Image":
@@ -784,21 +781,17 @@ class MeasureView(QtWidgets.QWidget):
             elif review.cd is None:
                 message = "Measure CD to see Voronoi cells and the background."
             elif stage == "Voronoi cells":
-                # Touching cells in different colours on a fixed scale; the holes it does not report stay clear.
-                if self._cell_colors[0] is not review.cd:
-                    self._cell_colors = (review.cd, cell_colors_map(review.cd.cell_labels))
-                data, origin, categorical, levels = self._cell_colors[1], review.origin_xy, True, (0, 1)
+                pass  # the image, with the cell boundaries on top (render_layers)
             elif review.cd.background_map is not None:
                 data, origin = review.cd.background_map, review.origin_xy
             else:
                 message = "This background mode has no background map."
         offset = self.offset()
-        locked = self.lock_levels.isChecked() and self._locked_levels is not None and stage == "Image"
-        self.canvas.set_image(data, origin + offset, fit=False, categorical=categorical, keep_levels=locked,
-                              levels=levels)
+        locked = self.lock_levels.isChecked() and self._locked_levels is not None and stage in IMAGE_STAGES
+        self.canvas.set_image(data, origin + offset, fit=False, categorical=categorical, keep_levels=locked)
         if locked:
             self.canvas.histogram.setLevels(*self._locked_levels)
-        if self.stack is not None and stage == "Image":
+        if self.stack is not None and stage in IMAGE_STAGES:
             self.stack.set_levels(self.canvas.image_item.getLevels())
         self._stage_message = message
         self.render_layers()
@@ -812,6 +805,8 @@ class MeasureView(QtWidgets.QWidget):
         offset = self.offset()
         pitch = session.pitch_review
         layers = self.active_layers()
+        if self.stage.currentText() == "Voronoi cells":
+            layers.add("Voronoi edges")
         self.layers.show(review if shown else None, method, (review.origin_xy + offset) if shown else offset, layers,
                          pitch=pitch, pitch_origin=(pitch.origin_xy + offset) if pitch is not None else None)
         self.layers.show_highlight(session.highlight if shown else None)
@@ -860,7 +855,7 @@ class MeasureView(QtWidgets.QWidget):
         self._locked_levels = tuple(self.canvas.image_item.getLevels()) if locked else None
 
     def _levels_changed(self):
-        if self.stage.currentText() != "Image":
+        if self.stage.currentText() not in IMAGE_STAGES:
             return
         if self.lock_levels.isChecked():
             self._locked_levels = tuple(self.canvas.histogram.getLevels())

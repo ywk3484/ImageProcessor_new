@@ -178,27 +178,6 @@ def test_empty_detection_and_label_boundaries():
     np.testing.assert_array_equal(edges, [[False, False, True], [False, True, True]])
 
 
-def test_voronoi_cells_view_colours_touching_cells_apart():
-    from subpx._cpu.cells import compute_voronoi_labels_cpu
-    from subpx._workbench_data import cell_colors_map
-
-    # A staggered array numbered row by row: neighbours in a row have consecutive hole numbers.
-    seeds = [(8 + 16 * i + 8 * (j % 2), 8 + 14 * j) for j in range(6) for i in range(8)]
-    labels = compute_voronoi_labels_cpu(np.array(seeds, float), (84, 136))
-    labels[:, :4] = -1  # pixels without a cell (e.g. holes the CD does not report)
-    colors = cell_colors_map(labels)
-    assert colors.dtype == np.float32 and np.isnan(colors[:, :4]).all()
-    inside = colors[:, 4:]
-    assert np.isfinite(inside).all() and (inside >= 0).all() and (inside < 1).all()
-    for a, b, c, d in ((labels[:, 1:], labels[:, :-1], colors[:, 1:], colors[:, :-1]),
-                       (labels[1:], labels[:-1], colors[1:], colors[:-1])):
-        touching = (a != b) & (a >= 0) & (b >= 0)
-        assert touching.any() and (c[touching] != d[touching]).all()
-    for label in range(len(seeds)):  # one colour per cell
-        assert len(np.unique(colors[labels == label])) == 1
-    assert np.isnan(cell_colors_map(np.full((3, 4), -1))).all()
-
-
 def test_hole_check_is_the_batch_hole_check():
     from scripts.cd_batch import PccCheck
     from subpx._workbench_data import HOLE_CHECK_MAX_ERROR, demo_image, hole_check_error

@@ -151,3 +151,8 @@
 - **For a "looks wrong" report, ask where and on which image before reproducing.** "The Voronoi cells differ from
   before" sent me through settings, padding, GPU vs CPU and the stack for an hour; one question (which view, which
   image, what is wrong) pointed at the display of one view, which no calculation check could find.
+- **"Different from before" means compare what the user looked at, not the widget with the same name.** I
+  checked the "Voronoi cells" stage in old versions, found it unchanged and said so; the user had looked at the
+  "Voronoi edges" layer (boundaries on the image), which the new layout hid in a menu. Before claiming "it was always
+  like this", list every way the old UI could show the thing (stages, layers, overlays) and screenshot each; and a
+  view meant for judging a result must show it on the image, never a picture without the image.

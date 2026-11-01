@@ -186,9 +186,9 @@ methods in `subpx.cd.METHOD_LABELS` are available, with their prerequisites:
 Gaussian and invariant methods require the model background; disk and flux
 ratio require a nominal CD or PSF. Local-only methods bypass deblending. The
 refinement of the Holes step applies to previewed holes; CD builds its own seeds
-with its threshold or peak pipeline. **Show > Voronoi cells** paints each hole's
-cell, touching cells in different colours; cells of holes the CD does not
-report stay clear.
+with its threshold or peak pipeline. **Show > Voronoi cells** draws the cell
+boundaries on top of the image (the **Voronoi edges** layer does the same on
+any view).
 
 The image shows pages of 40,000 holes without slowing down:
 

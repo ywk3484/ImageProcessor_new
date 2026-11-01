@@ -211,37 +211,6 @@ def cell_mask_map(cell_labels, selected):
     return lookup[cell_labels]
 
 
-def cell_colors_map(cell_labels):
-    """A value in [0, 1) per pixel that differs between cells sharing an edge, NaN outside the cells (float32).
-
-    The Voronoi cells view. Colouring by hole number gives the neighbours in a row nearly the same colour, so a
-    row reads as one cell. Here each cell, in hole order, takes the lowest colour none of its neighbours has, and
-    colour k is drawn at frac(0.618 k): consecutive colours lie far apart on the colour scale.
-    """
-    labels = np.asarray(cell_labels)
-    count = int(labels.max()) + 1 if labels.size else 0
-    pairs = []
-    for a, b in ((labels[:, 1:], labels[:, :-1]), (labels[1:], labels[:-1])):
-        touching = (a != b) & (a >= 0) & (b >= 0)
-        a, b = a[touching].astype(np.int64), b[touching].astype(np.int64)
-        pairs += [a * count + b, b * count + a]
-    keys = np.unique(np.concatenate(pairs)) if pairs else np.empty(0, np.int64)  # both directions, by cell
-    cells, neighbours = (keys // count, keys % count) if count else (keys, keys)
-    start = np.searchsorted(cells, np.arange(count + 1)).tolist()
-    neighbours, colors = neighbours.tolist(), [0] * count
-    for cell in range(count):
-        taken = 0
-        for other in neighbours[start[cell]:start[cell + 1]]:
-            if other < cell:
-                taken |= 1 << colors[other]
-        color = 0
-        while taken >> color & 1:
-            color += 1
-        colors[cell] = color
-    lookup = np.append(np.asarray(colors) * ((np.sqrt(5) - 1) / 2) % 1, np.nan).astype(np.float32)
-    return lookup[labels]  # label -1 (no cell) picks the NaN
-
-
 def array_bytes(*objects):
     """Memory held by the NumPy arrays in results (dataclasses, dicts, lists), each array counted once."""
     seen, total, stack = set(), 0, list(objects)
