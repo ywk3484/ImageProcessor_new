@@ -79,72 +79,33 @@ testing interactively on sample images.
   symmetry, isophote) fail, the same at 6aca236 without any pending edits: not from the workbench.
 - [ ] P3 later: open a cd_batch run (run.json settings, pages.csv page list, batch vs workbench mean)
 
-# Pitch / placement error from the old GPU center finders, beside the CD methods (2026-11-02)
+# Workbench: measure all pages of a multipage TIFF (2026-11-02)
 
-Goal: the user doubts the placement error from the CD methods' centers; the GPU center finders (March 2026) gave
-registration they trusted. Measure pitch also finds centers with the ticked GPU finders on the same holes, so the
-Pitch method box lists them next to the CD methods. Plan: ~/.claude/plans/swirling-stirring-sketch.md.
+User: the workbench cannot process all pages of a multipage TIFF at once; add it, with GPU acceleration and batch
+processing. User's choices: per page the means plus one CSV of hole CDs (no full results; Measure CD on a page to
+inspect it); skip pages without holes by the batch's hole check against the page on screen; CD and pitch.
+Plan: ~/.claude/plans/zany-enchanting-cerf.md. Measured first (RTX 4060 Ti, 39,042-hole page): the batch's fast mode
+(summary_only) 3.0 s/page vs 7.3 s in the window, same CDs bit for bit; two pages in flight on one GPU 2.79 vs 3.31 s.
 
-- [x] `_workbench_data`: `GPU_CENTER_FINDERS`, `gpu_center_measurements` (detect on the GPU, nearest hole within half
-      the spacing), `analyze_patterns(..., extra)`
-- [x] Settings key `pitch_finders` (stale banner); Pitch step checkboxes (log-quadratic, edge moment, edge erf on)
-- [x] Session pitch run adds the finders and logs one line each; names; Pitch summary "centers for N of M holes"
-- [x] Tests (data + window), full suite, real page timing + screenshot, docs/workbench.md, commit + push
-
-## Review (2026-11-02)
-
-- Page 0 of stripe1_board1.tif (39,042 holes, 8.5 px apart, GPU), Measure pitch: 0.58 s without finders, 2.83 s
-  with the 3 defaults, 8.38 s with all 6. Holes with a center / x and y placement range (px): log-quadratic 39,042,
-  -0.041..+0.071 / -0.047..+0.035; weighted 39,042; radial symmetry 39,042, -0.046..+0.061 / -0.054..+0.020;
-  isophote curvature 39,042, -0.134..+0.115 / -0.209..+0.082; edge moment 19,769 and edge erf 19 (made for large
-  features; their placement, up to 3.5 px, means nothing here). CD methods for comparison: Gaussian fit
-  -0.018..+0.051 / -0.054..+0.034, Half area -0.024..+0.057 / -0.037..+0.023, Foot area -0.292..0 in x.
-- Synthetic example (truth known): GPU log-quadratic centers 0.024 px rms, radial symmetry 0.023, CD Gaussian 0.020.
-- Screenshot: artifacts/pitch_gpu_finders/pitch_gpu_logquad_placement.png. Tests: 2 data + 1 window added.
-
-# Pitch plots: plain lines, no markers or error bars (2026-11-02)
-
-User: the dots and vertical lines in the Pitch plots hide the data. The vertical lines were ±1σ error bars (single
-pair spread ~0.24 px on the 39k page) that stretched the y-axis ~15x over the per-interval means (range 8.46-8.53
-px); the dots were the measured means themselves; placement had a dashed vertical line at the reference node.
-
-- [x] Both views: a plain line through the measured values; no markers, error bars or vertical reference line;
-      a value with no measured neighbour gets a dot (a line cannot show it); spread moved to the summary text
-- [x] Tests (plot items, lone-value dot), real-page render, docs/workbench.md, commit + push
+- [x] Engine `subpx/_workbench_pages.py`: reader thread, one worker process per GPU with two pages in flight, hole
+      check, preprocess / region, summary-mode CD, pitch + GPU finders, pages.csv (cd_batch columns) + holes CSVs +
+      run.json, failed / hung workers, stop
+- [x] Session: run / stop, progress, page marks, runs and open/close refused while it runs
+- [x] Window: Run menu + Pages tab button, dialog, status-bar progress with Stop, All pages tab (table + plot)
+- [x] Tests (engine + window), timing on the 48-page file, screenshot, docs/workbench.md, commit + push
 
 ## Review (2026-11-02)
 
-- Page 0 of stripe1_board1.tif, Gaussian fit: the x pitch plot now spans 8.46-8.53 px instead of 8.2-8.8. The
-  interval-to-interval wiggle (sd 0.017 px) is about what noise alone gives (0.24 px / sqrt(162 pairs) = 0.019 px).
-
-# CD on pages with a line/space area beside the holes (2026-11-02)
-
-User: on real pages with L/S and C/H areas, Preview holes picks the holes only and pitch works, but CD fails.
-Cause (measured): the neighbour-model re-check adds a hole at every residual maximum, and the lines (components
-above area_max, skipped by the preview) are left in the residual as unmodelled light, so it put a "hole" every
-pitch along each line. Raw-cell methods (no deblend) were not affected.
-
-- [x] revise_seeds(exclude=...): no hole added on components above area_max (threshold seeds); holes thresholding
-      missed (no component, or below area_min) are still added
-- [x] Regression test (holes + lines page: CD holes = previewed holes, none added, fit converges); docs step 3
-
-## Review (2026-11-02)
-
-- Synthetic 2048 x 1378 page, 14,076 holes left, vertical lines right, GPU, batch methods: before 27,286 holes
-  reported (13,800 on the lines), deblend 30 rounds, not converged, 5.9 s; after 13,974 (the bottom row touches the
-  border), 0 added, converged in 7 rounds, 0.7 s.
-- Same holes with vs without the lines (400 x 600 page): CD change 0 except the hole column next to the lines,
-  -0.05 px (1 %) for the half-area family / local_half_area, -0.02 local_projection; horizontal lines also shift every
-  hole by about -0.01 px in the model methods (cause not isolated).
-- Not covered: seeds='peaks' (no area limits) still puts seeds on lines; merged holes in threshold mode are no
-  longer rescued (the preview skips them too).
-
-# Explainer: preprocessing in the workbench (2026-11-02)
-
-User asked for an HTML file explaining exactly how preprocessing works in the workbench, with illustrations.
-
-- [x] `docs/workbench_preprocessing.html`: the two page versions and the switch, what a run does, what makes the
-      preprocessed page out of date, each method on the pixels, side-by-side cost to CD, the comparison tools, fine print
-- [x] Every picture is real output: the workbench's `preprocess_page` on the `scripts/preprocess_check.py` page
-      (square, 2,709 holes); CD numbers from `preprocess_check.py --layout square --methods half_area`, re-run today
-      (same as docs/preprocess.md). Checked at desktop light/dark and 400 px phone width.
+- stripe1_board1.tif, 48 pages (40 with 39,042 holes, 8 without: 3, 11, 19, 27, 35, 43, 46, 47), ten batch methods,
+  RTX 4060 Ti: 132 s without GPU finders (2.6 s/page running), 209 s with the 3 default finders (4.1 s/page); Measure CD
+  page by page 8.1-8.8 s/page (~5.5 min for the 40). Pages 5 and 20: Measure CD's mean CDs equal the run's (0 diff).
+- One page alone: hole check 0.17 s, CD 3.25 s, pitch 0.5 s, 3 finders +2.2 s, hole CSV 0.5 s (was 1.0 s with
+  np.char.mod; Python lists halve it).
+- Found on the way: starting a worker froze the window 1.6 s (Windows writes process arguments, here the 2.8 MB
+  reference page, into the child's start-up pipe and waits until the child has imported its modules); the settings now
+  go through the worker's queue (start 0.10 s). Waiting for the workers to exit at the end (0.4 s) moved off the
+  window's thread. Longest window pause during a run now 0.05 s.
+- Not done: reopening an earlier run's folder (P3), resume of a stopped run, more than one GPU measured (one here).
+- Tests: tests/test_workbench_pages.py (4: rows equal cd_batch page_values and the window's Measure CD / pitch, blank
+  page skipped, region + preprocessing, failed page, stop, GPU with a finder); tests/test_workbench.py (2: the run
+  beside the window, Esc stops). Workbench suite 57 passed.

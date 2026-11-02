@@ -7,6 +7,7 @@ import numpy as np
 from PyQt6 import QtCore, QtWidgets
 import pyqtgraph as pg
 
+from ..._workbench_data import pitch_numbers
 from ..names import method_name
 from ..widgets import hint, plot_widget
 
@@ -118,10 +119,8 @@ class PitchPanel(QtWidgets.QWidget):
                 self._points[axis] = (positions, profile.pitch, "interval")
             for item in plot.getPlotItem().axes.values():
                 item["item"].enableAutoSIPrefix(False)
-            pairs = int(profile.counts.sum())
-            mean = float(np.nansum(profile.pitch * profile.counts) / max(pairs, 1))
-            error = profile.registration[np.isfinite(profile.registration)]
-            span = f", placement error {error.min():+.3g} to {error.max():+.3g} {unit}" if error.size else ""
+            mean, pairs, low, high = pitch_numbers(profile)  # the same numbers as Measure all pages writes
+            span = f", placement error {low:+.3g} to {high:+.3g} {unit}" if np.isfinite(low) else ""
             spread = profile.std[np.isfinite(profile.std)]
             spread = f", single pairs spread ±{np.median(spread):.3g} {unit}" if spread.size else ""
             parts.append(f"<b>{axis} pitch {mean:.5g} {unit}</b> ({pairs:,} pairs{spread}; design "

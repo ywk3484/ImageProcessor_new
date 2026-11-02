@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 import threading
 from time import perf_counter
+import traceback
 
 import numpy as np
 from PyQt6 import QtCore
@@ -26,6 +27,7 @@ from .._workbench_data import (
     array_bytes, demo_image, export_review, gpu_center_measurements, grayscale, page_preview, preprocess_page,
     register_images,
 )
+from .._workbench_pages import PagesRun
 from .jobs import JobRunner
 from .names import method_name, plain_error
 from .settings import (HOLE_KEYS, RESULT_KEYS, STEP_KEYS, changes, preprocess_settings, preprocess_summary,
@@ -34,6 +36,8 @@ from .settings import (HOLE_KEYS, RESULT_KEYS, STEP_KEYS, changes, preprocess_se
 # Results are kept for the open page and the most recent other pages: at most this many pages and bytes.
 RESULT_PAGES = 3
 RESULT_BYTES = 3e9
+# Why runs wait while Measure all pages runs (the GPU is in use; browsing pages stays possible).
+PAGES_BUSY = "Measuring all pages: wait for it to finish, or stop it (Esc)."
 
 
 class PageSource:
@@ -167,6 +171,8 @@ class Session(QtCore.QObject):
     log = QtCore.pyqtSignal(str)
     status = QtCore.pyqtSignal(str, str)  # text, level: info, warning or error
     error = QtCore.pyqtSignal(str)  # one plain line for the banner; details are in the log
+    pages_changed = QtCore.pyqtSignal()  # Measure all pages started, measured a page or ended
+    pages_progress = QtCore.pyqtSignal()  # Measure all pages: a tick (elapsed time, pages per second)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -192,11 +198,19 @@ class Session(QtCore.QObject):
         self.parameters = {}  # the Setup settings as analysis parameters
         self.bounds = None  # analysis region, page-local [x0, y0, x1, y1], or None
         self.version = "raw"  # the page version on screen and measured by runs: "raw" or "pre" (preprocessed)
+        self.pages_run = None  # Measure all pages of the open file: running or the last one (PagesRun)
+        self._pages_marks = {}  # page -> (short line, detail) of what Measure all pages found there
+        self._pages_timer = QtCore.QTimer(self, interval=150, timeout=self._pages_step)
 
     # ------------------------------------------------------------------------------------------- state
     @property
     def busy(self):
         return self.jobs.busy
+
+    @property
+    def pages_running(self):
+        """Measure all pages is running (runs wait; pages, zoom and the inspector stay usable)."""
+        return self.pages_run is not None and self.pages_run.running
 
     def page_entry(self, page=None):
         """PageResults of the active page (or ``page``): both versions and the preprocessed page, or None."""
@@ -288,7 +302,11 @@ class Session(QtCore.QObject):
                     preprocess=self.parameters.get("preprocess") if self.version == "pre" else None)
 
     def problems(self):
-        return run_problems(self.parameters, loaded=self.loaded, results=self.page_results, moving=self.moving)
+        problems, invalid = run_problems(self.parameters, loaded=self.loaded, results=self.page_results,
+                                         moving=self.moving)
+        if self.pages_running:
+            problems = dict.fromkeys(problems, PAGES_BUSY)
+        return problems, invalid
 
     # ------------------------------------------------------------------------------------------ settings
     def set_parameters(self, parameters):
@@ -371,6 +389,9 @@ class Session(QtCore.QObject):
 
     # --------------------------------------------------------------------------------------- files, pages
     def open_file(self, path, page=0):
+        if self.pages_running:
+            self.error.emit("Measure all pages is running: stop it (Esc) before opening another file.")
+            return
         path, page = str(path), int(page)
 
         def read():
@@ -393,13 +414,17 @@ class Session(QtCore.QObject):
         self._run(f"Opening {Path(path).name}", read, accept)
 
     def set_array(self, image, name="Array image"):
-        if self.busy:
-            raise RuntimeError("Wait for the current job before replacing the image.")
+        if self.busy or self.pages_running:
+            raise RuntimeError("Wait for the current job (or Measure all pages) before replacing the image.")
         data, conversion = grayscale(image)
         self._close_sources()
         self._set_loaded(LoadedImage(data, name, conversion=conversion), new_file=True)
 
     def load_demo(self):
+        if self.pages_running:
+            self.error.emit("Measure all pages is running: stop it (Esc) before loading the demo.")
+            return
+
         def accept(loaded):
             self._close_sources()
             self._set_loaded(loaded, new_file=True)
@@ -432,6 +457,8 @@ class Session(QtCore.QObject):
         if new_file:
             self.results.clear()
             self.marks.clear()
+            self.pages_run = None
+            self._pages_marks.clear()
             self.moving = None
             self._close_moving_source()
             self.selected_xy = None
@@ -481,6 +508,7 @@ class Session(QtCore.QObject):
             self.moving_source = None
 
     def close(self):
+        self.stop_all_pages()
         self._close_sources()
 
     # ------------------------------------------------------------------------------------------ measuring
@@ -661,6 +689,116 @@ class Session(QtCore.QObject):
                 f"Results of page {', '.join(map(str, sorted(dropped)))} dropped to limit memory (kept: "
                 f"{len(kept)} page{'s' * (len(kept) > 1)}, {total / 1e9:.1f} GB; at most {RESULT_PAGES} pages and "
                 f"{RESULT_BYTES / 1e9:.0f} GB).")
+
+    # ----------------------------------------------------------------------------- measure all pages
+    def page_mark(self, page):
+        """(short line, detail) on what was measured on ``page``: its own results first, then Measure all pages."""
+        own, everything = self.marks.get(page), self._pages_marks.get(page)
+        if own and everything:
+            return own[0], own[1] + "\n" + everything[1]
+        return own or everything
+
+    def all_pages_problem(self):
+        """Why Measure all pages cannot start now ('' = it can)."""
+        if self.loaded is None or self.source is None or self.source.pages < 2:
+            return "Open a multipage file first."
+        if self.pages_running:
+            return "Measure all pages is running."
+        if self.busy:
+            return f"Wait for {self.jobs.label.rstrip('.')}."
+        return self.problems()[0]["cd"]
+
+    def all_pages_parameters(self):
+        """The settings Measure all pages uses: those of a run on the version on screen."""
+        return self.current_parameters()
+
+    def run_all_pages(self, first, last, folder, *, skip_no_holes=True, finders=True):
+        """Measure CD and pitch on pages ``first`` to ``last`` of the open file, with the current settings, into
+        ``folder``; with ``skip_no_holes`` a page that fails the batch's hole check against the page on screen is
+        skipped. Runs beside the window (worker processes); False when it could not start."""
+        problem = self.all_pages_problem()
+        if problem:
+            self.error.emit(problem)
+            return False
+        parameters = self.all_pages_parameters()
+        if not finders:
+            parameters["pitch_finders"] = ()
+        try:
+            run = PagesRun(self.source.path, range(int(first), int(last) + 1), parameters, folder,
+                           reference=self.loaded.image if skip_no_holes else None, reference_page=self.loaded.page,
+                           check_mode=self.parameters.get("hole_check_mode", "centered"))
+            run.start()
+        except Exception:
+            self.fail("Measure all pages could not start", traceback.format_exc())
+            return False
+        self.pages_run = run
+        self._pages_marks.clear()
+        check = (f"pages failing the hole check against page {self.loaded.page} skipped ({run.check_mode}, below "
+                 f"{run.max_error:g})" if skip_no_holes else "no hole check")
+        self.log.emit(f"Measuring pages {run.pages[0]} to {run.pages[-1]} of {run.name} ({len(run.pages)} pages) on "
+                      f"{run.describe_devices()}; {check}; results in {run.output}.")
+        self.status.emit(f"Measuring {len(run.pages)} pages...", "info")
+        self._pages_timer.start()
+        self.pages_changed.emit()
+        self.busy_changed.emit(self.busy)  # runs now wait: Setup and the menus show why
+        return True
+
+    def stop_all_pages(self):
+        if self.pages_running:
+            self.pages_run.stop()
+            self._pages_ended()
+
+    def _pages_step(self):
+        run = self.pages_run
+        if run is None or not run.running:
+            self._pages_timer.stop()
+            return
+        events = run.step()
+        for kind, value in events:
+            if kind == "row":
+                self._pages_marks[value["page"]] = self._pages_mark(run, value)
+            elif kind == "log":
+                self.log.emit(value)
+        if any(kind == "row" for kind, _ in events):
+            self.pages_changed.emit()
+        if run.finished:
+            self._pages_ended()
+        else:
+            self.pages_progress.emit()
+
+    def _pages_ended(self):
+        self._pages_timer.stop()
+        run = self.pages_run
+        done, total, rate, _ = run.progress()
+        counts = run.counts
+        text = (f"Measure all pages {'stopped' if run.state == 'stopped' else 'ended'}: {done} of {total} pages in "
+                f"{run.elapsed():.0f} s ({counts['ok']} measured, {counts['no_holes']} no holes, {counts['failed']} "
+                f"failed)" + (f", {1 / rate:.2f} s per page" if rate > 0 else "") + f". Results: {run.output}")
+        self.log.emit(text)
+        if run.state == "failed":
+            self.error.emit("Measure all pages stopped: " + plain_error(run.fatal))
+            self.status.emit("Failed", "error")
+        else:
+            self.status.emit(f"All pages: {counts['ok']} measured, {counts['no_holes']} no holes, "
+                             f"{counts['failed']} failed", "warning" if counts["failed"] else "info")
+        self.pages_changed.emit()
+        self.busy_changed.emit(self.busy)
+
+    @staticmethod
+    def _pages_mark(run, row):
+        """The page list's line for a Measure all pages row."""
+        if row["status"] == "no_holes":
+            return "all: no holes", (f"Measure all pages: skipped, hole check {row['pcc_error']:.3f} (passes below "
+                                     f"{run.max_error:g})")
+        if row["status"] == "failed":
+            return "all: failed", "Measure all pages failed: " + str(row.get("error", ""))
+        holes = int(row["holes"])
+        failed = sorted(((holes - int(row[f"{name}_valid"]), name) for name in run.methods), reverse=True)
+        failed = [(count, name) for count, name in failed if count > 0]
+        short = f"all: {holes:,} holes" + (f", most failed {failed[0][0]:,}" if failed else "")
+        detail = (f"Measure all pages: {holes:,} holes; " + ("failed: " + ", ".join(
+            f"{method_name(name)} {count:,}" for count, name in failed) if failed else "no method failed"))
+        return short, detail
 
     # --------------------------------------------------------------------------------- method, holes
     def set_method(self, name):
@@ -894,7 +1032,11 @@ class Session(QtCore.QObject):
         return self._run(label, function, on_result)
 
     def cancel(self):
-        self.jobs.cancel()
+        """Esc / Cancel: the running job, else Measure all pages."""
+        if self.jobs.busy:
+            self.jobs.cancel()
+        elif self.pages_running:
+            self.stop_all_pages()
 
     def fail(self, context, detail):
         """A failed job or handler: the full text in the log, one plain line in the banner."""

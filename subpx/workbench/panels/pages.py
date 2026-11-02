@@ -1,5 +1,6 @@
 """Pages (a tab next to Setup): every page of the open file, counted from 0, with a thumbnail made when it
-scrolls into view and a mark for what was measured there; linked both ways with "Stack vertically"."""
+scrolls into view and a mark for what was measured there (also by Measure all pages); linked both ways with "Stack
+vertically". The window connects ``measure_all`` to its Measure all pages dialog."""
 
 from __future__ import annotations
 
@@ -37,6 +38,10 @@ class PagesPanel(QtWidgets.QWidget):
                                     "Shift+F fits the stack, F the active page.")
         self.stack_pages.toggled.connect(session.set_stacked)
         layout.addWidget(self.stack_pages)
+        self.measure_all = QtWidgets.QPushButton("Measure all pages...")
+        self.measure_all.setToolTip("Measure CD and pitch on every page with the current settings, on the GPU in the "
+                                    "batch's fast mode; results in a folder and in the All pages tab")
+        layout.addWidget(self.measure_all)
         self.note = hint("Open a multipage file to list its pages.")
         layout.addWidget(self.note)
         self.list = QtWidgets.QListWidget()
@@ -53,6 +58,7 @@ class PagesPanel(QtWidgets.QWidget):
         self._timer = QtCore.QTimer(self, singleShot=True, interval=30, timeout=self._make_thumbnails)
         session.image_changed.connect(self._image_changed)
         session.results_changed.connect(self._update_marks)
+        session.pages_changed.connect(self._update_marks)
         session.stacked_changed.connect(self._stacked_changed)
         session.busy_changed.connect(lambda busy: self.setEnabled(not busy))
 
@@ -107,7 +113,7 @@ class PagesPanel(QtWidgets.QWidget):
     def _text(self, page):
         """Three lines: page, size, what was measured there (blank when nothing)."""
         h, w = self.session.source.shapes[page]
-        short, _ = self.session.marks.get(page, (" ", ""))
+        short, _ = self.session.page_mark(page) or (" ", "")
         return f"Page {page}\n{w} x {h} px\n{short}"
 
     def _update_marks(self):
@@ -117,10 +123,12 @@ class PagesPanel(QtWidgets.QWidget):
             item = self.list.item(page)
             text = self._text(page)
             if item.text() != text:
-                mark = self.session.marks.get(page)
+                mark = self.session.page_mark(page)
                 item.setText(text)
                 item.setToolTip(mark[1] if mark else "")
-                item.setForeground(QtGui.QColor("#56d6cf") if mark else QtGui.QColor("#dee7f2"))
+                color = ("#dee7f2" if not mark else "#ff5c74" if mark[0] == "all: failed" else
+                         "#899caf" if mark[0] == "all: no holes" else "#56d6cf")
+                item.setForeground(QtGui.QColor(color))
 
     def _make_thumbnails(self):
         """Thumbnails of the rows in view, a few per turn of the event loop."""

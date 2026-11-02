@@ -1212,3 +1212,88 @@ def test_mean_hole_wiener_average_hole_and_preprocessing_on_page_change(window, 
     assert "width at half height" in widget.average.summary.text()
     session.set_version("raw")
     assert widget.average.image_plot.getPlotItem().titleLabel.text.endswith("raw page")
+
+
+def wait_for_pages(widget, app, timeout=180):
+    deadline = time.monotonic() + timeout
+    while widget.session.pages_running and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.02)
+    app.processEvents()
+    assert not widget.session.pages_running, "Measure all pages did not finish"
+
+
+def test_measure_all_pages_runs_beside_the_window(window, tmp_path):
+    from subpx.workbench.session import PAGES_BUSY
+
+    widget, app = window
+    session = widget.session
+    assert not widget.all_pages_action.isEnabled() and not widget.pages.measure_all.isEnabled()
+    assert widget.pages.measure_all.toolTip() == "Open a multipage file first."
+    image = widget.loaded.image
+    path = write_pages(tmp_path / "pages.tif", image, image + 5, np.full_like(image, 10), image * 1.1)
+    widget.open_image(path=path, page=1)
+    wait_for_job(widget, app)
+    assert widget.all_pages_action.isEnabled() and widget.pages.measure_all.isEnabled()
+    assert widget.measure_all_pages(folder=tmp_path / "all")
+    assert session.pages_running and widget.bottom.currentWidget() is widget.all_pages
+    assert widget.pages_label.isVisible() and widget.pages_stop.isVisible()
+    # other runs wait and say why; pages can still be browsed; opening and closing are refused
+    assert not widget.setup.run_button.isEnabled() and widget.setup.run_reason.text() == PAGES_BUSY
+    assert not widget.run_actions["cd"].isEnabled() and not widget.open_action.isEnabled()
+    widget.close()
+    app.processEvents()
+    assert widget.isVisible() and "stop it (Esc)" in widget.message_label.text()
+    session.set_page(0)
+    wait_for_job(widget, app)
+    assert session.loaded.page == 0
+    wait_for_pages(widget, app)
+    run = session.pages_run
+    assert run.state == "done" and run.counts == {"ok": 3, "no_holes": 1, "failed": 0}, widget.log.toPlainText()
+    assert not widget.pages_label.isVisible() and widget.setup.run_button.isEnabled()
+    assert (tmp_path / "all" / "pages.csv").is_file() and (tmp_path / "all" / "holes" / "page_0003.csv").is_file()
+    # the All pages tab: a row per page, the chosen value of every method, the plot
+    panel = widget.all_pages
+    assert panel.model.rowCount() == 4 and panel.model.columnCount() == 3 + len(run.methods)
+    assert [panel.model.index(row, 1).data() for row in range(4)] == ["measured", "measured", "no holes", "measured"]
+    method = run.methods[0]
+    assert panel.method.currentData() == session.method or panel.method.currentData() == method
+    column = 3 + run.methods.index(panel.method.currentData())
+    assert panel.model.index(1, column).data() == f"{run.rows[1][panel.method.currentData() + '_cd']:.5g}"
+    assert np.isfinite(panel._points[1]).sum() == 3 and str(run.output) in panel.summary.text()
+    pick(panel.value, "placement_x")
+    assert panel.model.columnCount() == 3 + len(run.pitch_methods) and " to " in panel.model.index(0, 3).data()
+    pick(panel.value, "failed")
+    assert panel.model.index(0, 3).data() == f"{run.rows[0]['holes'] - run.rows[0][run.methods[0] + '_valid']:,}"
+    panel.table.horizontalHeader().sectionClicked.emit(4)
+    assert panel.method.currentData() == run.methods[1]
+    # the page list says what was found; a click on a row shows that page
+    assert "all: no holes" in widget.pages.list.item(2).text()
+    assert f"all: {run.rows[3]['holes']:,} holes" in widget.pages.list.item(3).text()
+    panel.table.clicked.emit(panel.model.index(3, 0))
+    wait_for_job(widget, app)
+    assert session.loaded.page == 3 and panel.table.currentIndex().row() == 3
+    # Measure CD on that page gives the run's numbers
+    run_step = widget.setup.run_step
+    run_step("cd")
+    wait_for_job(widget, app)
+    measured = widget.review.measurements[method]
+    cds = measured.metrics["cd_equivalent_px"][measured.valid] * widget.review.parameters["pixel_size"]
+    assert run.rows[3][f"{method}_cd"] == pytest.approx(np.nanmean(cds), rel=1e-12)
+
+
+def test_esc_stops_measure_all_pages(window, tmp_path):
+    widget, app = window
+    image = widget.loaded.image
+    widget.open_image(path=write_pages(tmp_path / "pages.tif", *[image] * 6))
+    wait_for_job(widget, app)
+    assert widget.measure_all_pages(folder=tmp_path / "all", skip_no_holes=False)
+    assert widget.cancel_action.isEnabled()
+    widget.cancel_action.trigger()
+    app.processEvents()
+    run = widget.session.pages_run
+    assert not widget.session.pages_running and run.state == "stopped"
+    assert "Measure all pages stopped" in widget.log.toPlainText()
+    assert widget.setup.run_button.isEnabled() and widget.all_pages.summary.text().find("(stopped)") > 0
+    assert not widget.measure_all_pages(folder=tmp_path / "all")  # the folder holds an earlier run's pages.csv
+    assert "pages.csv" in widget.error_label.text()

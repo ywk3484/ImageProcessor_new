@@ -14,9 +14,12 @@ import weakref
 import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from .._workbench_data import HOLE_CHECK_MAX_ERROR
+from .._workbench_pages import PAGES_PER_GPU, devices
 from .canvas import MeasureView
-from .names import method_name
+from .names import RECIPES, method_name
 from .panels.align import AlignPanel, AlignView
+from .panels.all_pages import AllPagesPanel
 from .panels.average import AveragePanel
 from .panels.distribution import DistributionPanel
 from .panels.holes_table import HolesPanel
@@ -26,6 +29,7 @@ from .panels.pages import PagesPanel
 from .panels.pitch import PitchPanel
 from .panels.setup import SetupPanel
 from .session import Session, failure_counts
+from .settings import preprocess_text
 from .settings import SETTINGS_KEY, describe
 from .widgets import apply_style, hint
 
@@ -47,6 +51,10 @@ Preprocess) in the same place, with the same contrast. Each version keeps its ow
 measure the version on screen. The inspector, the CD distribution and the summary line also show the other
 version's CD. <b>Show > Removed by preprocessing</b> maps raw minus preprocessed; the <b>Average hole</b> tab
 stacks every hole on a 4x finer grid, raw and preprocessed. The stack's other pages and Align use raw pages.</p>
+<p><b>Measure all pages</b> (Pages tab or Run menu) measures CD and pitch on every page of the file with the
+current settings, on the GPU in the batch's fast mode (the same CDs as Measure CD), beside the window: pages can be
+browsed meanwhile. Pages failing the hole check against the page on screen are skipped. Each page's means are in the
+<b>All pages</b> tab; pages.csv, one hole CSV per page and run.json go to a folder.</p>
 <p><b>Align</b> (header): pick a moving page of this or another file; it is aligned to the active page and
 shown on the image (Space flickers).</p>
 <h3>Keys</h3>
@@ -58,7 +66,7 @@ shown on the image (Space flickers).</p>
 <tr><td>J / K, Down / Up in the table</td><td>next / previous hole in table order</td></tr>
 <tr><td>N / Shift+N</td><td>next / previous failed hole of the current method</td></tr>
 <tr><td>Page Down / Page Up</td><td>next / previous page (image or page list)</td></tr>
-<tr><td>Esc</td><td>cancel the running job (its result is discarded)</td></tr>
+<tr><td>Esc</td><td>cancel the running job (its result is discarded), else stop Measure all pages</td></tr>
 <tr><td>Ctrl+C</td><td>copy the selected rows, or the selected hole's row</td></tr>
 <tr><td>Space</td><td>flicker reference / aligned (Align view)</td></tr>
 <tr><td>Ctrl+1 / Ctrl+2 / Ctrl+3</td><td>show or hide Setup / Inspector / bottom panel</td></tr>
@@ -133,6 +141,9 @@ class InspectionWindow(QtWidgets.QMainWindow):
         session.settings_changed.connect(self._update_stale)
         session.results_changed.connect(self._update_stale)
         session.settings_changed.connect(self._update_compute)
+        session.pages_progress.connect(self._update_pages_progress)
+        session.pages_changed.connect(self._update_pages_progress)
+        session.pages_changed.connect(lambda: self._busy_changed(self.busy))
         self._busy_changed(False)
         self._update_stale()
         _install_exception_hook()
@@ -225,10 +236,11 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.distribution = DistributionPanel(session)
         self.pitch = PitchPanel(session)
         self.average = AveragePanel(session)
+        self.all_pages = AllPagesPanel(session)
         self.log = LogPanel(session)
         self.bottom = QtWidgets.QTabWidget()
         for widget, title in ((self.holes, "Holes"), (self.distribution, "CD distribution"), (self.pitch, "Pitch"),
-                              (self.average, "Average hole"), (self.log, "Log")):
+                              (self.average, "Average hole"), (self.all_pages, "All pages"), (self.log, "Log")):
             self.bottom.addTab(widget, title)
         self.bottom_dock = self._dock("Results", "bottom", self.bottom, Area.BottomDockWidgetArea)
         self.resizeDocks([self.setup_dock, self.inspector_dock], [280, 380], QtCore.Qt.Orientation.Horizontal)
@@ -313,6 +325,21 @@ class InspectionWindow(QtWidgets.QMainWindow):
         self.cancel_button.setToolTip("Stop waiting for the job and discard its result (Esc)")
         self.cancel_button.clicked.connect(self.session.cancel)
         layout.addWidget(self.cancel_button)
+        self.pages_label = QtWidgets.QLabel("")
+        self.pages_label.setToolTip("Measure all pages: pages done, speed and time left (All pages tab for results)")
+        layout.addWidget(self.pages_label)
+        self.pages_bar = QtWidgets.QProgressBar()
+        self.pages_bar.setMaximumWidth(110)
+        self.pages_bar.setMaximumHeight(14)
+        self.pages_bar.setTextVisible(False)
+        layout.addWidget(self.pages_bar)
+        self.pages_stop = QtWidgets.QToolButton()
+        self.pages_stop.setText("Stop")
+        self.pages_stop.setToolTip("Stop Measure all pages: the pages being measured are dropped, the rest stays (Esc)")
+        self.pages_stop.clicked.connect(self.session.stop_all_pages)
+        layout.addWidget(self.pages_stop)
+        for widget in (self.pages_label, self.pages_bar, self.pages_stop):
+            widget.hide()
         self.summary_label = QtWidgets.QLabel("")
         self.summary_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self.summary_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
@@ -382,6 +409,9 @@ class InspectionWindow(QtWidgets.QMainWindow):
         for key, text in (("detect", "&Preview holes"), ("cd", "Measure &CD"), ("pitch", "Measure p&itch"),
                           ("register", "&Align")):
             self.run_actions[key] = self._action(run, text, lambda checked=False, key=key: self.setup.run_step(key))
+        self.all_pages_action = self._action(
+            run, "Measure &all pages...", self.measure_all_pages, "Ctrl+Shift+A",
+            "Measure CD and pitch on every page with the current settings, on the GPU (Ctrl+Shift+A)")
         run.addSeparator()
         self.run_open_action = self._action(run, "Run the open &step", self.setup.run_current,
                                             ["Ctrl+Return", "Ctrl+Enter"], "Run the open Setup step (Ctrl+Enter)")
@@ -404,6 +434,7 @@ class InspectionWindow(QtWidgets.QMainWindow):
         for menu in (file, edit, view, run, holes, help_menu):
             menu.setToolTipsVisible(True)
         self.setup.moving_other.clicked.connect(self.open_moving)
+        self.pages.measure_all.clicked.connect(self.measure_all_pages)
 
     @staticmethod
     def _set_checked(action, checked):
@@ -546,8 +577,15 @@ class InspectionWindow(QtWidgets.QMainWindow):
             + (" and the alignment" if self.session.registration is not None else "") + ". Continue?")
         return answer == QtWidgets.QMessageBox.StandardButton.Yes
 
+    def _refuse_while_pages(self, what):
+        """True (and a hint) while Measure all pages runs."""
+        if self.session.pages_running:
+            self._show_status(f"Measure all pages is running: stop it (Esc) before {what}.", "warning")
+            return True
+        return False
+
     def open_image(self, checked=False, *, path=None, page=0):
-        if self.busy:
+        if self.busy or self._refuse_while_pages("opening another file"):
             return
         if path is None:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open image", self._last_folder(), IMAGE_FILTER)
@@ -566,6 +604,8 @@ class InspectionWindow(QtWidgets.QMainWindow):
             self.session.open_moving(path, page, align=self.mode == "align")
 
     def load_demo(self):
+        if self._refuse_while_pages("loading the demo"):
+            return
         if not self.busy and self._confirm_discard("Loading the demo"):
             self.session.load_demo()
 
@@ -579,13 +619,16 @@ class InspectionWindow(QtWidgets.QMainWindow):
 
     def dropEvent(self, event):
         paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
-        if paths and not self.busy:
+        if paths and not self.busy and not self._refuse_while_pages("opening another file"):
             event.acceptProposedAction()
             self.open_image(path=paths[0])
 
     def closeEvent(self, event):
         if self.busy:
             self._show_status(f"{self.session.jobs.label} is running: press Esc to cancel it, then close.", "warning")
+            event.ignore()
+            return
+        if self._refuse_while_pages("closing"):
             event.ignore()
             return
         if not self._confirm_discard("Closing"):
@@ -671,14 +714,20 @@ class InspectionWindow(QtWidgets.QMainWindow):
             widget.setVisible(busy)
         if not busy:
             self.job_label.clear()
-        self.cancel_action.setEnabled(busy)
+        running = session.pages_running
+        self.cancel_action.setEnabled(busy or running)
         for action in (self.open_action, self.demo_action, self.reset_action, self.recent_menu.menuAction()):
-            action.setEnabled(not busy)
+            action.setEnabled(not busy and not running)
+        problem = session.all_pages_problem()
+        self.all_pages_action.setEnabled(not problem)
+        self.pages.measure_all.setEnabled(not problem)
+        self.pages.measure_all.setToolTip(problem or "Measure CD and pitch on every page with the current settings, "
+                                          "on the GPU in the batch's fast mode (Ctrl+Shift+A)")
         self.export_action.setEnabled(not busy and loaded and (session.review is not None
                                                                or session.registration is not None))
         for action in self.run_actions.values():
-            action.setEnabled(not busy and loaded)
-        self.run_open_action.setEnabled(not busy and loaded)
+            action.setEnabled(not busy and loaded and not running)
+        self.run_open_action.setEnabled(not busy and loaded and not running)
         pages = session.source.pages if session.source is not None else 1
         page = session.loaded.page if loaded else 0
         self.page_spin.setEnabled(not busy and pages > 1)
@@ -808,6 +857,113 @@ class InspectionWindow(QtWidgets.QMainWindow):
             self._settings.setValue(f"{SETTINGS_KEY}/last_folder", str(Path(folder).parent))
         rows = self.holes.model.export_rows() if table and self.holes.model.review is not None else None
         session.export(folder, arrays=arrays, table=rows, alignment=alignment)
+
+    # --------------------------------------------------------------------------------- all pages
+    def measure_all_pages(self, checked=False, *, folder=None, first=None, last=None, skip_no_holes=True,
+                          finders=True):
+        """The Measure all pages dialog (pages, hole check, GPU centers, folder), then the run; ``folder`` given =
+        no dialog."""
+        session = self.session
+        problem = session.all_pages_problem()
+        if problem:
+            self._show_status(problem, "warning")
+            return False
+        pages = session.source.pages
+        first = 0 if first is None else first
+        last = pages - 1 if last is None else last
+        if folder is None:
+            parameters = session.all_pages_parameters()
+            try:
+                backend, gpus = devices(parameters)
+            except ValueError as exc:
+                self._show_error(str(exc))
+                return False
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle("Measure all pages")
+            form = QtWidgets.QFormLayout(dialog)
+            start, stop = QtWidgets.QSpinBox(), QtWidgets.QSpinBox()
+            for spin, value in ((start, first), (stop, last)):
+                spin.setRange(0, pages - 1)
+                spin.setValue(value)
+            span = QtWidgets.QHBoxLayout()
+            span.addWidget(start)
+            span.addWidget(QtWidgets.QLabel("to"))
+            span.addWidget(stop)
+            span.addWidget(hint(f"of {pages} pages (0 = first)", wrap=False))
+            span.addStretch()
+            form.addRow("Pages", span)
+            limit = HOLE_CHECK_MAX_ERROR[session.parameters.get("hole_check_mode", "centered")]
+            skip = QtWidgets.QCheckBox(f"Skip pages without holes: compare each page with page {session.loaded.page} "
+                                       f"(this page)")
+            skip.setToolTip(f"The batch's hole check ({session.parameters.get('hole_check_mode', 'centered')}): a "
+                            f"page is measured when its correlation error is below {limit:g}")
+            skip.setChecked(skip_no_holes)
+            form.addRow("", skip)
+            ticked = tuple(parameters.get("pitch_finders") or ())
+            finder_check = QtWidgets.QCheckBox("GPU centers too for pitch: " + ", ".join(
+                method_name(f"gpu_{key}").removeprefix("GPU ").removesuffix(" centers") for key in ticked))
+            finder_check.setToolTip("The GPU center finders ticked in Setup > Pitch. The three defaults take about "
+                                    "2 s more per 39,000-hole page.")
+            finder_check.setChecked(finders and bool(ticked))
+            finder_check.setVisible(bool(ticked) and backend == "gpu")
+            form.addRow("", finder_check)
+            stem = Path(session.source.path).stem
+            default = Path(session.source.path).parent / f"{stem}_all_pages_{datetime.now():%Y%m%d_%H%M%S}"
+            path = QtWidgets.QLineEdit(str(default))
+            browse = QtWidgets.QPushButton("Browse...")
+            browse.clicked.connect(lambda: path.setText(QtWidgets.QFileDialog.getExistingDirectory(
+                dialog, "Results into", str(Path(path.text()).parent)) or path.text()))
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(path, 1)
+            row.addWidget(browse)
+            form.addRow("Folder", row)
+            methods = tuple(parameters["methods"])
+            preset = next((label for label, names in RECIPES.values() if tuple(names) == methods), None)
+            compute = (f"{len(gpus)} GPU{'s' * (len(gpus) != 1)} ({', '.join(name or gpu for gpu, name in gpus)}), "
+                       f"{PAGES_PER_GPU} pages at a time on each" if backend == "gpu" else "the CPU, one page at a time")
+            what = (f"Measures {len(methods)} CD method{'s' * (len(methods) != 1)}"
+                    + (f" ({preset})" if preset else "") + " with the current settings on the "
+                    + ("preprocessed pages (" + preprocess_text(parameters.get("preprocess")) + ")"
+                       if parameters.get("preprocess") else "raw pages")
+                    + (", in the analysis region" if parameters.get("bounds") else ", whole pages")
+                    + ", then the pitch of every method (Pitch settings, each page's default reference hole). "
+                    f"On {compute}, in the batch's fast mode: the same CDs as Measure CD, without contours. "
+                    "Writes pages.csv (cd_batch's columns, then pitch), holes/page_NNNN.csv and run.json. Pages can "
+                    "be browsed meanwhile; other runs wait.")
+            form.addRow("", hint(what))
+            buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+            buttons.addButton("Start", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            form.addRow(buttons)
+            dialog.resize(620, 300)
+            if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted or not path.text().strip():
+                return False
+            folder, first, last = path.text().strip(), start.value(), stop.value()
+            skip_no_holes, finders = skip.isChecked(), finder_check.isChecked()
+        if first > last:
+            first, last = last, first
+        started = session.run_all_pages(first, last, folder, skip_no_holes=skip_no_holes, finders=finders)
+        if started:
+            self.bottom_dock.show()
+            self.bottom.setCurrentWidget(self.all_pages)
+        return started
+
+    def _update_pages_progress(self):
+        run = self.session.pages_run
+        running = run is not None and run.running
+        for widget in (self.pages_label, self.pages_bar, self.pages_stop):
+            widget.setVisible(running)
+        if not running:
+            return
+        done, total, rate, left = run.progress()
+        counts = run.counts
+        self.pages_bar.setRange(0, total)
+        self.pages_bar.setValue(done)
+        self.pages_label.setText(
+            f"All pages {done} of {total} | {counts['no_holes']} no holes, {counts['failed']} failed | "
+            + (f"{1 / rate:.2f} s/page, about {max(left, 0) / 60:.1f} min left" if rate > 0 else
+               f"starting {run.elapsed():.0f} s"))
 
     def save_screenshot(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save workbench screenshot", "inspection.png", "PNG (*.png)")

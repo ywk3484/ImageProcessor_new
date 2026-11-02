@@ -284,6 +284,29 @@ def detect_review(image, parameters):
     return DetectionReview(result, binary > 0, labels, boxes, kept, rescaled)
 
 
+CD_KEYS = ("methods", "background", "seeds", "threshold", "invert", "area_min", "area_max", "pad", "n_angles",
+           "radial_step", "smooth_sigma", "fit_fraction", "pixel_size", "unit", "backend", "half_area_level",
+           "half_area_peak_pixels", "tail_area_level", "tail_window", "deblend_iterations", "deblend_tolerance",
+           "nominal_cd", "psf_fwhm", "dark_level")
+
+
+def cd_options(parameters):
+    """The ``measure_cds`` keyword arguments of the workbench's settings (Measure CD and Measure all pages)."""
+    options = {key: parameters[key] for key in CD_KEYS if key != "deblend_tolerance"}
+    options["deblend_tolerance"] = parameters.get("deblend_tolerance", 1e-3)  # measure_cds's default
+    return options
+
+
+def pitch_numbers(profile):
+    """(mean pitch over its pairs, pairs, lowest and highest placement error) of one axis' PitchProfile, in its unit;
+    NaN where there are none."""
+    pairs = int(np.sum(profile.counts))
+    mean = float(np.nansum(profile.pitch * profile.counts) / pairs) if pairs else float("nan")
+    error = profile.registration[np.isfinite(profile.registration)]
+    low, high = (float(error.min()), float(error.max())) if error.size else (float("nan"), float("nan"))
+    return mean, pairs, low, high
+
+
 def analyze_image(image, parameters, *, operation="cd", bounds=None):
     """Run public repository methods without touching GUI state."""
     from .cd import measure_cds
@@ -308,13 +331,7 @@ def analyze_image(image, parameters, *, operation="cd", bounds=None):
     else:
         if not parameters["methods"]:
             raise ValueError("Select at least one CD method.")
-        keys = ("methods", "background", "seeds", "threshold", "invert", "area_min", "area_max", "pad",
-                "n_angles", "radial_step", "smooth_sigma", "fit_fraction", "pixel_size", "unit", "backend",
-                "half_area_level", "half_area_peak_pixels", "tail_area_level", "tail_window", "deblend_iterations",
-                "deblend_tolerance", "nominal_cd", "psf_fwhm", "dark_level")
-        options = {key: parameters[key] for key in keys if key != "deblend_tolerance"}
-        options["deblend_tolerance"] = parameters.get("deblend_tolerance", 1e-3)  # measure_cds's default
-        review.cd = measure_cds(image, **options)
+        review.cd = measure_cds(image, **cd_options(parameters))
         if review.cd.meta.get("deblend_converged") is False:
             review.warnings.append("Gaussian deblending reached its iteration limit. Inspect fit residuals and statuses.")
         for name, measured in review.cd.measurements.items():

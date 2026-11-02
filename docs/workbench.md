@@ -30,10 +30,10 @@ subpx-workbench
  │ 2 Preprocess ●│ │                                                      │ │ every method's  │
  │ 3 Holes     ● │ │     the active page, raw or preprocessed (or stack)  │ │ CD and status,  │
  │ 4 CD methods ●│ │                                                      │ │ pixels, profile │
- │ 5 Pitch     ● │ ├ Holes | CD distribution | Pitch | Average hole | Log ┤ │                 │
+ │ 5 Pitch     ● │ ├ Holes | CD distr. | Pitch | Avg hole | All pages | Log ┤ │                 │
  │ [Measure CD]  │ │                                                      │ │                 │
  └───────────────┘ └──────────────────────────────────────────────────────┘ └─────────────────┘
- status | hover position | job + elapsed + Cancel | holes, mean CD, failures of every method
+ status | hover position | job + elapsed + Cancel | all pages n of N + Stop | holes, mean CD, failures
 ```
 
 - **Setup** (left) holds the steps in pipeline order: **Image** (pixel size,
@@ -52,7 +52,8 @@ subpx-workbench
 - **Pages** (the tab beside Setup) lists the file's pages, counted from 0 as in
   the batch's `pages.csv`, with thumbnails made as they scroll into view and a
   line on what was measured there ("CD 39,042 holes, most failed: Projection
-  2,048"). **Stack vertically** is here and in the View menu.
+  2,048", or "all: ..." from [Measure all pages](#measure-all-pages)). **Stack
+  vertically** and **Measure all pages...** are here.
 - The **image** shows the result chosen in the **Method** box: a CD method or
   **Previewed holes**. Running one step never hides another step's result: the
   box switches between them.
@@ -61,8 +62,8 @@ subpx-workbench
   the method's input with all contours (current one thick), the profile, the
   metrics and the definition. Click a method there to show it everywhere.
 - The **bottom tabs** hold the **Holes** table, the **CD distribution**, the
-  **Pitch** result, the **Average hole** and the **Log**. The Log never opens by
-  itself.
+  **Pitch** result, the **Average hole**, **All pages** and the **Log**. The Log
+  never opens by itself.
 - **Ctrl+1 / Ctrl+2 / Ctrl+3** show or hide Setup, the inspector and the bottom
   panel. Panel sizes, positions and the open tab are remembered. On a small
   screen (below 1300 x 800) Setup starts collapsed.
@@ -99,7 +100,8 @@ and results stay.
 | J / K, Down / Up in the table | next / previous hole in the table's order (J = next, as in vim) |
 | N / Shift+N | next / previous hole the current method failed on (wraps) |
 | Page Down / Page Up | next / previous page, while the image or the page list has focus |
-| Esc | cancel the running job |
+| Ctrl+Shift+A | Measure all pages (dialog) |
+| Esc | cancel the running job, else stop Measure all pages |
 | Ctrl+C | copy the selected table rows, or the selected hole's row (tab-separated) |
 | Space | Align view: swap the reference and the aligned page |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | show or hide Setup / Inspector / bottom panel |
@@ -326,6 +328,85 @@ are in pixels and affect indexing only. Missing intervals break cumulative
 curves. The spread in the text is across contributing pairs, not repeated-image
 precision. Irregular patterns can fail lattice indexing; the CD results stay.
 
+## Measure all pages
+
+**Measure all pages...** (Pages tab, Run menu, Ctrl+Shift+A) measures CD and
+pitch on every page of the open multipage file with the current settings. The
+dialog asks for:
+
+- the pages (from / to, counted from 0);
+- **Skip pages without holes**: each page is compared with the page on screen
+  by the batch's hole check (`cd_batch.py`, Align's mode: **centered** passes
+  below 0.8, **raw** below 0.3). Pages that fail are listed as "no holes" and not
+  measured. Show a page with holes before starting;
+- **GPU centers too**: the GPU center finders ticked in Setup > Pitch, for the
+  pitch only;
+- the results folder (default: `<file>_all_pages_<date>_<time>` beside the file;
+  a folder that already holds a `pages.csv` is refused).
+
+How it runs: one reader thread reads the pages front to back, one pass through
+the file as the batch reads. Worker processes measure them, one per GPU (every
+GPU `nvidia-smi` lists, or those in `CUDA_VISIBLE_DEVICES`), each with two pages
+at a time, so one page's CPU steps overlap the other's GPU work. Each page is
+measured with all its holes at once on the GPU, in the batch's fast mode
+(`measure_cds(summary_only=True)`: no contours, cell images or label maps). The
+CDs are the same as Measure CD gives, to the last bit, and a test pins it. The
+page's pitch then follows, with the Pitch settings and each page's default
+reference hole; the GPU finders run when ticked. On the CPU (Compute: CPU, or no
+GPU), one worker measures one page at a time.
+
+The window stays usable: pages can be shown, zoomed and inspected while the run
+goes on. Other runs, opening another file and closing wait; Setup says why. The
+status bar shows pages done, pages without holes, failures, seconds per page and
+the time left, with **Stop** (Esc). Stopping drops the pages being measured; the
+rows so far stay in `pages.csv`. A page that fails (an error, or a worker that
+stops or takes over 10 minutes) is listed as failed with the reason, and its
+worker is restarted.
+
+The **All pages** tab lists the run's pages: status, holes, and for every method
+the value chosen in **Show**: mean CD, mean CD x or y, holes measured, holes
+failed, pitch x or y, or the placement error range in x or y. The plot shows
+the chosen method's value by page as a plain line (placement: its lowest and
+highest value). Click a column header to plot that method. Click a row or a
+point to show that page. To inspect its holes, run Measure CD on it: the full
+result (contours, pixels) of one 39,000-hole page takes about 1.1 GB, so it is
+not kept for every page. The page list adds a line per page ("all: 39,042
+holes, most failed 2,048", "all: no holes", "all: failed"). **Open folder**
+opens the results:
+
+- `pages.csv`: one row per page, in page order. First the batch's columns with
+  the same values (`file, page, status, pcc_error, holes, image_intensity,
+  cell_intensity, deblend_*`, and per method `<m>_valid, <m>_cd, <m>_cd_x,
+  <m>_cd_y` in the unit). Then, per pitch method (the CD methods and
+  `gpu_<finder>`), `<m>_pitch_x, <m>_pitch_y, <m>_placement_x_min/_max,
+  <m>_placement_y_min/_max`, and finally `pitch_error, error, seconds`. Status
+  is `ok`, `no_holes` or `failed`.
+- `holes/page_NNNN.csv`: every hole of that page. `hole, x, y` in page pixels,
+  then per method `<m>_cd, <m>_cd_x, <m>_cd_y` (unit; empty where the method
+  failed) and `<m>_status`.
+- `run.json`: the file, pages, settings, hole check, GPUs, times, counts and the
+  git commit.
+
+![All pages: the run's pages with each method's mean CD, the Gaussian fit's mean CD by page, the page list's lines](images/workbench_all_pages.png)
+
+Speed on this PC (one RTX 4060 Ti, Windows), `stripe1_board1.tif`: 48 pages
+of 2048 x 1378 px, 39,042 holes on each page with holes, the ten batch methods.
+40 pages were measured and 8 had no holes (3, 11, 19, 27, 35, 43, 46, 47):
+
+| Run | Whole file | Per page, once running |
+| --- | --- | --- |
+| Measure all pages, no GPU centers | 132 s | 2.6 s |
+| Measure all pages, the 3 default GPU centers | 209 s | 4.1 s |
+| Measure CD page by page in the window | about 5.5 min for the 40 pages, plus a click each | 8.1-8.8 s |
+
+One page measured alone takes: hole check 0.17 s, CD 3.25 s, pitch 0.5 s, the
+three default GPU center finders 2.2 s more, and the hole CSV 0.5 s. Two pages
+at a time on the GPU overlap part of that. Measure CD on pages 5 and 20 gave
+every method's mean CD equal to the run's, with a difference of 0. The longest
+pause of the window during the run was 0.05 s. With more GPUs each runs its own
+worker. That has not been measured here (one GPU); if it scales like the batch,
+it is about the time above divided by the number of GPUs.
+
 ## Align
 
 Switch the header to **Align**. Setup then lists the pages of the open file
@@ -406,13 +487,15 @@ status bar; `canvas.py` the image view, its layers and the stack;
 distribution, pitch, average hole, Align view and log. Panels listen to the session's signals
 and call its methods, never each other. `names.py` and `settings.py` (method
 names, settings labels, run checks) do not import Qt. The Qt-free data layer
-stays in `subpx/_workbench_data.py`.
+stays in `subpx/_workbench_data.py`; Measure all pages (reader, worker processes,
+output files) is the Qt-free `subpx/_workbench_pages.py`, so its workers never
+load Qt.
 
 ## Validation
 
 ```powershell
 $env:QT_QPA_PLATFORM = "offscreen"
-.\.venv\Scripts\python.exe -m pytest tests/test_workbench_data.py tests/test_workbench.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_workbench_data.py tests/test_workbench_pages.py tests/test_workbench.py -q
 ```
 
 The tests use their own settings file, never your saved settings.
@@ -449,7 +532,11 @@ pyqtgraph is not installed.
 
 ## Known gaps
 
-- Opening a `cd_batch` run (its settings and page list) is planned (P3).
+- Opening a `cd_batch` run (its settings and page list) is planned (P3). An
+  earlier Measure all pages run is not reopened either: its folder holds the
+  results; the All pages tab shows the run of the open file only.
+- Measure all pages does not resume a stopped run; start it again into a new
+  folder (or for the remaining pages).
 - Progress shows the job and its elapsed time, not the stage inside a CD run:
   the library call reports no progress.
 - The analysis region is set by dragging only (no typed x0 y0 x1 y1).
