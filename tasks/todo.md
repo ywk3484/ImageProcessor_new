@@ -101,3 +101,18 @@ Pitch method box lists them next to the CD methods. Plan: ~/.claude/plans/swirli
   -0.018..+0.051 / -0.054..+0.034, Half area -0.024..+0.057 / -0.037..+0.023, Foot area -0.292..0 in x.
 - Synthetic example (truth known): GPU log-quadratic centers 0.024 px rms, radial symmetry 0.023, CD Gaussian 0.020.
 - Screenshot: artifacts/pitch_gpu_finders/pitch_gpu_logquad_placement.png. Tests: 2 data + 1 window added.
+
+# Pitch plots: plain lines, no markers or error bars (2026-11-02)
+
+User: the dots and vertical lines in the Pitch plots hide the data. The vertical lines were ±1σ error bars (single
+pair spread ~0.24 px on the 39k page) that stretched the y-axis ~15x over the per-interval means (range 8.46-8.53
+px); the dots were the measured means themselves; placement had a dashed vertical line at the reference node.
+
+- [x] Both views: a plain line through the measured values; no markers, error bars or vertical reference line;
+      a value with no measured neighbour gets a dot (a line cannot show it); spread moved to the summary text
+- [x] Tests (plot items, lone-value dot), real-page render, docs/workbench.md, commit + push
+
+## Review (2026-11-02)
+
+- Page 0 of stripe1_board1.tif, Gaussian fit: the x pitch plot now spans 8.46-8.53 px instead of 8.2-8.8. The
+  interval-to-interval wiggle (sd 0.017 px) is about what noise alone gives (0.24 px / sqrt(162 pairs) = 0.019 px).

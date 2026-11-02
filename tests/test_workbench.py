@@ -14,6 +14,7 @@ pytest.importorskip("pyqtgraph")
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtTest import QTest
+import pyqtgraph as pg
 from subpx._workbench_data import LoadedImage, analyze_image, cell_boundary
 from subpx.workbench import InspectionWindow
 from subpx.workbench.canvas import PAGE_STAGES
@@ -735,6 +736,26 @@ def test_cd_range_and_pitch_points_pick_holes(window):
     assert widget.selected in column and holes.model.rowCount() == len(column)
     widget.pitch.pick("y", 0, "interval")
     assert len(session.highlight) and "rows 0 and 1" in session.highlight_label
+    for view in (0, 1):  # both views draw the measured values as a line, no markers or error bars
+        widget.pitch.view.button(view).setChecked(True)
+        app.processEvents()
+        for plot in widget.pitch.plots.values():
+            items = plot.getPlotItem().items
+            assert not any(isinstance(item, pg.ErrorBarItem) for item in items)
+            assert all(item.angle == 0 for item in items if isinstance(item, pg.InfiniteLine))
+            assert all(item.opts["symbol"] is None for item in items if isinstance(item, pg.PlotDataItem))
+    assert "single pairs spread" in widget.pitch.summary.text()
+
+
+def test_pitch_line_shows_a_value_without_neighbours_as_a_dot():
+    from subpx.workbench.panels.pitch import _line
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    plot = pg.PlotWidget()
+    _line(plot, np.arange(6.0), np.array([1.0, 2.0, np.nan, 3.0, np.nan, np.nan]), "#ffd166")
+    line, dots = plot.getPlotItem().listDataItems()
+    assert line.opts["symbol"] is None
+    np.testing.assert_array_equal(dots.getData()[0], [3.0])  # only the lone value 3 gets a dot
 
 
 def test_pitch_adds_the_ticked_gpu_center_finders(window, tmp_path):

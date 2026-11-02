@@ -13,6 +13,15 @@ from ..widgets import hint, plot_widget
 AXIS_COLORS = {"x": "#ffd166", "y": "#b39dff"}
 
 
+def _line(plot, xs, ys, color):
+    """The measured values as a plain line; a value with no measured neighbour, which a line cannot show, as a dot."""
+    plot.plot(xs, ys, pen=color, connect="finite")
+    finite = np.isfinite(ys)
+    alone = finite & ~np.r_[False, finite[:-1]] & ~np.r_[finite[1:], False]
+    if alone.any():
+        plot.plot(xs[alone], ys[alone], pen=None, symbol="o", symbolSize=5, symbolBrush=color, symbolPen=None)
+
+
 class PitchPanel(QtWidgets.QWidget):
     def __init__(self, session, parent=None):
         super().__init__(parent)
@@ -96,20 +105,14 @@ class PitchPanel(QtWidgets.QWidget):
             if placement:
                 plot.setLabel("bottom", f"{'Column' if axis == 'x' else 'Row'} (logical node)")
                 plot.setLabel("left", f"{axis.upper()} placement error", units=unit)
-                plot.plot(nodes, profile.registration, pen=color, symbol="o", symbolSize=6, symbolBrush=color,
-                          connect="finite")
+                _line(plot, nodes.astype(float), profile.registration, color)
                 plot.addItem(pg.InfiniteLine(0, angle=0, pen="#586d84"))
-                plot.addItem(pg.InfiniteLine(nodes[profile.reference_node],
-                                             pen=pg.mkPen("#899caf", style=QtCore.Qt.PenStyle.DashLine)))
                 self._points[axis] = (nodes.astype(float), profile.registration, "node")
             else:
                 positions = (nodes[:-1] + nodes[1:]) / 2
                 plot.setLabel("bottom", f"Between {'columns' if axis == 'x' else 'rows'} (logical interval)")
                 plot.setLabel("left", f"{axis.upper()} pitch", units=unit)
-                plot.plot(positions, profile.pitch, pen=color, symbol="o", symbolSize=6, symbolBrush=color,
-                          connect="finite")
-                plot.addItem(pg.ErrorBarItem(x=positions, y=profile.pitch, top=profile.std, bottom=profile.std,
-                                             pen=pg.mkPen(color)))
+                _line(plot, positions, profile.pitch, color)
                 plot.addItem(pg.InfiniteLine(profile.nominal_pitch, angle=0,
                                              pen=pg.mkPen("#899caf", style=QtCore.Qt.PenStyle.DashLine)))
                 self._points[axis] = (positions, profile.pitch, "interval")
@@ -119,7 +122,9 @@ class PitchPanel(QtWidgets.QWidget):
             mean = float(np.nansum(profile.pitch * profile.counts) / max(pairs, 1))
             error = profile.registration[np.isfinite(profile.registration)]
             span = f", placement error {error.min():+.3g} to {error.max():+.3g} {unit}" if error.size else ""
-            parts.append(f"<b>{axis} pitch {mean:.5g} {unit}</b> ({pairs:,} pairs; design "
+            spread = profile.std[np.isfinite(profile.std)]
+            spread = f", single pairs spread ±{np.median(spread):.3g} {unit}" if spread.size else ""
+            parts.append(f"<b>{axis} pitch {mean:.5g} {unit}</b> ({pairs:,} pairs{spread}; design "
                          f"{profile.nominal_pitch:.5g} {unit}{span})")
         self.summary.setText(
             f"{method_name(pattern.method)}: " + " &nbsp; ".join(parts)

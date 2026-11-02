@@ -309,9 +309,12 @@ all six. A finder that cannot run (no CuPy) is skipped with a line in the log.
 Export writes their pitch CSVs like the CD methods' (`pitch_gpu_logquad_x.csv`).
 
 The **Pitch** tab shows, for the chosen method, the x and y pitch in plain words
-(mean, pairs, design, placement range, lattice, reference, averaging) and two
-plots: **Pitch** per interval with the spread across pairs, or **Placement
-error** per row/column. Click a point: an interval picks the holes of its pairs,
+(mean, pairs, spread of single pairs, design, placement range, lattice,
+reference, averaging) and two plots: **Pitch** per interval (the mean of its
+pairs), or **Placement error** per row/column. Both are plain lines through the
+measured values, with no markers, error bars or reference-node line, so the
+y-axis spans the data; a value with no measured neighbour is drawn as a dot,
+since a line cannot show it. Click a point: an interval picks the holes of its pairs,
 a placement point the holes of that column or row; they are shaded on the
 image, listed in the table, and the hole nearest their middle is selected. The
 **Pitch pairs** layer draws gold x pairs, purple y pairs and the reference star.
@@ -320,7 +323,7 @@ Placement error is the discrete sum of `pitch - baseline`, zero at the
 reference node. It is distinct from two-image alignment. Zero design pitches
 select the measured means; set both to compare against a design pitch. Hints
 are in pixels and affect indexing only. Missing intervals break cumulative
-curves. Error bars show the spread across contributing pairs, not repeated-image
+curves. The spread in the text is across contributing pairs, not repeated-image
 precision. Irregular patterns can fail lattice indexing; the CD results stay.
 
 ## Align
