@@ -8,11 +8,14 @@ import numpy as np
 from PyQt6 import QtCore, QtWidgets
 import pyqtgraph as pg
 
+from ..._workbench_data import GPU_CENTER_FINDERS
 from ...cd import METHOD_LABELS
 from ..names import CALIBRATED_METHODS, METHOD_GROUPS, RECIPES, method_help, method_line, method_name
 from ..settings import PREPROCESS_NAMES, STEP_TITLES, preprocess_summary, preprocess_text
 from ..widgets import BACKGROUND, Fold, dot_icon, hint
 
+# GPU center finders ticked by default in the Pitch step (the old registration finders the user named)
+DEFAULT_FINDERS = ("logquad", "edge_gradmoment", "edge_erf")
 MARKS = {"none": ("#5d6f82", "not run"), "ok": ("#9be28a", "up to date"), "changed": ("#ffce73", "changed")}
 RUNS = {"image": ("Measure CD", "cd"), "preprocess": ("Preprocess", "preprocess"), "holes": ("Preview holes", "detect"),
         "cd": ("Measure CD", "cd"), "pitch": ("Measure pitch", "pitch"), "align": ("Align", "register")}
@@ -371,7 +374,8 @@ class SetupPanel(QtWidgets.QWidget):
 
     def _build_pitch(self):
         self.pitch_source = self._combo("pitch_source", [("CD measurement", "cd"), ("Previewed holes", "detection")])
-        self.pitch_source.setToolTip("Pitch uses these centers of the active page; it never measures again")
+        self.pitch_source.setToolTip("Pitch uses these centers of the active page (and the GPU centers ticked below, "
+                                     "found again on the same holes)")
         self.pattern_layout = self._combo("pattern_layout", [("Automatic", "auto"), ("Square / rectangular", "square"),
                                                              ("Staggered", "staggered")])
         self.average_rows = self._number("average_rows", 0, 0, 1000000, special="All")
@@ -385,13 +389,26 @@ class SetupPanel(QtWidgets.QWidget):
         advanced = _form([("Stagger direction", self.stagger_axis), ("Pitch hint x (px)", self.pitch_hint_x),
                           ("Pitch hint y (px)", self.pitch_hint_y)])
         self.pitch_advanced = Fold("Advanced: indexing hints", advanced)
+        finders = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(finders)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setVerticalSpacing(2)
+        self.finder_checks = {}
+        for i, (key, word) in enumerate(GPU_CENTER_FINDERS.items()):
+            check = self._check(f"finder_{key}", word.replace("-", " ").capitalize(), checked=key in DEFAULT_FINDERS)
+            check.setToolTip(f"Measure pitch also finds the centers of the same holes with detect_centers(refine="
+                             f"'{key}') on the GPU; the Pitch method box lists them as 'GPU {word} centers' next to "
+                             "the CD methods. About 0.2-2 s each on a 39,000-hole page; needs CuPy."
+                             + (" Preview centers calls it 'Edge gradient'." if key == "edge_gradmoment" else ""))
+            self.finder_checks[key] = check
+            grid.addWidget(check, i // 2, i % 2)
         content = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(_form([("Centers", self.pitch_source), ("Lattice", self.pattern_layout),
                                 ("Average rows", self.average_rows), ("Average columns", self.average_columns),
                                 ("Design pitch x", self.nominal_x), ("Design pitch y", self.nominal_y),
-                                ("", self.reference_selected)]))
+                                ("", self.reference_selected), ("GPU centers too", finders)]))
         layout.addWidget(self.pitch_advanced)
         layout.addStretch()
         self._add_step("pitch", content)
@@ -551,6 +568,8 @@ class SetupPanel(QtWidgets.QWidget):
             for key, (x, y) in (("nominal", options.get("nominal_pitch_xy") or (0, 0)),
                                 ("pitch_hint", options.get("pitch_hint_xy") or (0, 0))):
                 values[f"{key}_x"], values[f"{key}_y"] = x, y
+        if "pitch_finders" in parameters:
+            values.update({f"finder_{key}": key in (parameters["pitch_finders"] or ()) for key in GPU_CENTER_FINDERS})
         settings = parameters.get("preprocess") or {}
         if settings:
             values["preprocess_method"] = settings.get("method")
@@ -581,6 +600,7 @@ class SetupPanel(QtWidgets.QWidget):
             nominal_cd=self.nominal_cd.value() or None, psf_fwhm=self.psf_fwhm.value() or None,
             dark_level=self.dark_level.value(), pitch_source=self.pitch_source.currentData(),
             reference_selected=self.reference_selected.isChecked(),
+            pitch_finders=tuple(key for key, check in self.finder_checks.items() if check.isChecked()),
             pitch_options=dict(layout=self.pattern_layout.currentData(), stagger_axis=self.stagger_axis.currentData(),
                                average_rows=self.average_rows.value() or None,
                                average_columns=self.average_columns.value() or None, reference_xy=None,

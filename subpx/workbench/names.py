@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 
+from .._workbench_data import GPU_CENTER_FINDERS
 from ..cd import METHOD_LABELS
 
 # The default methods of scripts/cd_batch.py (ALL_METHODS of scripts/cd_report.py); a test pins them.
@@ -29,6 +30,8 @@ METHOD_NAMES = {
     "local_half_area_min_avg": "Raw-cell half area, min level, avg peak", "local_tail_area": "Raw-cell tail area",
     "pixel_half_area": "Pixel half area", "pixel_half_area_min_avg": "Pixel half area, min level, avg peak",
     "pixel_tail_area": "Pixel tail area", "detection": "Previewed holes",
+    # Pitch only: centers of the same holes found by the GPU center finders
+    **{f"gpu_{key}": f"GPU {word} centers" for key, word in GPU_CENTER_FINDERS.items()},
 }
 # Setup lists the methods in these groups, in this order.
 METHOD_GROUPS = (
@@ -86,6 +89,8 @@ def method_name(key):
 
 def method_line(key):
     """One line on what the method measures (the library's label)."""
+    if key.startswith("gpu_") and key[4:] in GPU_CENTER_FINDERS:
+        return f"Hole centers of detect_centers(refine='{key[4:]}') on the GPU, matched to the measured holes"
     return METHOD_LABELS.get(key, "Subpixel hole centers" if key == "detection" else key)
 
 

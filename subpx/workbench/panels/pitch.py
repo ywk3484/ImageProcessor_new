@@ -123,7 +123,8 @@ class PitchPanel(QtWidgets.QWidget):
                          f"{profile.nominal_pitch:.5g} {unit}{span})")
         self.summary.setText(
             f"{method_name(pattern.method)}: " + " &nbsp; ".join(parts)
-            + f"<br>{pattern.layout} lattice, reference hole {pattern.reference_index}, "
+            + f"<br>Centers for {int(np.count_nonzero(pattern.valid)):,} of {len(pattern.valid):,} holes; "
+              f"{pattern.layout} lattice, reference hole {pattern.reference_index}, "
               f"{pattern.meta.get('average_rows')} rows / {pattern.meta.get('average_columns')} columns averaged, "
               f"{pattern.meta.get('unindexed_seeds', 0)} holes not indexed. Click a point to pick its holes.")
 

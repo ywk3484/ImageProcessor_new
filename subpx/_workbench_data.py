@@ -394,11 +394,80 @@ def half_height_width(values, offsets):
     return float(x_right - x_left)
 
 
-def analyze_patterns(review, options):
+# The GPU center finders of detect_centers (refine=...), offered for pitch beside the CD methods' own centers:
+# refine key -> display word. Their pitch results are named "gpu_<key>".
+GPU_CENTER_FINDERS = {"logquad": "log-quadratic", "weighted": "weighted", "edge_gradmoment": "edge-moment",
+                      "edge_erf": "edge-erf", "radial_symmetry": "radial-symmetry",
+                      "isophote_curvature": "isophote-curvature"}
+
+
+def gpu_center_measurements(review, finders):
+    """Centers of ``review``'s holes found by GPU center finders, as {``gpu_<finder>``: CDMethodResult}, and notes.
+
+    Each finder runs ``detect_centers(backend="gpu", refine=finder)`` on the review's image with the settings its
+    holes were found with (threshold, polarity, area limits, padding), on the segmentation input like Preview holes.
+    Each hole of ``review.seeds_xy`` takes the nearest center within half the median spacing of neighbouring holes;
+    a center goes only to its nearest hole. Holes without one are invalid (status ``no_center``). A finder that fails
+    gets a note and no entry; the others still run.
+    """
+    from .centers import detect_centers
+
+    seeds = np.asarray(review.seeds_xy, dtype=np.float64).reshape(-1, 2)
+    found_all, notes = {}, []
+    if not len(finders):
+        return found_all, notes
+    tolerance = np.inf
+    if len(seeds) >= 2:
+        from scipy.spatial import cKDTree
+
+        tree = cKDTree(seeds)
+        tolerance = 0.5 * float(np.median(tree.query(seeds, k=2)[0][:, 1]))
+    parameters = review.parameters
+    segmentation, rescaled = segmentation_image(review.image, parameters["threshold"])
+    for finder in finders:
+        name, label = f"gpu_{finder}", f"GPU {GPU_CENTER_FINDERS.get(finder, finder)} centers"
+        started = perf_counter()
+        try:
+            if finder not in GPU_CENTER_FINDERS:
+                raise ValueError(f"unknown finder; use one of {', '.join(GPU_CENTER_FINDERS)}")
+            points = detect_centers(segmentation, backend="gpu", threshold=parameters["threshold"],
+                                    invert=parameters["invert"], area_min=parameters["area_min"],
+                                    area_max=parameters["area_max"], pad=parameters["pad"], refine=finder).centers_xy
+        except Exception as exc:  # no CuPy, a finder that cannot run here: the others still run
+            notes.append(f"{label} skipped: {exc}")
+            continue
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+        points = points[np.isfinite(points).all(axis=1)]
+        centers = np.full(seeds.shape, np.nan)
+        distance = np.full(len(seeds), np.nan)
+        if len(points) and len(seeds):
+            if len(seeds) >= 2:
+                d, j = tree.query(points, distance_upper_bound=tolerance)
+            else:
+                d, j = np.hypot(*(points - seeds[0]).T), np.zeros(len(points), dtype=np.int64)
+            near = np.isfinite(d)
+            d, j, points = d[near], j[near], points[near]
+            order = np.lexsort((d, j))  # by hole, nearest first
+            holes, first = np.unique(j[order], return_index=True)
+            centers[holes], distance[holes] = points[order[first]], d[order[first]]
+        valid = np.isfinite(centers).all(axis=1)
+        found_all[name] = CDMethodResult(name, centers, np.empty((len(seeds), 0, 2)), valid,
+                                         np.where(valid, "ok", "no_center"), {"match_distance_px": distance})
+        notes.append(f"{label}: {int(valid.sum()):,} of {len(seeds):,} holes have a center within "
+                     f"{tolerance:.2f} px ({perf_counter() - started:.2f} s"
+                     + (", on the image rescaled to 8 bits)" if rescaled else ")"))
+    return found_all, notes
+
+
+def analyze_patterns(review, options, extra=None):
+    """Pitch of every method of ``review``; ``extra`` adds more centers of the same holes (e.g. GPU finders)."""
     from .pattern import analyze_pitch
 
-    source = review.cd or CDSummary(review.seeds_xy, review.measurements,
-                                   review.parameters["pixel_size"], review.parameters["unit"])
+    source = review.cd
+    if source is None or extra:
+        source = CDSummary(review.seeds_xy, {**review.measurements, **(extra or {})},
+                           review.cd.pixel_size if review.cd is not None else review.parameters["pixel_size"],
+                           review.cd.unit if review.cd is not None else review.parameters["unit"])
     return analyze_pitch(source, **options)
 
 

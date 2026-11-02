@@ -79,54 +79,25 @@ testing interactively on sample images.
   symmetry, isophote) fail, the same at 6aca236 without any pending edits: not from the workbench.
 - [ ] P3 later: open a cd_batch run (run.json settings, pages.csv page list, batch vs workbench mean)
 
-# Preprocessing from the ACTIS proposal: noise reduction and resolution "Do"s (2026-11-01)
+# Pitch / placement error from the old GPU center finders, beside the CD methods (2026-11-02)
 
-Goal: try the proposal's recommended preprocessing on real pages in the workbench and measure CD / pitch with and
-without it. Source: docs/actis_preprocessing_proposal.html, sections "Noise reduction" and "Resolution improvement".
+Goal: the user doubts the placement error from the CD methods' centers; the GPU center finders (March 2026) gave
+registration they trusted. Measure pitch also finds centers with the ticked GPU finders on the same holes, so the
+Pitch method box lists them next to the CD methods. Plan: ~/.claude/plans/swirling-stirring-sketch.md.
 
-Scope. Recommended there: fixed light smoothing (Gaussian 0.5-0.7 px) and the mean-hole method ("my order"), the
-super-resolved average hole ("Do"). Borderline: Wiener filter tuned by Noise2Self (all "Yes" in the table, not in the
-order): built (user, 2026-11-01); blur matching ("Do, if Step 0 shows blur differences matter"): not now. Not built (proposal:
-skip / avoid / later): deconvolution (the only sharpening filter, "Skip for CD"), BM3D / NLM, AI denoisers, AI
-super-resolution, merging datasets.
+- [x] `_workbench_data`: `GPU_CENTER_FINDERS`, `gpu_center_measurements` (detect on the GPU, nearest hole within half
+      the spacing), `analyze_patterns(..., extra)`
+- [x] Settings key `pitch_finders` (stale banner); Pitch step checkboxes (log-quadratic, edge moment, edge erf on)
+- [x] Session pitch run adds the finders and logs one line each; names; Pitch summary "centers for N of M holes"
+- [x] Tests (data + window), full suite, real page timing + screenshot, docs/workbench.md, commit + push
 
-Probe, page 0 of artifacts/cd_test/data/stripe1_board1.tif (39,042 holes, spacing 8.2 px), CPU: Gaussian 0.09 s;
-mean-hole boxes + PCA 0.3 s, number of components by Noise2Self 3.4 s (best 15 of 60); hole finding 2.8 s. Noise
-left after 15 components ~7.3 grey levels; neighbouring pixels' noise nearly independent (lag-1 correlation -0.05),
-which Noise2Self assumes. No GPU needed for one page.
+## Review (2026-11-02)
 
-- [x] Library `subpx/preprocess.py` (NumPy only, any 2-D image, dataclass results with meta): `smooth_gaussian`;
-      `denoise_wiener` (Noise2Self on the filter with each pixel's own weight moved to its 8 neighbours, exact in
-      Fourier space); `denoise_mean_hole` (K by leave-one-pixel-out); `average_hole` (each hole's brightness fitted
-      against the average smoothed by one bin). `PreprocessResult`, `AverageHoleResult` in types.py; exported from
-      `subpx`. 9 tests in tests/test_preprocess.py
-- [x] Workbench
-  - [x] Setup step "2 Preprocess": Gaussian / Wiener / Mean hole with their settings (0 = auto), a help line with the
-        synthetic result, a line on what the run found. No "None" entry: the Preprocessed switch is the on/off
-  - [x] "Preprocessed" switch (P, View menu). PageResults holds raw and preprocessed results and the preprocessed
-        page; runs measure the version on screen (a missing or out-of-date preprocessed page is made first, same
-        job); results store the Preprocess settings (None for raw), so only the preprocessed version goes stale.
-        Turning it on, or showing another page while it is on, preprocesses that page; flipping keeps the contrast
-  - [x] Show > "Removed by preprocessing": raw - preprocessed, blue-black-red, levels symmetric about 0
-  - [x] Other version: summary line, CD distribution outline with mean and sd, inspector column "CD raw" / "CD pre"
-  - [x] Bottom tab "Average hole": the current method's centres, raw and preprocessed, x / y profiles, width at half
-        height
-  - [x] Hover shows both values; export writes preprocessed_image.npy, preprocess_meta.npz and the settings in
-        source.json; the stack's other pages and Align stay raw (Help text, image hint)
-  - [x] Tests (2 workbench, 2 data), timing on page 0, screenshots, docs/preprocess.md, docs/workbench.md,
-        scripts/preprocess_check.py
-
-## Review (2026-11-01)
-
-- Tests: 56 pass (workbench 33, data 14, preprocess 9). Full suite: 517 pass; the same 9 GPU tests fail as before.
-- Page 0, CPU, whole page: Gaussian 0.1-0.2 s; Wiener 2.1-2.3 s (noise 7.3, auto); mean hole auto 5.0-5.4 s
-  (K = 2, includes finding the holes); K = 32 2.2 s; average hole of 1,610 holes 0.4 s.
-- Synthetic truth (scripts/preprocess_check.py, half area, 3 layouts), a +5 % step measured: raw +4.7 to +4.9 %,
-  Gaussian 0.6 +3.8 to +4.4 %, Wiener auto +4.2 to +4.9 % (but hole-to-hole slope 0.50-0.54 vs raw 0.85-0.88),
-  mean hole auto K +1.0 to +2.2 %, K = 32 +4.3 to +4.6 %.
-- Real region (1,610 holes): the automatic settings cut the CD sd 1.5-7 times, but each hole's CD follows its raw CD
-  less (r 0.85 down to 0.08); K = 32 keeps r 0.94 (half area) with an sd close to raw. Without truth, only repeated
-  exposures of the same holes can tell noise from real differences.
-- Found while testing on the real page: the average hole's width at half height took the profile ends (the
-  neighbours' peaks) as its base, giving 0.42 px; it now uses the profile minimum (4.28 px), with a test. The mean
-  hole on a non-hole page (page 3) still runs and picks K at its limit; the summary now says so.
+- Page 0 of stripe1_board1.tif (39,042 holes, 8.5 px apart, GPU), Measure pitch: 0.58 s without finders, 2.83 s
+  with the 3 defaults, 8.38 s with all 6. Holes with a center / x and y placement range (px): log-quadratic 39,042,
+  -0.041..+0.071 / -0.047..+0.035; weighted 39,042; radial symmetry 39,042, -0.046..+0.061 / -0.054..+0.020;
+  isophote curvature 39,042, -0.134..+0.115 / -0.209..+0.082; edge moment 19,769 and edge erf 19 (made for large
+  features; their placement, up to 3.5 px, means nothing here). CD methods for comparison: Gaussian fit
+  -0.018..+0.051 / -0.054..+0.034, Half area -0.024..+0.057 / -0.037..+0.023, Foot area -0.292..0 in x.
+- Synthetic example (truth known): GPU log-quadratic centers 0.024 px rms, radial symmetry 0.023, CD Gaussian 0.020.
+- Screenshot: artifacts/pitch_gpu_finders/pitch_gpu_logquad_placement.png. Tests: 2 data + 1 window added.

@@ -7,7 +7,8 @@ import pytest
 
 from subpx._workbench_data import (
     analyze_image, analyze_patterns, cell_boundary, crop_image, export_review,
-    feature_input, feature_origin, grayscale, load_image, load_pages, projection_diagnostic, radial_diagnostic, register_images,
+    feature_input, feature_origin, gpu_center_measurements, grayscale, load_image, load_pages, projection_diagnostic,
+    radial_diagnostic, register_images,
 )
 
 
@@ -253,3 +254,64 @@ def test_preprocess_page_finds_the_mean_hole_centres_with_the_holes_settings():
         "noise_setting"] == "auto"
     with pytest.raises(ValueError):
         preprocess_page(image, dict(holes, preprocess=dict(method="bm3d")))
+
+
+def test_gpu_finder_centers_go_to_their_nearest_hole(spots, monkeypatch):
+    """Matching only, no GPU: each hole takes its nearest center within half the hole spacing, once."""
+    review = analyze_image(spots, parameters(), operation="detect")
+    seeds = review.seeds_xy
+    found = seeds[:-3] + [0.1, -0.2]  # the last 3 holes get no center
+    found = np.vstack([found, seeds[0] + [0.6, 0.0],  # a farther second center of hole 0: not taken
+                       seeds[0] - [8.5, 8.5],  # 12 px off its nearest hole (spacing 16): beyond 8 px, not taken
+                       [np.nan, np.nan]])
+
+    class Found:
+        centers_xy = found
+
+    calls = []
+
+    def detect(image, **kwargs):
+        calls.append(kwargs)
+        if kwargs["refine"] == "edge_erf":
+            raise RuntimeError("CuPy is required")
+        return Found()
+
+    monkeypatch.setattr("subpx.centers.detect_centers", detect)
+    extra, notes = gpu_center_measurements(review, ("logquad", "edge_erf", "nonsense"))
+    assert set(extra) == {"gpu_logquad"}
+    assert calls[0]["backend"] == "gpu" and calls[0]["area_max"] == 200 and calls[0]["pad"] == 5
+    measured = extra["gpu_logquad"]
+    np.testing.assert_allclose(measured.centers_xy[:-3], seeds[:-3] + [0.1, -0.2])
+    assert measured.valid.sum() == len(seeds) - 3 and (measured.status[-3:] == "no_center").all()
+    assert np.isnan(measured.centers_xy[-3:]).all()
+    assert notes[0].startswith(f"GPU log-quadratic centers: {len(seeds) - 3:,} of {len(seeds):,} holes")
+    assert "within 8.00 px" in notes[0] and "rescaled to 8 bits" in notes[0]
+    assert notes[1] == "GPU edge-erf centers skipped: CuPy is required"
+    assert notes[2].startswith("GPU nonsense centers skipped: unknown finder")
+    patterns = analyze_patterns(review, dict(layout="square"), extra)
+    assert set(patterns) == {"detection", "gpu_logquad"}
+    np.testing.assert_array_equal(patterns["gpu_logquad"].indices_rc, patterns["detection"].indices_rc)
+    assert gpu_center_measurements(review, ()) == ({}, [])
+
+
+def test_gpu_center_finders_on_the_example_page():
+    """The old GPU finders on the bundled synthetic page, against its true centers."""
+    from subpx.backends import is_gpu_available
+
+    if not is_gpu_available():
+        pytest.skip("needs CuPy and a GPU")
+    from scipy.spatial import cKDTree
+
+    folder = "examples/data/synthetic_ch/"
+    image = load_image(folder + "contact_holes.tif").image
+    truth = np.load(folder + "ground_truth.npz")["centers_xy"]
+    review = analyze_image(image, parameters(methods=("halfmax",), pad=3, pixel_size=1.0, unit="px"), operation="cd")
+    extra, notes = gpu_center_measurements(review, ("logquad", "edge_erf"))
+    measured = extra["gpu_logquad"]
+    assert measured.valid.all() and len(measured.valid) == len(truth) == 2805
+    error = cKDTree(truth).query(measured.centers_xy)[0]
+    assert np.sqrt(np.mean(error**2)) < 0.05  # 0.024 px measured
+    assert "gpu_edge_erf" in extra and len(notes) == 2  # finds few holes this small; never an exception
+    patterns = analyze_patterns(review, dict(layout="staggered"), extra)
+    np.testing.assert_array_equal(patterns["gpu_logquad"].indices_rc, patterns["halfmax"].indices_rc)
+    np.testing.assert_allclose(np.nanmean(patterns["gpu_logquad"].profiles["x"].pitch), 8.0, atol=0.01)

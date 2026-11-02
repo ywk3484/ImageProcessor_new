@@ -163,3 +163,8 @@
   buys on the user's own numbers and against their existing methods (here: no per-hole gain while each hole's
   brightness is unknown, 2x once it is known), lead with that result and the condition it depends on, and leave
   out analogies from other fields.
+- **"Registration" means pattern placement from pitch here, not image alignment; ask when a word names two things.**
+  Asked to add the old GPU "registration methods" to the workbench, I planned the Align view's image-to-image shift
+  (`registration.py`); the user meant the Pitch panel's placement error and the GPU center finders behind it. I had
+  even noted both meanings and picked one. When a term means two things in the repo, ask which one first, naming
+  both in the user's words (here: "shift between two pages" vs "hole placement error from the pitch").

@@ -292,6 +292,22 @@ screen; it never measures again ("Measure CD first" otherwise). Averaging,
 lattice, design pitch and a reference at the selected hole are in the step;
 **Advanced** holds the stagger direction and pitch hints.
 
+**GPU centers too** adds the older GPU center finders of `detect_centers`, side
+by side with the result's own methods: log-quadratic, weighted, edge moment
+(Preview centers calls it "Edge gradient"), edge erf, radial symmetry and
+isophote curvature. Log-quadratic, edge moment and edge erf are ticked by
+default. Each ticked finder runs on the GPU on the same page and with the same
+hole settings. Each hole then takes the nearest finder center within half the
+median hole spacing; a center goes only to its nearest hole. The Pitch tab's
+method box lists the results as "GPU ... centers", on the same lattice and
+reference hole as the CD methods, so clicked points pick the same holes. The
+log and the summary say how many holes got a center. The edge finders were
+made for large features: on the 39,042-hole test page (holes 8.5 px apart),
+edge moment gave 19,769 holes a center and edge erf 19. Time on that page:
+Measure pitch 0.6 s without finders, 2.8 s with the three defaults, 8.4 s with
+all six. A finder that cannot run (no CuPy) is skipped with a line in the log.
+Export writes their pitch CSVs like the CD methods' (`pitch_gpu_logquad_x.csv`).
+
 The **Pitch** tab shows, for the chosen method, the x and y pitch in plain words
 (mean, pairs, design, placement range, lattice, reference, averaging) and two
 plots: **Pitch** per interval with the spread across pairs, or **Placement

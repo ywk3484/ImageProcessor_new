@@ -737,6 +737,47 @@ def test_cd_range_and_pitch_points_pick_holes(window):
     assert len(session.highlight) and "rows 0 and 1" in session.highlight_label
 
 
+def test_pitch_adds_the_ticked_gpu_center_finders(window, tmp_path):
+    from subpx.backends import is_gpu_available
+
+    widget, app = window
+    setup, session = widget.setup, widget.session
+    ticked = [key for key, check in setup.finder_checks.items() if check.isChecked()]
+    assert ticked == ["logquad", "edge_gradmoment", "edge_erf"]  # the defaults
+    for key, check in setup.finder_checks.items():
+        check.setChecked(key == "logquad")
+    run(widget, app, "cd")
+    open_step(widget, "pitch")
+    run(widget, app, "pitch")
+    pitch = session.pitch_review
+    assert pitch.parameters["pitch_finders"] == ("logquad",)
+    assert pitch.cd is session.page_results.cd.cd  # the same holes; the CD is not measured again
+    log = widget.log.toPlainText()
+    if not is_gpu_available():
+        assert "GPU log-quadratic centers skipped" in log and "gpu_logquad" not in pitch.patterns
+        return
+    holes = len(pitch.seeds_xy)
+    assert f"GPU log-quadratic centers: {holes:,} of {holes:,} holes" in log
+    combo = widget.pitch.method
+    combo.setCurrentIndex(combo.findData("gpu_logquad"))
+    assert combo.currentText() == "GPU log-quadratic centers"
+    assert f"Centers for {holes:,} of {holes:,} holes" in widget.pitch.summary.text()
+    pattern = pitch.patterns["gpu_logquad"]
+    np.testing.assert_array_equal(pattern.indices_rc, pitch.patterns[session.method].indices_rc)
+    np.testing.assert_allclose(pattern.profiles["x"].pitch, 16, atol=0.05)  # spots 16 px apart
+    widget.pitch.pick("x", 1, "node")  # a GPU finder's point picks the same holes as the CD methods' would
+    assert set(session.highlight) == set(np.flatnonzero(pattern.indices_rc[:, 1] == 1))
+    setup.finder_checks["edge_erf"].setChecked(True)
+    assert widget.stale_banner.isVisible() and "GPU centers" in widget.stale_label.text()
+    values = widget._values()
+    assert values["finder_logquad"] and values["finder_edge_erf"] and not values["finder_weighted"]
+    widget.revert_button.click()
+    assert not setup.finder_checks["edge_erf"].isChecked() and not widget.stale_banner.isVisible()
+    widget.export_results(folder=str(tmp_path / "out"))
+    wait_for_job(widget, app)
+    assert (tmp_path / "out" / "pitch_gpu_logquad_x.csv").is_file()
+
+
 def test_stale_banner_reverts_and_reruns(window):
     widget, app = window
     run(widget, app, "detect")

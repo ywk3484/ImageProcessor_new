@@ -23,7 +23,8 @@ from PyQt6 import QtCore
 
 from .._workbench_data import (
     HOLE_CHECK_MAX_ERROR, AnalysisReview, LoadedImage, PageReader, Preprocessed, analyze_image, analyze_patterns,
-    array_bytes, demo_image, export_review, grayscale, page_preview, preprocess_page, register_images,
+    array_bytes, demo_image, export_review, gpu_center_measurements, grayscale, page_preview, preprocess_page,
+    register_images,
 )
 from .jobs import JobRunner
 from .names import method_name, plain_error
@@ -512,12 +513,16 @@ class Session(QtCore.QObject):
             if parameters.get("reference_selected") and shown is not None and self.selected is not None:
                 options["reference_xy"] = (shown.seeds_xy[self.selected] + shown.origin_xy - source.origin_xy).tolist()
             pitch_keys = {key: parameters.get(key) for key in RESULT_KEYS["pitch"]}
+            finders = tuple(parameters.get("pitch_finders") or ())
 
             def calculate():
                 started = perf_counter()
-                patterns = analyze_patterns(source, options)
+                # the GPU center finders on the same holes, beside the result's own centers
+                extra, notes = gpu_center_measurements(source, finders)
+                patterns = analyze_patterns(source, options, extra)
                 return None, replace(source, patterns=patterns, seconds=perf_counter() - started,
-                                     parameters=dict(source.parameters, operation="pitch", **pitch_keys))
+                                     parameters=dict(source.parameters, operation="pitch", **pitch_keys),
+                                     notes=list(source.notes) + notes)
         else:
             def calculate():
                 made = preprocess_page(image, setup) if remake else None
@@ -573,6 +578,9 @@ class Session(QtCore.QObject):
             for text in review.warnings:
                 self.log.emit("Warning: " + text)
             for text in review.notes:
+                self.log.emit(text)
+        else:  # the pitch's own notes (GPU center finders), after its source's
+            for text in review.notes[len(source.notes):]:
                 self.log.emit(text)
         self._mark(page)
         holes = len(review.seeds_xy)

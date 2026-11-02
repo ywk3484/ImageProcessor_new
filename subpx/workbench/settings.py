@@ -17,7 +17,7 @@ STEP_KEYS = {
     "cd": ("methods", "background", "n_angles", "radial_step", "smooth_sigma", "fit_fraction", "half_area_level",
            "half_area_peak_pixels", "tail_area_level", "tail_window", "deblend_iterations", "deblend_tolerance",
            "nominal_cd", "psf_fwhm", "dark_level"),
-    "pitch": ("pitch_source", "reference_selected", "pitch_options"),
+    "pitch": ("pitch_source", "reference_selected", "pitch_options", "pitch_finders"),
 }
 # The settings each kind of result was made with (pitch also depends on the result it was made from).
 # "preprocess" is None for results of the raw page and the Preprocess settings for the preprocessed page.
@@ -41,13 +41,14 @@ LABELS = {
     "nominal_cd": "nominal CD", "psf_fwhm": "PSF FWHM", "dark_level": "dark level", "pitch_source": "pitch centers",
     "reference_selected": "reference at selected hole", "layout": "lattice", "stagger_axis": "stagger direction",
     "average_rows": "average rows", "average_columns": "average columns", "nominal_pitch_xy": "design pitch",
-    "pitch_hint_xy": "pitch hints", "preprocess": "preprocessing",
+    "pitch_hint_xy": "pitch hints", "preprocess": "preprocessing", "pitch_finders": "GPU centers",
 }
 VALUE_TEXT = {"otsu": "Otsu", "triangle": "Triangle", "threshold": "separate", "peaks": "touching", "auto": "Auto",
               "gpu": "GPU", "cpu": "CPU", "model": "neighbour model", "border": "cell border", "cd": "CD",
               "detection": "previewed holes", "square": "square", "staggered": "staggered", "row": "rows",
               "column": "columns", "logquad": "log fit", "weighted": "weighted", "edge_gradmoment": "edge gradient",
-              "none": "none"}
+              "none": "none", "edge_erf": "edge erf", "radial_symmetry": "radial symmetry",
+              "isophote_curvature": "isophote curvature"}
 
 
 def _text(value):
