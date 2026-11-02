@@ -138,3 +138,13 @@ pitch along each line. Raw-cell methods (no deblend) were not affected.
   hole by about -0.01 px in the model methods (cause not isolated).
 - Not covered: seeds='peaks' (no area limits) still puts seeds on lines; merged holes in threshold mode are no
   longer rescued (the preview skips them too).
+
+# Explainer: preprocessing in the workbench (2026-11-02)
+
+User asked for an HTML file explaining exactly how preprocessing works in the workbench, with illustrations.
+
+- [x] `docs/workbench_preprocessing.html`: the two page versions and the switch, what a run does, what makes the
+      preprocessed page out of date, each method on the pixels, side-by-side cost to CD, the comparison tools, fine print
+- [x] Every picture is real output: the workbench's `preprocess_page` on the `scripts/preprocess_check.py` page
+      (square, 2,709 holes); CD numbers from `preprocess_check.py --layout square --methods half_area`, re-run today
+      (same as docs/preprocess.md). Checked at desktop light/dark and 400 px phone width.
