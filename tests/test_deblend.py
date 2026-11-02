@@ -86,6 +86,29 @@ def test_missing_and_spurious_seeds_are_revised():
     assert abs(values.mean() - FWHM) < 0.05
 
 
+def test_no_holes_are_added_on_a_line_space_area_beside_the_holes():
+    # A page with holes (left) and bright lines (right): the lines are components above area_max, so the
+    # preview skips them; the residual re-check must not turn the bright spots along them into holes.
+    image, centers = lattice(2.67, snr=20, shape=(120, 240))
+    centers = centers[centers[:, 0] < 120]
+    sigma = FWHM / (2 * np.sqrt(2 * np.log(2)))
+    y, x = np.indices(image.shape, dtype=float)
+    image = np.full(image.shape, BACKGROUND)
+    for cx, cy in centers:
+        image += AMPLITUDE * np.exp(-0.5 * ((x - cx) ** 2 + (y - cy) ** 2) / sigma**2)
+    for line_x in np.arange(140, 230, 2.67 * FWHM):
+        image += AMPLITUDE * np.exp(-0.5 * ((x - line_x) / sigma) ** 2) * ((y > 10) & (y < 110))
+    image += np.random.default_rng(7).normal(0, AMPLITUDE / 20, image.shape)
+    image = np.clip(np.rint(image), 0, 255).astype(np.uint8)
+    preview = detect_centers(image, backend="cpu", threshold="otsu", area_max=60)
+    result = measure_cds(image, methods=("gaussian",), threshold="otsu", area_max=60)
+    assert result.meta["seeds_added_from_residual"] == 0
+    assert len(result.seeds_xy) == len(preview.centers_xy) == len(centers)
+    assert result.meta["deblend_converged"]
+    values, valid, inner = interior_cd(result, centers, "gaussian")
+    assert valid == inner and abs(values.mean() - FWHM) < 0.05
+
+
 def test_known_background_level_and_dark_holes():
     image, centers = lattice(2.0)
     dark = 100 - image

@@ -381,7 +381,11 @@ Gaussian per hole and alternates:
    `--background-level` if it is known) or `fixed`.
 3. After convergence, drop seeds whose amplitude is below 30 % of the median
    (noise maxima) and add maxima left in the residual above 50 % (holes that
-   thresholding merged), rebuild the cells and repeat (at most twice).
+   thresholding missed), rebuild the cells and repeat (at most twice). No hole
+   is added on a component above `area_max`: on a page with a line/space area
+   beside the holes, the lines are such components, and the CD holes stay the
+   ones the area limits select (holes merged into one oversized component are
+   skipped too; `--seeds peaks` separates touching holes).
 
 Every method then measures the **cleaned** cell: background map and all
 neighbouring models removed. `gaussian` reports the half-maximum ellipse of

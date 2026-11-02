@@ -433,6 +433,7 @@ def _measure_cds(
     rescaled = False
     components_before_filter = 0
     pitch = float("nan")
+    oversized = None
     if seeds == "threshold":
         # Preserve the diagnostic's uint8 segmentation exactly; OpenCV's triangle
         # threshold requires uint8, whereas Otsu also supports uint16.
@@ -448,6 +449,11 @@ def _measure_cds(
         components_before_filter = comp.num_labels - 1
         x, y, w, h, area = (np.asarray(comp.stats[1:comp.num_labels], dtype=np.int64).reshape(-1, 5).T)
         keep = (area >= area_min) & (area <= area_max)
+        # Components above the area limit are not holes (e.g. the lines of a line/space area beside the
+        # holes): the residual re-check below must not add holes on them.
+        oversized = np.zeros(comp.num_labels, bool)
+        oversized[1:][area > area_max] = True
+        oversized = oversized[component_labels] if oversized.any() else None
         inside = ~((x <= 0) | (y <= 0) | (x + w >= width) | (y + h >= height))
         # Border mode drops edge holes entirely; model mode still models
         # them so their tails are subtracted from interior neighbours.
@@ -582,7 +588,8 @@ def _measure_cds(
                 break
             # One missed or spurious hole corrupts its neighbours' fits; drop
             # insignificant seeds, add holes left in the residual, and refit.
-            drop, new = revise_seeds(signal_image, state, all_seeds, pitch, xp=_array_module(backend))
+            drop, new = revise_seeds(signal_image, state, all_seeds, pitch, xp=_array_module(backend),
+                                     exclude=oversized)
             if not drop.any() and not len(new):
                 if state.converged or state.iterations >= int(deblend_iterations):
                     break

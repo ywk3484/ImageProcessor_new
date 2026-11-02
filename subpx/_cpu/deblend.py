@@ -524,7 +524,7 @@ def deblend(
 
 def revise_seeds(
     signal: np.ndarray, state: DeblendState, seeds_xy: np.ndarray, pitch: float, *,
-    drop_fraction: float = 0.3, add_fraction: float = 0.5, xp=np,
+    drop_fraction: float = 0.3, add_fraction: float = 0.5, xp=np, exclude: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Seeds to drop and holes to add after one deblending pass.
 
@@ -532,9 +532,11 @@ def revise_seeds(
     of the median (noise maxima). Added: maxima of the smoothed residual
     ``signal - background - models`` above ``add_fraction`` of the median
     amplitude and more than half a pitch from every kept seed (holes that
-    thresholding merged or missed). Returns (drop mask, new seeds_xy). With
-    ``xp`` CuPy the residual is smoothed on the GPU (the same filters; the
-    smoothed values agree to rounding).
+    thresholding missed), except on the True pixels of ``exclude`` (a host
+    boolean image: features that are not holes, e.g. the lines of a
+    line/space area). Returns (drop mask, new seeds_xy). With ``xp`` CuPy the
+    residual is smoothed on the GPU (the same filters; the smoothed values
+    agree to rounding).
     """
     from scipy.spatial import cKDTree
 
@@ -555,6 +557,9 @@ def revise_seeds(
     radius = max(1, int(np.floor(0.5 * pitch)))
     peaks = (smooth == maximum_filter(smooth, size=2 * radius + 1, mode="nearest")) & (smooth > add_fraction * reference)
     ys, xs = (a.get() if xp is not np else a for a in xp.nonzero(peaks))
+    if exclude is not None:
+        free = ~np.asarray(exclude, bool)[ys, xs]
+        ys, xs = ys[free], xs[free]
     new = np.column_stack((xs, ys)).astype(float)
     kept = np.asarray(seeds_xy, float)[~drop]
     if len(new) and len(kept):

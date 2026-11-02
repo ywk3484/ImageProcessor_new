@@ -116,3 +116,25 @@ px); the dots were the measured means themselves; placement had a dashed vertica
 
 - Page 0 of stripe1_board1.tif, Gaussian fit: the x pitch plot now spans 8.46-8.53 px instead of 8.2-8.8. The
   interval-to-interval wiggle (sd 0.017 px) is about what noise alone gives (0.24 px / sqrt(162 pairs) = 0.019 px).
+
+# CD on pages with a line/space area beside the holes (2026-11-02)
+
+User: on real pages with L/S and C/H areas, Preview holes picks the holes only and pitch works, but CD fails.
+Cause (measured): the neighbour-model re-check adds a hole at every residual maximum, and the lines (components
+above area_max, skipped by the preview) are left in the residual as unmodelled light, so it put a "hole" every
+pitch along each line. Raw-cell methods (no deblend) were not affected.
+
+- [x] revise_seeds(exclude=...): no hole added on components above area_max (threshold seeds); holes thresholding
+      missed (no component, or below area_min) are still added
+- [x] Regression test (holes + lines page: CD holes = previewed holes, none added, fit converges); docs step 3
+
+## Review (2026-11-02)
+
+- Synthetic 2048 x 1378 page, 14,076 holes left, vertical lines right, GPU, batch methods: before 27,286 holes
+  reported (13,800 on the lines), deblend 30 rounds, not converged, 5.9 s; after 13,974 (the bottom row touches the
+  border), 0 added, converged in 7 rounds, 0.7 s.
+- Same holes with vs without the lines (400 x 600 page): CD change 0 except the hole column next to the lines,
+  -0.05 px (1 %) for the half-area family / local_half_area, -0.02 local_projection; horizontal lines also shift every
+  hole by about -0.01 px in the model methods (cause not isolated).
+- Not covered: seeds='peaks' (no area limits) still puts seeds on lines; merged holes in threshold mode are no
+  longer rescued (the preview skips them too).
