@@ -1,31 +1,52 @@
 Finished tasks up to 2026-10-26 (both parts of the diagnostic) are in `tasks/archive/todo-2026-10.md`;
 from November 2026 in `tasks/archive/todo-2026-11.md`.
 
-# Pitch signature report, round 2: clearer graphs, rarer shifts, small ellipses (2026-11-03)
+# Dense arrays: one learned hole picture, all holes fitted together (2026-11-04, plan awaiting approval)
 
-User (on the round-1 report): truth and measured cannot be told apart and the 1 nm step cannot be seen (large
-pitches just zig-zag: noise too large or shifts too often; no "shift here" marker wanted); ellipses are for small,
-dense patterns, so add smaller circles and ellipses; switching methods needs scrolling to a table and back.
-Plan: ~/.claude/plans/sprightly-seeking-hummingbird.md (approved).
+User: on the small dense pages of the pitch signature report no method shows the 1 nm row step within 8 columns.
+Develop a method stable enough for accurate pitch variation that is also used for CD; judge pitch first, then CD.
 
-- [x] Pages: moved rows ~1 um but >= 5 rows apart (`--min-rows-apart`); placement 0.2 nm, CD 0.5 nm (1 sd);
-      5 new small / dense circle and ellipse pages (13 in all)
-- [x] Graphs: stacked panels (true centers grey / picked method blue / compare method blue), no planted line,
-      x axis in um
-- [x] Explorer: sticky method list beside the graph (click, up/down keys), compare list, pick kept across pages
-- [x] Tests, full GPU run, browser check (no scrolling while switching, dark theme, 400 px)
-- [x] Docs, lessons, review here, commit + push
+Prototype (scratch code, copy in the git-ignored `artifacts/learned_hole_prototype/`, README there). Every hole is
+the same small picture times its own brightness, at its own position, on its own local level, and all holes are
+fitted together, so a neighbour's light is not read as a shift. The picture is learned from the page, from how the
+holes differ in brightness (no blur, CD or pitch given; lattice and noise come from the image). A simulated copy of
+the page (fitted holes + the page's own leftover noise) shows what the noise does to the learned picture; that is
+subtracted.
 
-Review: true centers now show the step with 1 column on all 13 pages (0.28 nm curve noise). Best CD method: 4 columns
-on 7 pages, 8 on 3, 16 on 2, 32 on the 50 nm circles; Gaussian fit on 12 of 13 (edge area on 300 nm squares). Best
-GPU finder: as few columns on 3 pages, more on 10 (8-64), never fewer. Dense pages: Gaussian center error 30-32 %
-above the per-hole limit and the step read 9-19 % too large (template 18-30 %). Template prototype: fewer columns on
-3 (large holes, at the limit), as many on 9, more on 1; still not in the library. Runs: two full runs gave identical
-numbers; another program (a Stable Diffusion WebUI started on this PC, not mine) shared the GPU, one stall took the
-template fit 606 s instead of 6 s, so the report keeps the faster time of the two runs (total 664 s; dense pages
-66-150 s, the 50 nm page's single CD call 90 s). Browser: 1400 x 900 method clicks / up / down / End / compare / N
-leave scrollY unchanged; dark theme; 400 px no sideways scroll; no console errors. Tests: test_pitch_signature (20),
-test_synthetic_arrays, test_gpu_edge_erf pass (33).
+Six small dense test pages (test noise 30 photons per grey level, read noise 0.65; columns = columns averaged
+until the pitch noise is <= 1/3 nm; step = measured / planted 1 nm row step, true centers read 1.00):
+
+| page | best existing (columns, step) | new: columns | new: step | hole noise nm, new / best | s |
+|---|---|---|---|---|---|
+| 50 nm circles, dense | 32, 1.13 (half area min) | 16 | 0.995 | 0.90 / 1.28 | 220 |
+| 60 nm circles, dense | 16, 1.09 (Gaussian) | **8** | 1.010 | 0.65 / 0.72 | 212 |
+| 70 x 45 ellipses, dense | 16, 1.15 (Gaussian) | 16 (0.335 nm at 8, needs 0.333) | 0.978 | 0.72 / 0.85 | 291 |
+| 80 nm circles, square | 8, 1.01 (Gaussian) | 8 | 1.006 | 0.47 / 0.48 | 132 |
+| 90 x 60 ellipses, stagger | 8, 1.03 (Gaussian) | 8 | 1.003 | 0.48 / 0.52 | 158 |
+| 60 x 100 ellipses, square | 8, 1.00 (Gaussian) | 8 | 1.024 | 0.55 / 0.56 | 182 |
+
+- Limit: given the exact hole picture, the 50 nm circles and 70 x 45 ellipses still need 16 columns at this noise
+  (50 nm: 0.40 nm at 8 columns; about 1.5x more light would reach 8).
+- Weak point: holes 4x more different in size than on the test pages (2 nm sd instead of 0.5) make most of the
+  brightness differences come from size; the learned picture widens and the step reads 0.86 (50 nm) / 0.93
+  (80 nm). The true picture is fine there (1.011). A per-hole size term did not fix it (compact: wrong shape;
+  full: absorbs the light outside the picture, step 0.93). The user's failed light-sum CD suggests flicker > size
+  effect on real images, the good case.
+- Noise correction: the page's own leftover noise includes model error when the picture is wrong (80 nm, 2 nm
+  spread: 2.1x the true noise), so the library needs a noise model, not the leftovers.
+- Assumes: flicker independent from hole to hole; each hole looks the same after a half turn.
+- CD: no gain. Size on neighbour-cleaned holes (area above half of the own peak), true-CD slope / scatter / move per
+  10 % pulse: 50 nm 0.13 / 17 nm / -3.1 nm (existing half area 0.24 / 15 / +1.5); 80 nm 0.46 / 3.5 / -1.1 vs
+  Gaussian 0.48 / 1.8 / +0.2 and edge area 0.58 / 2.4 / +0.2. On 50 nm holes every method that looks better
+  (Gaussian 0.70 / 3.0 / +1.6) reads brightness.
+- Speed: single precision is 3.4x faster on this GPU (pool 2.3 -> 1.0 GB, centers equal to 1e-7 px).
+
+Plan after approval:
+- [ ] Library: `subpx/learned_hole.py` (public) + CPU / GPU backends (GPU single precision): seeds -> lattice ->
+      rounds -> simulated noise correction (noise model) -> centers, brightness, learned picture, lattice, timings
+- [ ] New center method next to the existing ones (own name): pitch signature test + report rerun, workbench Pitch
+- [ ] CD: no CD method from it unless the user wants the cleaned-hole size anyway (opt-in, not in batch defaults)
+- [ ] Tests on a small CPU page (step, lattice, noise correction sign), docs, lessons, commit + push
 
 # Workbench UI/UX rework (review 2026-10-31; decisions made, implementation in a new session)
 
