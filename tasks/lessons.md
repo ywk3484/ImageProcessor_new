@@ -168,3 +168,13 @@
   (`registration.py`); the user meant the Pitch panel's placement error and the GPU center finders behind it. I had
   even noted both meanings and picked one. When a term means two things in the repo, ask which one first, naming
   both in the user's words (here: "shift between two pages" vs "hole placement error from the pitch").
+- **Look at every plot of a report the way the user will, at its default view, before shipping it.** The pitch
+  signature report drew the planted, true and measured y pitch as three same-weight lines on top of each other, and
+  "a row every ~1 um" meant every 2nd row on 500-600 nm pitches, so even perfect centers drew a pure zig-zag; the user
+  could not see the step anywhere. A planted pattern must be rare enough to read as an event (here >= 5 rows apart),
+  truth and measured go in separate panels (one line each, same scale), and the selector sits beside the graph it
+  changes, never in a table the user must scroll to.
+- **When a noise level I assumed decides the headline, check it does not hide what the user asked about.** 0.5 nm
+  mask placement noise (my guess; the user gave none) made even perfect centers need 8 columns, so every good method
+  looked the same. State such a floor as an assumption, and pick test noise that leaves the methods' differences
+  visible (here 0.2 nm), with the larger value one option away.

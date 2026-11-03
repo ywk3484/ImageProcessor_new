@@ -7,8 +7,9 @@ and the GPU center finders, the y pitch averaged over 1 to all columns, and an H
 
 Each test image is a page of the user's size (2048 x 1378 px, 21 nm pixels, 8-bit) rendered by
 ``subpx.synthetic_arrays.render_hole_array``: a square or staggered array of circles, squares or ellipses with
-random CD, placement and brightness per hole, and every row about 1 um apart moved 1 nm in +y. Every method's centers
-are matched to the true holes; holes within one pitch of the page edge are left out. Per method (y only):
+random CD (0.5 nm sd), placement (0.2 nm sd) and brightness (5 %) per hole, and rows about 1 um apart, but at least
+5 rows apart, moved 1 nm in +y. Every method's centers are matched to the true holes; holes within one pitch of the
+page edge are left out. Per method (y only):
 
 - found: share of holes with a center;
 - center error: sd of (measured - true) y, nm;
@@ -44,15 +45,20 @@ if str(ROOT) not in sys.path:
 from subpx.synthetic_arrays import render_hole_array  # noqa: E402
 
 PIXEL_NM = 21.0
+# Ordered by shape, then size. pitch_nm = (x pitch, row pitch); staggered rows are offset by half the x pitch.
 PATTERNS = {
+    "circle250_square": dict(label="250 nm circles, square array", hole="circle", size_nm=(250.0, 250.0),
+                             pitch_nm=(500.0, 500.0), layout="square"),
     "circle100_square": dict(label="100 nm circles, square array", hole="circle", size_nm=(100.0, 100.0),
                              pitch_nm=(200.0, 200.0), layout="square"),
     "circle100_stagger": dict(label="100 nm circles, staggered", hole="circle", size_nm=(100.0, 100.0),
                               pitch_nm=(200.0, 175.0), layout="staggered"),
+    "circle80_square": dict(label="80 nm circles, square array", hole="circle", size_nm=(80.0, 80.0),
+                            pitch_nm=(160.0, 160.0), layout="square"),
     "circle60_dense": dict(label="60 nm circles, dense staggered", hole="circle", size_nm=(60.0, 60.0),
                            pitch_nm=(140.0, 121.0), layout="staggered"),
-    "circle250_square": dict(label="250 nm circles, square array", hole="circle", size_nm=(250.0, 250.0),
-                             pitch_nm=(500.0, 500.0), layout="square"),
+    "circle50_dense": dict(label="50 nm circles, dense staggered", hole="circle", size_nm=(50.0, 50.0),
+                           pitch_nm=(120.0, 104.0), layout="staggered"),
     "square300_square": dict(label="300 nm squares, square array", hole="square", size_nm=(300.0, 300.0),
                              pitch_nm=(600.0, 600.0), layout="square"),
     "square150_stagger": dict(label="150 nm squares, staggered", hole="square", size_nm=(150.0, 150.0),
@@ -61,6 +67,12 @@ PATTERNS = {
                                  size_nm=(160.0, 80.0), pitch_nm=(320.0, 200.0), layout="square"),
     "ellipse100x200_stagger": dict(label="100 x 200 nm ellipses (tall), staggered", hole="ellipse",
                                    size_nm=(100.0, 200.0), pitch_nm=(300.0, 300.0), layout="staggered"),
+    "ellipse90x60_stagger": dict(label="90 x 60 nm ellipses (wide), staggered", hole="ellipse",
+                                 size_nm=(90.0, 60.0), pitch_nm=(180.0, 120.0), layout="staggered"),
+    "ellipse60x100_square": dict(label="60 x 100 nm ellipses (tall), square array", hole="ellipse",
+                                 size_nm=(60.0, 100.0), pitch_nm=(140.0, 180.0), layout="square"),
+    "ellipse70x45_dense": dict(label="70 x 45 nm ellipses (wide), dense staggered", hole="ellipse",
+                               size_nm=(70.0, 45.0), pitch_nm=(140.0, 100.0), layout="staggered"),
 }
 COLUMNS = (1, 2, 4, 8, 16, 32, 64, 128)  # plus "all"
 PHASE_BINS = 16
@@ -78,6 +90,12 @@ NAMES = {
     "gpu_isophote_curvature": "GPU isophote", "new_template": "Template fit (prototype)", "truth": "True centers",
 }
 NEEDS_BLUR = ("disk", "flux_ratio")  # given the true blur here; real pages do not have it
+
+
+def rows_apart(pitch_nm, period_nm=1000.0, min_rows=5):
+    """Rows between moved rows: the whole number of rows closest to ``period_nm``, but at least ``min_rows``, so
+    each moved row shows as its own +/- pair in the y pitch instead of a zig-zag (1 um is only 2 rows at 500 nm)."""
+    return max(1, int(min_rows), int(round(period_nm / float(pitch_nm[1]))))
 
 
 # --------------------------------------------------------------------------------------------- matching
@@ -400,6 +418,7 @@ def run_image(name, spec, args, log):
         layout=spec["layout"], pixel_nm=PIXEL_NM, blur_nm=args.blur, lens_nm=args.lens,
         photons_per_level=args.photons, cd_sigma_nm=args.cd_sigma, placement_sigma_nm=args.placement_sigma,
         brightness_sigma=args.brightness_sigma, row_shift_nm=args.row_shift, row_shift_period_nm=args.row_period,
+        row_shift_every=rows_apart(spec["pitch_nm"], args.row_period, args.min_rows_apart),
         rotation_deg=args.rotation, seed=args.seed + list(PATTERNS).index(name), backend=args.render_backend)
     log(f"{name}: {page.meta['holes_inside']:,} holes, rendered in {time.perf_counter() - started:.1f} s; every "
         f"{page.meta['row_shift_every']} rows moved {page.meta['row_shift_nm']} nm")
@@ -483,11 +502,13 @@ def main(argv=None):
     parser.add_argument("--blur", type=float, default=65.0, help="blur width at half height, nm")
     parser.add_argument("--lens", type=float, default=45.0, help="the lens's own blur width, nm (0: Gaussian blur)")
     parser.add_argument("--photons", type=float, default=30.0, help="photons per grey level")
-    parser.add_argument("--cd-sigma", type=float, default=1.0, help="per-hole CD noise sd, nm")
-    parser.add_argument("--placement-sigma", type=float, default=0.5, help="per-hole placement noise sd, nm")
+    parser.add_argument("--cd-sigma", type=float, default=0.5, help="per-hole CD noise sd, nm")
+    parser.add_argument("--placement-sigma", type=float, default=0.2, help="per-hole placement noise sd, nm")
     parser.add_argument("--brightness-sigma", type=float, default=0.05, help="per-hole brightness sd (fraction)")
     parser.add_argument("--row-shift", type=float, default=1.0, help="planted row shift, nm")
     parser.add_argument("--row-period", type=float, default=1000.0, help="distance between shifted rows, nm")
+    parser.add_argument("--min-rows-apart", type=int, default=5,
+                        help="shifted rows are at least this many rows apart (the period grows on large pitches)")
     parser.add_argument("--rotation", type=float, default=0.0, help="lattice rotation, degrees")
     parser.add_argument("--backend", choices=("gpu", "cpu"), default="gpu", help="CD methods' backend")
     parser.add_argument("--render-backend", choices=("auto", "gpu", "cpu"), default="auto")

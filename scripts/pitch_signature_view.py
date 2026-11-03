@@ -4,6 +4,11 @@
 
 ``write_report(data, path)`` writes a full HTML document; ``standalone=False`` leaves out the document skeleton
 (doctype, html, head, body) for hosts that add their own.
+
+Every y-pitch graph is a stack of panels on one x axis with one line per panel: the true centers in grey, each
+measured method in blue, all on the same scale, so truth and measurement are never drawn over each other. In "One
+image at a time" the method list stays beside the graph (click, or the up / down keys), so methods are switched
+without scrolling.
 """
 
 from __future__ import annotations
@@ -32,8 +37,8 @@ def _clean(value, digits=4):
 
 
 def compact(data):
-    """The numbers the page needs: per image the methods in a list, curves at 3 decimals, the true centers' curve
-    as the reference."""
+    """The numbers the page needs: per image the methods in a list (the run's order: CD methods, GPU finders,
+    prototype, true centers) and their y-pitch curves at 0.01 nm."""
     images = []
     for image in data["images"]:
         methods = image["methods"]
@@ -43,15 +48,14 @@ def compact(data):
         for key, method in methods.items():
             entry = {k: method.get(k) for k in KEEP_METHOD}
             entry["key"] = key
-            entry["profiles"] = _clean(method.get("profiles", {}), 3)
+            entry["profiles"] = _clean(method.get("profiles", {}), 2)
             entries.append(entry)
         images.append(dict(
             key=image["key"], label=image["label"], meta={k: image["meta"].get(k) for k in KEEP_META},
             limit_nm=image.get("limit_nm"), crop_png=image.get("crop_png"), evaluated_holes=image["evaluated_holes"],
             pairs=image["pairs"], seconds=image.get("seconds"), best_gpu=image.get("best_gpu"),
             best_cd=image.get("best_cd"), best_new=image.get("best_new"), keys=keys,
-            columns_total=truth.get("columns_total"), row_intervals=truth.get("row_intervals"),
-            planted=truth.get("planted", []), methods=entries))
+            columns_total=truth.get("columns_total"), row_intervals=truth.get("row_intervals"), methods=entries))
     return _clean(dict(settings=data["settings"], images=images))
 
 
@@ -77,9 +81,9 @@ PAGE = r"""<title>Pitch Signature Test</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
 :root {
-  /* Layout: one reading column (72rem) of stacked sections; the explorer is image tabs over stacked panels;
-     wide tables scroll inside their own frames. Palette: cool instrument greys, blue = the method looked at,
-     orange = the planted step, grey = true centers. */
+  /* Layout: one column of stacked sections (80rem); the explorer is a sticky method list beside the graphs; wide
+     tables scroll inside their own frames. Palette: cool instrument greys; grey line = the true centers, blue line =
+     a measured method; never both in one panel. */
   --bg: #f3f5f7;
   --surface: #fcfdfd;
   --ink: #0f1419;
@@ -88,7 +92,6 @@ PAGE = r"""<title>Pitch Signature Test</title>
   --line: #e1e5e9;
   --axis: #c3c9d0;
   --accent: #2a78d6;
-  --ref: #eb6834;
   --truth: #7f8892;
   --ctx: #d8dde2;
   --chip: #e7ebef;
@@ -114,7 +117,7 @@ PAGE = r"""<title>Pitch Signature Test</title>
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0e1113; --surface: #161a1d; --ink: #eef1f4; --ink-2: #c1c8cf; --muted: #8c959e; --line: #2a3035;
-    --axis: #3c434a; --accent: #3987e5; --ref: #d95926; --truth: #a0a8b0; --ctx: #2f353b; --chip: #232930;
+    --axis: #3c434a; --accent: #3987e5; --truth: #a0a8b0; --ctx: #2f353b; --chip: #232930;
     --chip-on: #eef1f4; --chip-on-ink: #0e1113; --focus: #6da7ec;
     --s1: #104281; --s1-ink: #ffffff; --s2: #184f95; --s2-ink: #ffffff; --s3: #256abf; --s3-ink: #ffffff;
     --s4: #3987e5; --s4-ink: #ffffff; --s5: #6da7ec; --s5-ink: #0b0b0b; --s6: #9ec5f4; --s6-ink: #0b0b0b;
@@ -124,7 +127,7 @@ PAGE = r"""<title>Pitch Signature Test</title>
 }
 :root[data-theme="dark"] {
   --bg: #0e1113; --surface: #161a1d; --ink: #eef1f4; --ink-2: #c1c8cf; --muted: #8c959e; --line: #2a3035;
-  --axis: #3c434a; --accent: #3987e5; --ref: #d95926; --truth: #a0a8b0; --ctx: #2f353b; --chip: #232930;
+  --axis: #3c434a; --accent: #3987e5; --truth: #a0a8b0; --ctx: #2f353b; --chip: #232930;
   --chip-on: #eef1f4; --chip-on-ink: #0e1113; --focus: #6da7ec;
   --s1: #104281; --s1-ink: #ffffff; --s2: #184f95; --s2-ink: #ffffff; --s3: #256abf; --s3-ink: #ffffff;
   --s4: #3987e5; --s4-ink: #ffffff; --s5: #6da7ec; --s5-ink: #0b0b0b; --s6: #9ec5f4; --s6-ink: #0b0b0b;
@@ -132,11 +135,12 @@ PAGE = r"""<title>Pitch Signature Test</title>
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   margin: 0; background: var(--bg); color: var(--ink); font: 400 var(--step-0)/1.55 var(--font-ui);
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
 }
-.page { max-width: 72rem; margin: 0 auto; padding-block: 2.5rem 4rem; display: grid; gap: 3rem; }
+.page { max-width: 80rem; margin: 0 auto; padding-block: 2.5rem 4rem; display: grid; gap: 3rem; }
 h1, h2, h3 { font-family: var(--font-head); font-weight: 600; text-wrap: balance; margin: 0; line-height: 1.2; }
 h1 { font-size: var(--step-3); letter-spacing: -0.01em; }
 h2 { font-size: var(--step-2); }
@@ -157,36 +161,30 @@ section { display: grid; gap: 1rem; min-width: 0; }
 .answer strong { font-weight: 600; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; min-width: 0; }
 figure { margin: 0; display: grid; gap: 0.6rem; min-width: 0; }
-figcaption { color: var(--ink-2); font-size: var(--step--1); max-width: 80ch; }
+figcaption { color: var(--ink-2); font-size: var(--step--1); max-width: 90ch; }
 .legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; font-size: var(--step--1); color: var(--ink-2); align-items: center; }
 .key { display: inline-flex; align-items: center; gap: 0.4rem; }
 .key i { display: inline-block; width: 18px; height: 0; border-top: 2px solid; }
 .key i.method { border-color: var(--accent); }
+.key i.compare { border-color: var(--accent); border-top-style: dashed; }
 .key i.truth { border-color: var(--truth); }
-.key i.ref { border-color: var(--ref); border-top-width: 1.5px; }
 .key i.ctx { border-color: var(--ctx); border-top-width: 1px; }
-.key i.limit { border-color: var(--muted); border-top-width: 1px; }
 .key b { display: inline-block; width: 14px; height: 14px; border-radius: 3px; }
-.featured-grid { display: grid; gap: 0.25rem; }
-.featured-row { display: grid; grid-template-columns: minmax(8rem, 13rem) 1fr; gap: 0.75rem; align-items: center; }
-.featured-row .who { display: grid; gap: 0.1rem; font-size: var(--step--1); }
-.featured-row .who strong { font-size: var(--step-0); font-weight: 600; }
-.featured-row .who span { color: var(--ink-2); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .table-wrap { overflow-x: auto; min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 table { border-collapse: collapse; width: 100%; font-size: var(--step--1); }
 th, td { padding: 0.45rem 0.6rem; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
 thead th { font-weight: 500; color: var(--ink-2); background: var(--surface); position: sticky; top: 0; }
 th.num { text-align: right; }
 td.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-#table td:first-child, #best td:first-child { min-width: 15rem; }
+#table td:first-child, #best td:first-child { min-width: 14rem; }
 tbody tr:last-child td { border-bottom: 0; }
 tr.pick { cursor: pointer; }
 tr.pick:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 tr.pick.on td { background: color-mix(in srgb, var(--accent) 13%, transparent); }
 tr.pick:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 tr.weak td { color: var(--muted); }
-.tag { display: inline-block; font: 500 0.6875rem/1 var(--font-mono); letter-spacing: 0.04em; text-transform: uppercase;
-  padding: 0.2rem 0.35rem; border-radius: 4px; background: var(--chip); color: var(--ink-2); margin-left: 0.35rem; vertical-align: 1px; }
+.tag { display: inline-block; font: 500 0.625rem/1 var(--font-mono); letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 0.2rem 0.3rem; border-radius: 4px; background: var(--chip); color: var(--ink-2); margin-left: 0.35rem; vertical-align: 1px; white-space: nowrap; }
 .best-cell { display: grid; gap: 0.1rem; }
 .best-cell span { color: var(--ink-2); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .matrix td.cell { text-align: center; font-family: var(--font-mono); font-variant-numeric: tabular-nums; min-width: 4.2rem;
@@ -204,18 +202,44 @@ tr.weak td { color: var(--muted); }
 button.chip { font: 500 var(--step--1)/1 var(--font-ui); border: 0; border-radius: 999px; padding: 0.5rem 0.8rem;
   background: var(--chip); color: var(--ink); cursor: pointer; }
 button.chip[aria-pressed="true"] { background: var(--chip-on); color: var(--chip-on-ink); }
-button.chip:focus-visible, .mcard:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; }
-.image-head { display: grid; grid-template-columns: auto 1fr; gap: 1.25rem; align-items: start; }
-.image-head img { width: 216px; max-width: 100%; height: auto; image-rendering: pixelated; border-radius: 6px; border: 1px solid var(--line); display: block; }
-.image-head figcaption { max-width: 216px; }
-.kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 0; font-size: var(--step--1); align-content: start; }
+button.chip:focus-visible, .mcard:focus-visible, select.pick:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.tabs button.chip { padding: 0.42rem 0.7rem; }
+select.pick { font: 500 var(--step--1)/1.2 var(--font-ui); background: var(--chip); color: var(--ink); border: 0; border-radius: 8px;
+  padding: 0.45rem 0.6rem; max-width: 100%; }
+/* explorer: method list beside the graphs */
+.explorer { display: grid; grid-template-columns: 17.5rem minmax(0, 1fr); gap: 1.25rem; align-items: start; }
+.mlist { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 0.75rem); max-height: calc(100vh - 1.5rem);
+  display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.mlist-head { display: grid; gap: 0.15rem; padding: 0.7rem 0.8rem 0.55rem; border-bottom: 1px solid var(--line); font-size: var(--step--1); }
+.mlist-head strong { font-weight: 600; font-size: var(--step-0); }
+.mlist-head span { color: var(--muted); font-size: 0.75rem; line-height: 1.35; }
+.mlist-box { overflow-y: auto; padding: 0.2rem 0.35rem 0.5rem; position: relative; flex: 1 1 auto; min-height: 0; }
+.mlist-box:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 0 0 10px 10px; }
+.grp { display: grid; grid-template-columns: minmax(0, 1fr) auto 2.4rem; gap: 0.5rem; font: 500 0.6875rem/1 var(--font-mono);
+  letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); padding: 0.85rem 0.45rem 0.35rem; }
+.grp span:not(:first-child) { text-align: right; text-transform: none; letter-spacing: 0; }
+.opt { display: grid; grid-template-columns: minmax(0, 1fr) auto 2.4rem; gap: 0.5rem; align-items: center; padding: 0.3rem 0.45rem;
+  border-radius: 6px; cursor: pointer; font-size: var(--step--1); line-height: 1.3; }
+.opt:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.opt.on { background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+.opt .nm { min-width: 0; }
+.opt .need { font: 500 0.75rem/1 var(--font-mono); padding: 0.22rem 0.35rem; border-radius: 4px; min-width: 2.7rem; text-align: center;
+  font-variant-numeric: tabular-nums; }
+.opt .err { font: 400 0.75rem/1 var(--font-mono); color: var(--ink-2); text-align: right; font-variant-numeric: tabular-nums; }
+.opt.weak .nm { color: var(--muted); }
+.explorer-main { display: grid; gap: 1rem; min-width: 0; }
+.image-head { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 1rem; align-items: start; }
+.image-head img { width: 104px; height: 104px; image-rendering: pixelated; border-radius: 6px; border: 1px solid var(--line); display: block; }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.25rem 1rem; margin: 0; font-size: var(--step--1); align-content: start; }
+.kv.two-up { grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr); }
 .kv dt { color: var(--muted); }
-.kv dd { margin: 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.multiples { display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); gap: 0.6rem; }
-.mcard { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 0.55rem 0.6rem 0.4rem; display: grid;
+.kv dd { margin: 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums; min-width: 0; }
+.multiples { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: 0.6rem; }
+.mcard { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem 0.55rem 0.35rem; display: grid;
   gap: 0.2rem; cursor: pointer; min-width: 0; }
 .mcard.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.mcard.truth { cursor: default; }
 .mcard .t { display: flex; justify-content: space-between; gap: 0.5rem; font-size: var(--step--1); font-weight: 500; }
 .mcard .t span:last-child { font-family: var(--font-mono); font-weight: 400; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .mcard .none { color: var(--muted); font-size: var(--step--1); padding: 1.2rem 0; }
@@ -225,13 +249,18 @@ svg .grid { stroke: var(--line); stroke-width: 1; }
 svg .axis { stroke: var(--axis); stroke-width: 1; }
 svg .tick { fill: var(--muted); font: 400 10px var(--font-mono); }
 svg .axis-label { fill: var(--ink-2); font: 400 11px var(--font-ui); }
-svg .ln-ref { fill: none; stroke: var(--ref); stroke-width: 1.25; stroke-linejoin: round; }
-svg .ln-truth { fill: none; stroke: var(--truth); stroke-width: 1.25; stroke-linejoin: round; stroke-linecap: round; }
+svg .ptitle { fill: var(--ink); font: 600 12.5px var(--font-ui); }
+svg .psub { fill: var(--ink-2); font: 400 11px var(--font-mono); }
+svg .pnone { fill: var(--muted); font: 400 12px var(--font-ui); }
+svg .sw-truth { stroke: var(--truth); stroke-width: 3; stroke-linecap: round; }
+svg .sw-method { stroke: var(--accent); stroke-width: 3; stroke-linecap: round; }
+svg .ln-truth { fill: none; stroke: var(--truth); stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; }
 svg .ln-method { fill: none; stroke: var(--accent); stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; }
+svg .ln-compare { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 5 4; stroke-linejoin: round; }
 svg .ln-ctx { fill: none; stroke: var(--ctx); stroke-width: 1; }
 svg .ln-limit { stroke: var(--muted); stroke-width: 1; }
+svg .ln-now { stroke: var(--axis); stroke-width: 6; opacity: 0.45; }
 svg .dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
-svg .dot-truth { fill: var(--truth); stroke: var(--surface); stroke-width: 2; }
 svg .cross { stroke: var(--muted); stroke-width: 1; }
 svg .note { fill: var(--muted); font: 400 10.5px var(--font-ui); }
 .tip { position: fixed; z-index: 20; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--line);
@@ -246,33 +275,39 @@ svg .note { fill: var(--muted); font: 400 10.5px var(--font-ui); }
 .notes ul { margin: 0; padding-left: 1.1rem; display: grid; gap: 0.35rem; color: var(--ink-2); }
 .notes p { color: var(--ink-2); }
 code { font-family: var(--font-mono); font-size: 0.9em; }
-@media (max-width: 720px) {
-  .two { grid-template-columns: 1fr; }
-  .image-head { grid-template-columns: 1fr; }
-  .featured-row { grid-template-columns: 1fr; gap: 0.2rem; }
+@media (max-width: 1100px) {
+  .kv.two-up { grid-template-columns: max-content minmax(0, 1fr); }
+}
+@media (max-width: 860px) {
+  .explorer { grid-template-columns: minmax(0, 1fr); }
+  .mlist { position: static; max-height: 17rem; }
+  .two { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .image-head { grid-template-columns: minmax(0, 1fr); }
   h1 { font-size: 1.9rem; }
 }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
 </style>
 <!--/head-->
 <main class="page">
   <header class="masthead">
     <p class="eyebrow" id="eyebrow">subpx · synthetic hole arrays</p>
     <h1>Pitch signature test</h1>
-    <p class="lede">Every row about 1 µm apart is moved 1 nm. Which center methods show that step in the y pitch when only a few columns are averaged?</p>
+    <p class="lede">Rows about 1 µm apart are moved 1 nm. Which center methods show that in the y pitch when only a few columns are averaged?</p>
     <dl class="facts" id="run-facts"></dl>
   </header>
 
   <section aria-labelledby="answer-h">
     <div class="section-head"><h2 id="answer-h">Answer</h2></div>
-    <div class="answer" id="answer"></div>
     <figure class="card" id="featured"></figure>
+    <div class="answer" id="answer"></div>
   </section>
 
   <section aria-labelledby="best-h">
     <div class="section-head">
       <h2 id="best-h">Best method per image</h2>
-      <p>Columns that must be averaged before the 1 nm step stands out (curve noise at most a third of it), and each method's own center error per hole. Perfect centers set the floor: the mask's placement noise needs that many columns even with no measurement error.</p>
+      <p>Columns that must be averaged before the 1 nm step stands out (curve noise at most a third of it), and each method's own center error per hole. Click a row to open that image below.</p>
     </div>
     <div class="table-wrap"><table id="best"></table></div>
   </section>
@@ -280,7 +315,7 @@ code { font-family: var(--font-mono); font-size: 0.9em; }
   <section aria-labelledby="matrix-h">
     <div class="section-head">
       <h2 id="matrix-h">Columns needed, every method</h2>
-      <p>Lighter is better. With the mask's placement noise, perfect centers need the same number of columns as the best methods; switch to "method alone" to compare the methods as if the mask were perfect.</p>
+      <p>Lighter is better. "With the mask's placement noise" is what you would see; "method alone" compares the methods as if the mask were perfect. Click a row to look at that method below.</p>
     </div>
     <div class="controls">
       <span class="label">Count</span>
@@ -290,27 +325,37 @@ code { font-family: var(--font-mono); font-size: 0.9em; }
     <div class="legend" id="matrix-legend"></div>
   </section>
 
-  <section aria-labelledby="explore-h">
+  <section aria-labelledby="explore-h" id="explore">
     <div class="section-head">
       <h2 id="explore-h">One image at a time</h2>
-      <p>Pick an image, the number of columns averaged and a method (click a plot or a table row).</p>
+      <p>Pick an image, then a method in the list on the left: click it, or use ↑ and ↓ once the list has focus. The graphs change in place.</p>
     </div>
     <div class="tabs" id="tabs" role="group" aria-label="Test image"></div>
-    <div class="image-head" id="image-head"></div>
-    <div class="controls"><span class="label">Columns averaged</span><div class="seg" id="ncols"></div>
-      <span class="label">Rows shown</span><div class="seg" id="rows"></div></div>
-    <figure class="card" id="focus"></figure>
-    <div class="two">
-      <figure class="card" id="noise"></figure>
-      <figure class="card" id="phase"></figure>
+    <div class="explorer">
+      <nav class="mlist" aria-label="Methods">
+        <div class="mlist-head"><strong>Methods</strong><span id="mlist-note"></span></div>
+        <div class="mlist-box" id="mlist-box" role="listbox" tabindex="0" aria-label="Method shown in the graphs"></div>
+      </nav>
+      <div class="explorer-main">
+        <div class="image-head" id="image-head"></div>
+        <div class="controls">
+          <span class="label">Columns averaged</span><div class="seg" id="ncols"></div>
+          <span class="label">Rows shown</span><div class="seg" id="rows"></div>
+          <label class="label" for="compare">Compare with</label><select class="pick" id="compare"></select>
+        </div>
+        <figure class="card" id="focus"></figure>
+        <div class="two">
+          <figure class="card" id="noise"></figure>
+          <figure class="card" id="phase"></figure>
+        </div>
+        <div class="section-head">
+          <h3 id="multiples-h">Every method at once</h3>
+          <p id="multiples-note"></p>
+        </div>
+        <div class="multiples" id="multiples"></div>
+        <div class="table-wrap"><table id="table"></table></div>
+      </div>
     </div>
-    <div class="legend">
-      <span class="key"><i class="method"></i>method's y pitch</span>
-      <span class="key"><i class="truth"></i>true centers (mask placement noise only)</span>
-      <span class="key"><i class="ref"></i>planted step</span>
-    </div>
-    <div class="multiples" id="multiples"></div>
-    <div class="table-wrap"><table id="table"></table></div>
   </section>
 
   <section aria-labelledby="notes-h">
@@ -326,7 +371,9 @@ code { font-family: var(--font-mono); font-size: 0.9em; }
 const D = JSON.parse(document.getElementById("report-data").textContent);
 const S = D.settings, IMAGES = D.images;
 const NS = "http://www.w3.org/2000/svg";
-const state = { img: 0, n: "8", method: null, mode: "seen", rows: 50 };
+const FEATURED = Math.max(0, IMAGES.findIndex((im) => im.key === "circle100_square"));
+const state = { img: FEATURED, n: "4", method: null, compare: null, mode: "seen", rows: 50 };
+const Y_MAX = 2;  // nm, every y-pitch panel
 let clipCount = 0;
 const $ = (id) => document.getElementById(id);
 const shift = S.row_shift;
@@ -355,17 +402,31 @@ const signed = (v, d = 2) => (ok(v) ? (v > 0 ? "+" : v < 0 ? "−" : "") + Math.
 const pct = (v) => (ok(v) ? (v >= 0.995 ? "100 %" : (100 * v).toFixed(v >= 0.9 ? 1 : 0) + " %") : "–");
 const byKey = (im) => Object.fromEntries(im.methods.map((m) => [m.key, m]));
 const usable = (m) => m && !m.failed && m.found >= 0.99;
+const measured = (im) => im.methods.filter((m) => m.group !== "truth");
 function needText(v, im) {
   if (v == null) return "never";
   return v === im.columns_total ? "all " + v : String(v);
 }
 function colsText(v, im) { return v == null ? "never shows it" : needText(v, im) + (v === 1 ? " column" : " columns"); }
-const cut = (a) => (a && state.rows ? a.slice(0, state.rows) : a);
 function needOf(m, mode) { return mode === "method" ? m.need_method : m.need_seen; }
 function noiseOf(m, mode) { return mode === "method" ? m.noise_method : m.noise_seen; }
-function groupTag(m) {
-  return { truth: "reference", cd: "CD", gpu: "GPU", new: "prototype" }[m.group] || m.group;
+function needWords(m, im) {
+  if (!m || m.failed) return "no centers";
+  const v = needOf(m, state.mode);
+  return v == null ? "never shows the step" : "needs " + colsText(v, im);
 }
+const cut = (a) => (a && state.rows ? a.slice(0, state.rows) : a);
+function groupTag(m) { return { truth: "reference", cd: "CD", gpu: "GPU", new: "prototype" }[m.group] || m.group; }
+function needClass(v) {
+  if (v == null) return "cn";
+  if (v <= 2) return "c1";
+  if (v <= 4) return "c2";
+  if (v <= 8) return "c3";
+  if (v <= 16) return "c4";
+  if (v <= 32) return "c5";
+  return "c6";
+}
+function nLabel(n, im) { return n === "all" ? `all ${im.columns_total}` : n; }
 
 /* ---------- tooltip ---------- */
 const tip = $("tip");
@@ -377,7 +438,7 @@ function showTip(evt, title, rows) {
     const r = h("div", "r");
     const i = h("i");
     i.style.borderColor = `var(--${cls})`;
-    r.append(i, h("b", null, typeof value === "string" ? value : signed(value, 2) + " nm"), h("span", null, label));
+    r.append(i, h("b", null, typeof value === "string" ? value : ok(value) ? signed(value, 2) + " nm" : "–"), h("span", null, label));
     tip.appendChild(r);
   }
   tip.hidden = false;
@@ -390,7 +451,7 @@ function showTip(evt, title, rows) {
 }
 function hideTip() { tip.hidden = true; }
 
-/* ---------- y-pitch plot ---------- */
+/* ---------- stacked y-pitch panels: one line per panel, one x axis, one scale ---------- */
 function linePath(values, X, Y) {
   let d = "", pen = false;
   values.forEach((v, i) => {
@@ -400,66 +461,82 @@ function linePath(values, X, Y) {
   });
   return d;
 }
-function yRange(im, n) {
-  const t = byKey(im).truth;
-  const noise = t && t.noise_seen ? t.noise_seen[n] : 0.5;
-  return Math.max(1.5, Math.ceil((1.25 * Math.abs(shift) + 3 * (ok(noise) ? noise : 0.5)) * 2) / 2);
-}
-function pitchPlot(o) {
-  const { w, hgt, compact } = o;
-  const m = { l: compact ? 28 : 40, r: 6, t: compact ? 6 : 22, b: compact ? 4 : 28 };
-  const n = o.planted.length;
+function stackPlot(o) {
+  const w = o.w || 960, compact = !!o.compact;
+  const m = { l: compact ? 24 : 40, r: 8, t: compact ? 5 : 2 };
+  const head = compact ? 0 : 24, ph = o.panelH || 104, gap = compact ? 0 : 12;
+  const axisH = o.axis === false ? 5 : 36;
+  const P = o.panels.length, n = Math.max(1, o.count);
+  const hgt = m.t + P * (head + ph) + (P - 1) * gap + axisH;
   const X = (i) => m.l + (w - m.l - m.r) * (n > 1 ? i / (n - 1) : 0.5);
-  const Y = (v) => m.t + (hgt - m.t - m.b) * (1 - (Math.max(-o.yMax * 1.04, Math.min(o.yMax * 1.04, v)) + o.yMax) / (2 * o.yMax));
+  const top = (p) => m.t + p * (head + ph + gap) + head;
+  const Y = (p, v) => top(p) + ph * (1 - (Math.max(-Y_MAX * 1.08, Math.min(Y_MAX * 1.08, v)) + Y_MAX) / (2 * Y_MAX));
   const svg = sv("svg", { viewBox: `0 0 ${w} ${hgt}`, class: "plot", role: "img", "aria-label": o.label });
-  const id = "clip" + ++clipCount;
-  const cp = sv("clipPath", { id }, sv("defs", {}, svg));
-  sv("rect", { x: m.l, y: m.t - 1, width: w - m.l - m.r, height: hgt - m.t - m.b + 2 }, cp);
-  const step = o.yMax > 3 ? 2 : 1;
-  for (let v = -Math.floor(o.yMax / step) * step; v <= o.yMax + 1e-9; v += step) {
-    sv("line", { x1: m.l, x2: w - m.r, y1: Y(v), y2: Y(v), class: v === 0 ? "axis" : "grid" }, svg);
-    stext(svg, m.l - 5, Y(v) + 3.5, (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v), "tick", "end");
+  const defs = sv("defs", {}, svg);
+  const ticks = compact ? [-1, 0, 1] : [-2, -1, 0, 1, 2];
+  o.panels.forEach((pn, p) => {
+    if (!compact) {
+      const ty = top(p) - 8;
+      sv("line", { x1: m.l + 1, x2: m.l + 17, y1: ty - 4, y2: ty - 4, class: pn.truth ? "sw-truth" : "sw-method" }, svg);
+      stext(svg, m.l + 24, ty, pn.label, "ptitle");
+      if (pn.sub) stext(svg, w - m.r, ty, pn.sub, "psub", "end");
+    }
+    for (const v of ticks) {
+      sv("line", { x1: m.l, x2: w - m.r, y1: Y(p, v), y2: Y(p, v), class: v === 0 ? "axis" : "grid" }, svg);
+      stext(svg, m.l - 5, Y(p, v) + 3.5, (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v), "tick", "end");
+    }
+    if (pn.values) {
+      const id = "clip" + ++clipCount;
+      sv("rect", { x: m.l, y: top(p) - 1, width: w - m.l - m.r, height: ph + 2 }, sv("clipPath", { id }, defs));
+      sv("path", { d: linePath(pn.values, X, (v) => Y(p, v)), class: pn.truth ? "ln-truth" : "ln-method", "clip-path": `url(#${id})` }, svg);
+    } else {
+      stext(svg, (m.l + w - m.r) / 2, top(p) + ph / 2 + 4, pn.empty || "No centers from this method on this image.", "pnone", "middle");
+    }
+  });
+  const yb = top(P - 1) + ph;
+  if (o.axis !== false && o.rowPitch) {
+    const span = (n * o.rowPitch) / 1000;
+    const step = [0.5, 1, 2, 5, 10, 20, 50].find((s) => span / s <= 12) || 100;
+    for (let u = 0; u <= span + 1e-9; u += step) {
+      const i = (u * 1000) / o.rowPitch - 0.5;
+      if (i < -0.01 || i > n - 1 + 0.01) continue;
+      sv("line", { x1: X(i), x2: X(i), y1: yb, y2: yb + 4, class: "axis" }, svg);
+      stext(svg, X(i), yb + 16, String(+u.toFixed(1)), "tick", "middle");
+    }
+    stext(svg, w - m.r, yb + 31, "µm down the page →", "axis-label", "end");
+    stext(svg, m.l, yb + 31, "y pitch − design, nm", "axis-label");
   }
-  if (!compact) {
-    stext(svg, m.l, hgt - 8, "row pair, from the top of the page →", "axis-label");
-    stext(svg, w - m.r, hgt - 8, `${n} row pairs`, "tick", "end");
-  }
-  if (!compact) stext(svg, 4, 11, "y pitch − design, nm", "axis-label");
-  const g = sv("g", { "clip-path": `url(#${id})` }, svg);
-  sv("path", { d: linePath(o.planted, X, Y), class: "ln-ref" }, g);
-  if (o.truth) sv("path", { d: linePath(o.truth, X, Y), class: "ln-truth" }, g);
-  if (o.curve) sv("path", { d: linePath(o.curve, X, Y), class: "ln-method" }, g);
-  const cross = sv("line", { y1: m.t, y2: hgt - m.b, class: "cross", visibility: "hidden" }, svg);
+  const cross = sv("line", { y1: top(0), y2: yb, class: "cross", visibility: "hidden" }, svg);
   const hit = sv("rect", { x: m.l, y: 0, width: w - m.l - m.r, height: hgt, fill: "transparent" }, svg);
-  const move = (e) => {
+  hit.addEventListener("pointermove", (e) => {
     const r = svg.getBoundingClientRect();
     const px = ((e.clientX - r.left) * w) / r.width;
     const i = Math.max(0, Math.min(n - 1, Math.round(((px - m.l) / (w - m.l - m.r)) * (n - 1))));
     cross.setAttribute("x1", X(i));
     cross.setAttribute("x2", X(i));
     cross.setAttribute("visibility", "visible");
-    showTip(e, `rows ${i} → ${i + 1}`, [
-      [o.curve ? o.curve[i] : undefined, o.name, "accent"],
-      [o.truth ? o.truth[i] : undefined, "true centers", "truth"],
-      [o.planted[i], "planted", "ref"],
-    ]);
-  };
-  hit.addEventListener("pointermove", move);
+    const where = o.rowPitch ? ` · ${(((i + 0.5) * o.rowPitch) / 1000).toFixed(2)} µm down` : "";
+    const rows = o.panels.map((pn) => [pn.values ? pn.values[i] : undefined, pn.label, pn.truth ? "truth" : "accent"]);
+    if (o.extra) rows.push(...o.extra(i));
+    showTip(e, `rows ${i + 1} → ${i + 2}${where}`, rows);
+  });
   hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
   return svg;
+}
+function curveOf(m, n) {
+  return m && !m.failed && m.profiles && m.profiles[n] ? m.profiles[n] : null;
 }
 
 /* ---------- run facts and answer ---------- */
 function runFacts() {
   const dl = $("run-facts");
-  const im0 = IMAGES[0];
   const items = [
     ["Images", `${IMAGES.length} · ${S.shape[1]} × ${S.shape[0]} px`],
     ["Pixel", `${S.pixel_nm} nm`],
     ["Blur", `${S.blur} nm wide (lens ${S.lens} nm)`],
-    ["Noise per hole", `CD ${S.cd_sigma} nm · placement ${S.placement_sigma} nm · brightness ${Math.round(S.brightness_sigma * 100)} %`],
-    ["Planted", `+${S.row_shift} nm every ~${S.row_period} nm of rows`],
-    ["Run", `${Math.round(S.total_seconds)} s on the ${S.backend.toUpperCase()}`],
+    ["Noise per hole (1 sd)", `CD ${S.cd_sigma} nm · placement ${S.placement_sigma} nm · brightness ${Math.round(S.brightness_sigma * 100)} %`],
+    ["Moved rows", `+${S.row_shift} nm, ~${S.row_period / 1000} µm apart, at least ${S.min_rows_apart ?? 2} rows`],
+    ["Run", `${Math.round(S.total_seconds)} s on the ${S.backend.toUpperCase()}${S.timing_note ? " (faster of 2 identical runs)" : ""}`],
   ];
   for (const [k, v] of items) {
     const d = h("div");
@@ -468,75 +545,72 @@ function runFacts() {
   }
   $("eyebrow").textContent = `subpx · synthetic hole arrays · seed ${S.seed}`;
 }
-
 function bestPerImage() {
   return IMAGES.map((im) => {
     const M = byKey(im);
     return { im, M, truth: M.truth, cd: M[im.best_cd], gpu: M[im.best_gpu], neu: M[im.best_new] };
   });
 }
-
+function span(values) {
+  const v = values.filter((x) => x != null);
+  if (!v.length) return null;
+  const lo = Math.min(...v), hi = Math.max(...v);
+  return lo === hi ? String(lo) : `${lo} to ${hi}`;
+}
 function answer() {
   const box = $("answer");
   const rows = bestPerImage();
-  const tn = rows.map((r) => r.truth && r.truth.need_seen).filter((v) => v != null);
-  const lo = Math.min(...tn), hi = Math.max(...tn);
-  const floor = lo === hi ? `${lo} columns` : `${lo} to ${hi} columns`;
-  const same = (key) => rows.filter((r) => r[key] && r.truth && r[key].need_seen != null && r[key].need_seen <= r.truth.need_seen).length;
+  const need = (m) => (m && usable(m) ? m.need_seen : null);
+  const total = rows.length;
+  const truthSpan = span(rows.map((r) => need(r.truth))) || "–";
+  const cdSpan = span(rows.map((r) => need(r.cd)));
+  const gpuSpan = span(rows.map((r) => need(r.gpu)));
+  const gpuNever = rows.filter((r) => need(r.gpu) == null).length;
+  let cdWins = 0, ties = 0, gpuWins = 0;
+  for (const r of rows) {
+    const a = need(r.cd) ?? 1e9, b = need(r.gpu) ?? 1e9;
+    if (a < b) cdWins++; else if (a > b) gpuWins++; else ties++;
+  }
   const p1 = h("p");
-  p1.innerHTML = "";
-  p1.append("Even perfect centers need ", h("strong", null, floor),
-    ` averaged to show the ${shift} nm step: every hole also sits ${S.placement_sigma} nm (1 sd) off its design place, and that noise has to average out first.`);
+  p1.append("Grey lines are the true y pitch, blue lines what a method measured, both averaged over a few columns. A row moved by ",
+    `${shift} nm shows as a short jump up and then down; between moved rows the line stays flat.`);
+  const cdNever = rows.filter((r) => need(r.cd) == null).length;
+  const tally = {};
+  for (const r of rows) if (r.cd) tally[r.cd.name] = (tally[r.cd.name] || 0) + 1;
+  const [topName, topCount] = Object.entries(tally).sort((a, b) => b[1] - a[1])[0] || ["", 0];
   const p2 = h("p");
-  p2.append("The best CD method gets there with no more columns on ", h("strong", null, `${same("cd")} of ${rows.length}`),
-    " images, the best GPU finder on ", h("strong", null, `${same("gpu")} of ${rows.length}`));
-  if (rows.some((r) => r.neu)) p2.append(", the template-fit prototype on ", h("strong", null, `${same("neu")} of ${rows.length}`));
-  p2.append(".");
+  p2.append("The true centers show every step with ", h("strong", null, `${truthSpan} column${truthSpan === "1" ? "" : "s"}`),
+    " averaged. The best CD method on each image needs ", h("strong", null, cdSpan ? `${cdSpan} columns` : "more than all columns"),
+    topCount > 1 ? ` (the ${topName} on ${topCount} of the ${total} images)` : "",
+    cdNever ? `, and no CD method shows it on ${cdNever}` : "",
+    "; the best GPU finder needs ", h("strong", null, gpuSpan ? `${gpuSpan} columns` : "more than all columns"),
+    gpuNever ? ` (on ${gpuNever} of the ${total} images no GPU finder shows it at all)` : "", ".");
   const p3 = h("p");
-  p3.append("A method needs more columns when its own error is large next to the mask's noise, or when its error depends on where the hole sits inside its pixel: rows run parallel to the pixel rows, so a whole row shares that error and it never averages away. The plot below shows such a case.");
-  box.append(p1, p2, p3);
+  p3.append("The best CD method needs fewer columns than the best GPU finder on ", h("strong", null, `${cdWins} of ${total}`),
+    ` images, as many on ${ties}, more on ${gpuWins}.`);
+  const p4 = h("p");
+  p4.append("A method needs more columns when its own error per hole is large, or when that error depends on where the hole sits inside its pixel: rows run along the pixel rows, so a whole row shares that error and averaging never removes it.");
+  box.append(p1, p2, p3, p4);
 }
-
 function featured() {
   const fig = $("featured");
-  let pick = null;
-  for (const im of IMAGES) {
-    const M = byKey(im), t = M.truth;
-    if (!t || t.failed) continue;
-    for (const m of im.methods) {
-      if (!usable(m) || m.group === "truth" || !m.noise_method || !ok(m.noise_method["8"]) || !ok(m.noise_method["1"])) continue;
-      const excess = m.noise_method["8"] / (m.noise_method["1"] / Math.sqrt(8));  // 1 = pure averaging
-      const score = (im.meta.row_shift_every >= 4 ? 100 : 0) + (m.need_seen == null ? 10 : 0)
-        + excess * (m.center_sd_y < 0.8 ? 1 : 0);
-      if (!pick || score > pick.score) pick = { im, m, score };
-    }
-  }
-  if (!pick) { fig.hidden = true; return; }
-  const im = pick.im, M = byKey(im);
-  const better = im.methods.filter((m) => usable(m) && (m.group === "cd" || m.group === "gpu") && !m.needs_blur
-      && m.key !== pick.m.key && m.noise_method)
-    .sort((a, b) => (a.need_seen ?? 1e9) - (b.need_seen ?? 1e9) || a.noise_method["8"] - b.noise_method["8"])[0];
-  const n = im.keys.includes("8") ? "8" : im.keys[0];
-  const yMax = yRange(im, n);
-  const grid = h("div", "featured-grid");
-  const rows = [[M.truth, "True centers"], [pick.m, pick.m.name], better ? [better, better.name] : null].filter(Boolean);
-  for (const [m, name] of rows) {
-    const row = h("div", "featured-row");
-    const who = h("div", "who");
-    who.append(h("strong", null, name),
-      h("span", null, m.group === "truth" ? `needs ${colsText(m.need_seen, im)}` :
-        `${fmt(m.center_sd_y)} nm per hole · ${m.need_seen == null ? "never shows it" : "needs " + colsText(m.need_seen, im)}`));
-    row.appendChild(who);
-    const rows50 = (a) => (a ? a.slice(0, 50) : a);
-    row.appendChild(pitchPlot({ w: 760, hgt: 92, compact: true, planted: rows50(im.planted), yMax, name,
-      curve: m.group === "truth" ? null : rows50(m.profiles[n]), truth: rows50(M.truth.profiles[n]),
-      label: `${name}: y pitch with ${n} columns averaged` }));
-    grid.appendChild(row);
-  }
-  fig.appendChild(grid);
-  const cap = h("figcaption");
-  cap.textContent = `${im.label}, ${n} columns averaged, middle band of the page, first 50 row pairs. Orange: the planted step (+${shift} nm into a moved row, −${shift} nm out of it). Grey: the true centers. Blue: the method. ${pick.m.name} keeps a repeating pattern of its own (pixel-position error ${fmt(pick.m.phase_error)} nm, curve noise ${fmt(pick.m.noise_method.all)} nm even with all ${im.columns_total} columns).`;
-  fig.appendChild(cap);
+  const im = IMAGES[FEATURED];
+  if (!im) { fig.hidden = true; return; }
+  const M = byKey(im);
+  const n = im.keys.includes("4") ? "4" : im.keys[0];
+  const rows = [[M.truth, "True centers", true], [M[im.best_cd], "best CD method"], [M[im.best_gpu], "best GPU finder"]];
+  const bad = measured(im).filter((m) => m.group === "gpu" && usable(m) && m.need_seen == null)
+    .sort((a, b) => (b.phase_error ?? 0) - (a.phase_error ?? 0))[0];
+  if (bad) rows.push([bad, "never shows the step"]);
+  const panels = rows.filter((r) => r[0]).map(([m, role, truth]) => ({
+    label: truth ? role : `${m.name} (${role})`,
+    sub: truth ? "the real pitch: mask placement noise only" : `${needWords(m, im)} · ${fmt(m.center_sd_y)} nm per hole`,
+    values: (curveOf(m, n) || []).slice(0, 50), truth: !!truth,
+  }));
+  fig.appendChild(h("h3", null, `${im.label}: y pitch with ${n} columns averaged`));
+  fig.appendChild(stackPlot({ w: 960, panelH: 84, count: panels[0].values.length, rowPitch: im.meta.pitch_nm[1], panels,
+    label: `${im.label}: y pitch of the true centers and of measured centers` }));
+  fig.appendChild(h("figcaption", null, `Each line is the y pitch from one row to the next, minus the design ${Math.round(im.meta.pitch_nm[1])} nm, averaged over ${n} neighbouring columns in the middle of the page; the first 50 rows. Grey: the true centers. Blue: measured. Same scale in every panel.`));
 }
 
 /* ---------- best per image ---------- */
@@ -549,8 +623,9 @@ function bestTable() {
   head.appendChild(tr);
   t.appendChild(head);
   const body = h("tbody");
-  for (const r of bestPerImage()) {
-    const row = h("tr");
+  bestPerImage().forEach((r, idx) => {
+    const row = h("tr", "pick");
+    row.tabIndex = 0;
     row.appendChild(h("td", null, r.im.label));
     const cell = (m, isTruth, hideName) => {
       const td = h("td");
@@ -564,39 +639,28 @@ function bestTable() {
     row.append(cell(r.truth, true), cell(r.cd), cell(r.gpu));
     if (hasNew) row.appendChild(cell(r.neu, false, true));
     row.appendChild(h("td", "num", ok(r.im.limit_nm) ? `${fmt(r.im.limit_nm)} nm` : "–"));
+    const open = () => { state.img = idx; renderImage(); $("explore").scrollIntoView({ behavior: "smooth", block: "start" }); };
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
     body.appendChild(row);
-  }
+  });
   t.appendChild(body);
 }
 
 /* ---------- matrix ---------- */
 const GROUP_ORDER = { truth: 0, new: 1, cd: 2, gpu: 3 };
-function needClass(v) {
-  if (v == null) return "cn";
-  if (v <= 2) return "c1";
-  if (v <= 4) return "c2";
-  if (v <= 8) return "c3";
-  if (v <= 16) return "c4";
-  if (v <= 32) return "c5";
-  return "c6";
-}
 function matrix() {
   const t = $("matrix");
   t.replaceChildren();
   const keys = [];
   const info = {};
   for (const im of IMAGES) for (const m of im.methods) if (!info[m.key]) { info[m.key] = m; keys.push(m.key); }
-  const atFloor = (key) => IMAGES.filter((im) => {
-    const M = byKey(im), m = M[key], t = M.truth;
-    return m && usable(m) && t && needOf(m, state.mode) != null && needOf(m, state.mode) <= needOf(t, state.mode);
-  }).length;
   const score = (key) => IMAGES.reduce((s, im) => {
     const m = byKey(im)[key];
     const v = m && usable(m) ? needOf(m, state.mode) : null;
     return s + Math.log2(v == null ? 256 : v);
   }, 0);
-  keys.sort((a, b) => (GROUP_ORDER[info[a].group] ?? 9) - (GROUP_ORDER[info[b].group] ?? 9)
-    || atFloor(b) - atFloor(a) || score(a) - score(b));
+  keys.sort((a, b) => (GROUP_ORDER[info[a].group] ?? 9) - (GROUP_ORDER[info[b].group] ?? 9) || score(a) - score(b));
   const head = h("thead"), tr = h("tr");
   tr.appendChild(h("th", null, "Method"));
   for (const im of IMAGES) tr.appendChild(h("th", "img", im.label));
@@ -604,8 +668,7 @@ function matrix() {
   t.appendChild(head);
   const body = h("tbody");
   for (const key of keys) {
-    const row = h("tr", "pick");
-    row.tabIndex = 0;
+    const row = h("tr", info[key].group === "truth" ? "" : "pick");
     const who = h("td", "who", info[key].name);
     who.appendChild(h("span", "tag", groupTag(info[key])));
     if (info[key].needs_blur) who.appendChild(h("span", "tag", "true blur"));
@@ -619,9 +682,12 @@ function matrix() {
       if (m && !m.failed) td.title = `${m.name} on ${im.label}: found ${pct(m.found)}, ${fmt(m.center_sd_y)} nm per hole`;
       row.appendChild(td);
     });
-    const select = () => { state.method = key; renderImage(); $("explore-h").scrollIntoView({ behavior: "smooth", block: "start" }); };
-    row.addEventListener("click", select);
-    row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(); } });
+    if (info[key].group !== "truth") {
+      row.tabIndex = 0;
+      const select = () => { pick(key); $("explore").scrollIntoView({ behavior: "smooth", block: "start" }); };
+      row.addEventListener("click", select);
+      row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(); } });
+    }
     body.appendChild(row);
   }
   t.appendChild(body);
@@ -657,80 +723,194 @@ function tabs() {
     const b = h("button", "chip", im.label);
     b.type = "button";
     b.setAttribute("aria-pressed", String(i === state.img));
-    b.addEventListener("click", () => {
-      state.img = i;
-      state.method = null;
-      box.querySelectorAll("button").forEach((x, j) => x.setAttribute("aria-pressed", String(j === i)));
-      renderImage();
-    });
+    b.addEventListener("click", () => { state.img = i; renderImage(); });
     box.appendChild(b);
   });
+}
+function defaultMethod(im) {
+  return im.best_cd || im.best_gpu || im.best_new || measured(im)[0]?.key;
+}
+function methodList(im) {
+  const box = $("mlist-box");
+  box.replaceChildren();
+  $("mlist-note").textContent = state.mode === "method"
+    ? "Chip: columns needed, method alone. Last: center error per hole, nm."
+    : "Chip: columns needed to show the step. Last: center error per hole, nm.";
+  const groups = [["cd", "CD methods"], ["gpu", "GPU finders"], ["new", "New (prototype)"]];
+  for (const [g, title] of groups) {
+    const list = im.methods.filter((m) => m.group === g);
+    if (!list.length) continue;
+    const head = h("div", "grp");
+    head.setAttribute("role", "presentation");
+    head.append(h("span", null, title), h("span", null, "cols"), h("span", null, "nm"));
+    box.appendChild(head);
+    for (const m of list) {
+      const opt = h("div", "opt" + (usable(m) ? "" : " weak"));
+      opt.id = "opt-" + m.key;
+      opt.dataset.key = m.key;
+      opt.setAttribute("role", "option");
+      const name = h("span", "nm", m.name);
+      if (m.key === im.best_cd) name.appendChild(h("span", "tag", "best CD"));
+      if (m.key === im.best_gpu) name.appendChild(h("span", "tag", "best GPU"));
+      if (m.needs_blur) name.appendChild(h("span", "tag", "true blur"));
+      let chip;
+      if (m.failed) chip = h("span", "need cw", "none");
+      else if (m.found < 0.99) chip = h("span", "need cw", Math.floor(100 * m.found) + " %");
+      else {
+        const v = needOf(m, state.mode);
+        chip = h("span", "need " + needClass(v), v == null ? "never" : v === im.columns_total ? "all" : String(v));
+      }
+      chip.title = m.failed ? "no centers" : m.found < 0.99 ? `found ${pct(m.found)} of the holes` : needWords(m, im);
+      opt.append(name, chip, h("span", "err", m.failed ? "–" : fmt(m.center_sd_y)));
+      opt.addEventListener("click", () => pick(m.key, true));
+      box.appendChild(opt);
+    }
+  }
+}
+function showPicked() {
+  const box = $("mlist-box");
+  let on = null;
+  box.querySelectorAll(".opt").forEach((o) => {
+    const yes = o.dataset.key === state.method;
+    o.classList.toggle("on", yes);
+    o.setAttribute("aria-selected", String(yes));
+    if (yes) on = o;
+  });
+  if (!on) { box.removeAttribute("aria-activedescendant"); return; }
+  box.setAttribute("aria-activedescendant", on.id);
+  // Keep the picked entry in view by scrolling the list only, never the page.
+  const top = on.offsetTop, bottom = top + on.offsetHeight;
+  if (top < box.scrollTop + 4) box.scrollTop = Math.max(0, top - 30);
+  else if (bottom > box.scrollTop + box.clientHeight - 4) box.scrollTop = bottom - box.clientHeight + 8;
+}
+function pick(key, focusList) {
+  state.method = key;
+  renderMethod();
+  if (focusList) $("mlist-box").focus({ preventScroll: true });
+}
+function listKeys(e) {
+  const keys = [...$("mlist-box").querySelectorAll(".opt")].map((o) => o.dataset.key);
+  if (!keys.length) return;
+  let i = keys.indexOf(state.method);
+  if (e.key === "ArrowDown") i = Math.min(keys.length - 1, i + 1);
+  else if (e.key === "ArrowUp") i = Math.max(0, i - 1);
+  else if (e.key === "Home") i = 0;
+  else if (e.key === "End") i = keys.length - 1;
+  else return;
+  e.preventDefault();
+  if (keys[i] !== state.method) pick(keys[i]);
+}
+function compareKey(im) {
+  const M = byKey(im);
+  if (state.compare === "none") return null;
+  if (state.compare && M[state.compare] && state.compare !== state.method) return state.compare;
+  if (im.best_gpu && im.best_gpu !== state.method) return im.best_gpu;
+  if (im.best_cd && im.best_cd !== state.method) return im.best_cd;
+  return null;
+}
+function compareSelect(im) {
+  const sel = $("compare");
+  sel.replaceChildren();
+  const none = h("option", null, "nothing");
+  none.value = "none";
+  sel.appendChild(none);
+  for (const [g, title] of [["cd", "CD methods"], ["gpu", "GPU finders"], ["new", "New (prototype)"]]) {
+    const list = im.methods.filter((m) => m.group === g && m.key !== state.method);
+    if (!list.length) continue;
+    const og = h("optgroup");
+    og.label = title;
+    for (const m of list) {
+      const o = h("option", null, m.name + (m.key === im.best_gpu ? " (best GPU)" : m.key === im.best_cd ? " (best CD)" : ""));
+      o.value = m.key;
+      og.appendChild(o);
+    }
+    sel.appendChild(og);
+  }
+  sel.value = compareKey(im) || "none";
 }
 function nButtons(im) {
   const box = $("ncols");
   box.replaceChildren();
-  if (!im.keys.includes(state.n)) state.n = im.keys.includes("8") ? "8" : im.keys[0];
+  if (!im.keys.includes(state.n)) state.n = im.keys.includes("4") ? "4" : im.keys[0];
   for (const k of im.keys) {
     const b = h("button", "chip", k === "all" ? `all ${im.columns_total}` : k);
     b.type = "button";
     b.setAttribute("aria-pressed", String(k === state.n));
-    b.addEventListener("click", () => { state.n = k; renderImage(); });
+    b.addEventListener("click", () => {
+      state.n = k;
+      box.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+      renderMethod();
+    });
     box.appendChild(b);
   }
-}
-function defaultMethod(im) {
-  return im.best_cd || im.best_gpu || im.best_new || im.methods.find((m) => m.group !== "truth")?.key;
 }
 function rowButtons(im) {
   const box = $("rows");
   box.replaceChildren();
-  [[50, "first 50 row pairs"], [0, `whole page (${im.row_intervals})`]].forEach(([v, label]) => {
+  [[50, "first 50"], [0, `all ${im.row_intervals}`]].forEach(([v, label]) => {
     const b = h("button", "chip", label);
     b.type = "button";
     b.setAttribute("aria-pressed", String(state.rows === v));
-    b.addEventListener("click", () => { state.rows = v; renderImage(); });
+    b.addEventListener("click", () => {
+      state.rows = v;
+      box.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+      renderMethod();
+    });
     box.appendChild(b);
   });
 }
 function imageHead(im) {
   const box = $("image-head");
   box.replaceChildren();
-  const fig = h("figure");
   if (im.crop_png) {
     const img = h("img");
     img.src = "data:image/png;base64," + im.crop_png;
-    img.alt = `Center of the ${im.label} test page`;
-    fig.appendChild(img);
-    fig.appendChild(h("figcaption", null, "Page center, 72 × 72 px, contrast stretched."));
+    img.alt = `Center of the ${im.label} test page, 72 × 72 px`;
+    img.title = "Page center, 72 × 72 px, contrast stretched";
+    box.appendChild(img);
   }
-  box.appendChild(fig);
-  const kv = h("dl", "kv");
+  const kv = h("dl", "kv two-up");
   const meta = im.meta;
   const add = (k, v) => { kv.append(h("dt", null, k), h("dd", null, v)); };
-  add("Holes", `${meta.hole}, ${meta.size_nm.map((v) => Math.round(v)).join(" × ")} nm (${meta.size_px.map((v) => v.toFixed(1)).join(" × ")} px)`);
+  const period = (meta.row_shift_every * meta.pitch_nm[1]) / 1000;
+  add("Holes", `${meta.hole} ${meta.size_nm.map((v) => Math.round(v)).join(" × ")} nm (${meta.size_px.map((v) => v.toFixed(1)).join(" × ")} px)`);
   add("Layout", `${meta.layout}, pitch ${meta.pitch_nm.map((v) => Math.round(v)).join(" / ")} nm (x / row)`);
-  add("Rows moved", `every ${meta.row_shift_every} rows (${Math.round(meta.row_shift_every * meta.pitch_nm[1])} nm), +${meta.row_shift_nm} nm`);
-  add("Holes measured", `${im.evaluated_holes.toLocaleString("en-US")} (${im.pairs.toLocaleString("en-US")} pitch pairs, ${im.columns_total} columns × ${im.row_intervals} row pairs)`);
-  add("Best possible", ok(im.limit_nm) ? `${fmt(im.limit_nm)} nm per hole (one hole alone, its own noise only)` : "–");
-  add("Seconds", `${fmt(im.seconds, 1)} for this image, all methods`);
+  add("Moved rows", `every ${meta.row_shift_every} rows (${period.toFixed(2)} µm), +${meta.row_shift_nm} nm`);
+  add("Measured", `${im.evaluated_holes.toLocaleString("en-US")} holes · ${im.columns_total} columns × ${im.row_intervals} rows`);
+  add("Best possible", ok(im.limit_nm) ? `${fmt(im.limit_nm)} nm per hole` : "–");
+  add("Seconds", `${fmt(im.seconds, 1)} for all methods`);
   box.appendChild(kv);
 }
-function focusPlot(im, m) {
+function focusPlot(im) {
   const fig = $("focus");
   fig.replaceChildren();
   const M = byKey(im);
-  const title = h("h3", null, `${m.name}: y pitch with ${state.n === "all" ? "all " + im.columns_total : state.n} column${state.n === "1" ? "" : "s"} averaged`);
-  fig.appendChild(title);
-  if (m.failed || !m.profiles || !m.profiles[state.n]) { fig.appendChild(h("p", null, "This method gave no centers on this image.")); return; }
-  fig.appendChild(pitchPlot({ w: 1000, hgt: 260, compact: false, planted: cut(im.planted), yMax: yRange(im, state.n), name: m.name,
-    curve: m.group === "truth" ? null : cut(m.profiles[state.n]), truth: cut(M.truth.profiles[state.n]), label: `${m.name} y pitch` }));
-  const ns = m.noise_seen || {}, nm = m.noise_method || {};
-  fig.appendChild(h("figcaption", null,
-    `Middle band of columns. Curve noise ${fmt(ns[state.n])} nm with the mask's placement noise, ${fmt(nm[state.n])} nm from the method alone; step seen with all columns ${fmt(m.spike)} nm (true centers ${fmt(M.truth.spike)} nm).`));
+  const sel = M[state.method];
+  const ck = compareKey(im);
+  const cmp = ck ? M[ck] : null;
+  const nl = nLabel(state.n, im);
+  fig.appendChild(h("h3", null, `y pitch with ${nl} column${state.n === "1" ? "" : "s"} averaged`));
+  const panel = (m, truth) => ({
+    label: truth ? "True centers" : m.name,
+    sub: truth ? "the real pitch: mask placement noise only"
+      : `${needWords(m, im)} · ${m.failed ? "–" : fmt(m.center_sd_y)} nm per hole${!m.failed && m.found < 0.99 ? " · found " + pct(m.found) : ""}`,
+    values: cut(curveOf(m, state.n)), truth,
+  });
+  const panels = [panel(M.truth, true), panel(sel, false)];
+  if (cmp) panels.push(panel(cmp, false));
+  const count = (cut(curveOf(M.truth, state.n)) || []).length;
+  fig.appendChild(stackPlot({ w: 960, panelH: 104, count, rowPitch: im.meta.pitch_nm[1], panels,
+    label: `y pitch of the true centers, ${sel.name}${cmp ? " and " + cmp.name : ""}` }));
+  const over = state.n === "1" ? "in one column in the middle of the page (no averaging)" : `averaged over ${nl} neighbouring columns in the middle of the page`;
+  fig.appendChild(h("figcaption", null, `Each line is the y pitch from one row to the next, minus the design ${Math.round(im.meta.pitch_nm[1])} nm, ${over}${state.rows ? `; the first ${state.rows} rows` : ""}. Grey: the true centers. Blue: measured. Same scale (±${Y_MAX} nm) in every panel.`));
 }
-function noiseChart(im, sel) {
+function noiseChart(im) {
   const fig = $("noise");
   fig.replaceChildren();
+  const M = byKey(im);
+  const sel = M[state.method];
+  const ck = compareKey(im);
+  const cmp = ck ? M[ck] : null;
   fig.appendChild(h("h3", null, state.mode === "method" ? "Curve noise from the method alone" : "Curve noise you would see"));
   const w = 560, hgt = 300, m = { l: 46, r: 12, t: 10, b: 38 };
   const Ns = im.keys.map((k) => (k === "all" ? im.columns_total : +k));
@@ -739,6 +919,8 @@ function noiseChart(im, sel) {
   const lo = 0.02, hi = 10;
   const Y = (v) => m.t + (hgt - m.t - m.b) * (1 - (Math.log10(Math.max(lo, Math.min(hi, v))) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)));
   const svg = sv("svg", { viewBox: `0 0 ${w} ${hgt}`, class: "plot", role: "img", "aria-label": "Curve noise against columns averaged" });
+  const now = Ns[im.keys.indexOf(state.n)];
+  if (now) sv("line", { x1: X(now), x2: X(now), y1: m.t, y2: hgt - m.b, class: "ln-now" }, svg);
   [0.03, 0.1, 0.3, 1, 3, 10].forEach((v) => {
     sv("line", { x1: m.l, x2: w - m.r, y1: Y(v), y2: Y(v), class: "grid" }, svg);
     stext(svg, m.l - 5, Y(v) + 3.5, String(v), "tick", "end");
@@ -746,10 +928,10 @@ function noiseChart(im, sel) {
   im.keys.forEach((k, i) => stext(svg, X(Ns[i]), hgt - m.b + 14, k === "all" ? String(im.columns_total) : k, "tick", "middle"));
   stext(svg, (m.l + w - m.r) / 2, hgt - 6, "columns averaged", "axis-label", "middle");
   sv("line", { x1: m.l, x2: w - m.r, y1: Y(visible), y2: Y(visible), class: "ln-limit" }, svg);
-  stext(svg, w - m.r, Y(visible) - 5, `step visible below ${fmt(visible)} nm`, "note", "end");
+  stext(svg, w - m.r, Y(visible) - 5, `step clear below ${fmt(visible)} nm`, "note", "end");
   const line = (method, cls) => {
-    const nz = noiseOf(method, state.mode);
-    if (!nz) return;
+    const nz = method && !method.failed ? noiseOf(method, state.mode) : null;
+    if (!nz) return null;
     const vals = im.keys.map((k) => nz[k]);
     let d = "", pen = false;
     vals.forEach((v, i) => {
@@ -760,10 +942,10 @@ function noiseChart(im, sel) {
     sv("path", { d, class: cls }, svg);
     return vals;
   };
-  for (const other of im.methods) if (usable(other) && other.key !== sel.key && other.group !== "truth") line(other, "ln-ctx");
-  const M = byKey(im);
+  for (const other of measured(im)) if (usable(other) && other.key !== sel.key && other.key !== ck) line(other, "ln-ctx");
   const tv = state.mode === "method" ? null : line(M.truth, "ln-truth");
-  const mv = sel.group === "truth" || !usable(sel) && sel.failed ? null : line(sel, "ln-method");
+  const cv = line(cmp, "ln-compare");
+  const mv = line(sel, "ln-method");
   if (mv) mv.forEach((v, i) => { if (ok(v) && v > 0) sv("circle", { cx: X(Ns[i]), cy: Y(v), r: 4, class: "dot" }, svg); });
   const cross = sv("line", { y1: m.t, y2: hgt - m.b, class: "cross", visibility: "hidden" }, svg);
   const hit = sv("rect", { x: m.l, y: 0, width: w - m.l - m.r, height: hgt, fill: "transparent" }, svg);
@@ -777,6 +959,7 @@ function noiseChart(im, sel) {
     cross.setAttribute("visibility", "visible");
     const rows = [];
     if (mv) rows.push([fmt(mv[best]) + " nm", sel.name, "accent"]);
+    if (cv) rows.push([fmt(cv[best]) + " nm", cmp.name + " (dashed)", "accent"]);
     if (tv) rows.push([fmt(tv[best]) + " nm", "true centers", "truth"]);
     showTip(e, `${Ns[best]} column${Ns[best] === 1 ? "" : "s"} averaged`, rows);
   });
@@ -785,30 +968,32 @@ function noiseChart(im, sel) {
   const lg = h("div", "legend");
   const key = (cls, text) => { const k = h("span", "key"); k.append(h("i", cls), text); return k; };
   lg.append(key("method", sel.name));
+  if (cv) lg.append(key("compare", cmp.name));
   if (tv) lg.append(key("truth", "true centers"));
   lg.append(key("ctx", "other methods"));
   fig.appendChild(lg);
-  fig.appendChild(h("figcaption", null, "Root-mean-square error of the y-pitch curve over every band of that many columns. Averaging alone makes it fall along a straight line; a method whose error repeats row after row levels off."));
+  fig.appendChild(h("figcaption", null, "Root-mean-square error of the y-pitch curve over every band of that many columns (shaded: the number shown above). Averaging alone makes it fall along a straight line; a method whose error repeats row after row levels off."));
 }
-function phaseChart(im, sel) {
+function phaseChart(im) {
   const fig = $("phase");
   fig.replaceChildren();
+  const sel = byKey(im)[state.method];
   fig.appendChild(h("h3", null, "Error against place inside the pixel"));
-  const curve = sel.phase_curve;
-  if (!curve || sel.group === "truth" || sel.failed) {
-    fig.appendChild(h("p", null, "Pick a method to see its mean y error against where the hole's true center sits inside its pixel."));
+  const curve = sel && sel.phase_curve;
+  if (!curve || sel.failed) {
+    fig.appendChild(h("p", null, "No centers from this method on this image."));
     return;
   }
   const w = 420, hgt = 300, m = { l: 46, r: 10, t: 10, b: 38 };
   const vals = curve.filter(ok);
-  const span = Math.max(0.1, Math.ceil(Math.max(...vals.map(Math.abs), 0.05) * 1.25 * 20) / 20);
+  const range = Math.max(0.1, Math.ceil(Math.max(...vals.map(Math.abs), 0.05) * 1.25 * 20) / 20);
   const nb = curve.length;
   const xc = (i) => -0.5 + (i + 0.5) / nb;
   const X = (u) => m.l + (w - m.l - m.r) * (u + 0.5);
-  const Y = (v) => m.t + (hgt - m.t - m.b) * (1 - (v + span) / (2 * span));
+  const Y = (v) => m.t + (hgt - m.t - m.b) * (1 - (v + range) / (2 * range));
   const svg = sv("svg", { viewBox: `0 0 ${w} ${hgt}`, class: "plot", role: "img", "aria-label": "Mean y error against place inside the pixel" });
-  const tickStep = span > 0.6 ? 0.5 : span > 0.25 ? 0.1 : 0.05;
-  for (let v = -Math.floor(span / tickStep) * tickStep; v <= span + 1e-9; v += tickStep) {
+  const tickStep = range > 0.6 ? 0.5 : range > 0.25 ? 0.1 : 0.05;
+  for (let v = -Math.floor(range / tickStep) * tickStep; v <= range + 1e-9; v += tickStep) {
     const vv = Math.round(v * 1000) / 1000;
     sv("line", { x1: m.l, x2: w - m.r, y1: Y(vv), y2: Y(vv), class: Math.abs(vv) < 1e-9 ? "axis" : "grid" }, svg);
     stext(svg, m.l - 5, Y(vv) + 3.5, (vv > 0 ? "+" : vv < 0 ? "−" : "") + Math.abs(vv).toFixed(tickStep < 0.1 ? 2 : 1), "tick", "end");
@@ -816,46 +1001,50 @@ function phaseChart(im, sel) {
   [-0.5, -0.25, 0, 0.25, 0.5].forEach((u) => stext(svg, X(u), hgt - m.b + 16, (u > 0 ? "+" : u < 0 ? "−" : "") + Math.abs(u), "tick",
     u === -0.5 ? "start" : u === 0.5 ? "end" : "middle"));
   stext(svg, (m.l + w - m.r) / 2, hgt - 6, "true center − nearest pixel center, px", "axis-label", "middle");
-  let d = "", pen = false;
-  curve.forEach((v, i) => { if (!ok(v)) { pen = false; return; } d += (pen ? "L" : "M") + X(xc(i)).toFixed(1) + " " + Y(v).toFixed(1); pen = true; });
-  sv("path", { d, class: "ln-method" }, svg);
+  sv("path", { d: linePath(curve, (i) => X(xc(i)), Y), class: "ln-method" }, svg);
   curve.forEach((v, i) => {
     if (!ok(v)) return;
-    const c = sv("circle", { cx: X(xc(i)), cy: Y(v), r: 4, class: "dot" }, svg);
+    sv("circle", { cx: X(xc(i)), cy: Y(v), r: 4, class: "dot" }, svg);
     const hit = sv("circle", { cx: X(xc(i)), cy: Y(v), r: 12, fill: "transparent" }, svg);
     hit.addEventListener("pointermove", (e) => showTip(e, `true center ${signed(xc(i), 3)} px from the pixel center`, [[v, "mean y error", "accent"]]));
     hit.addEventListener("pointerleave", hideTip);
-    void c;
   });
   fig.appendChild(svg);
-  fig.appendChild(h("figcaption", null, `${sel.name}: pixel-position error ${fmt(sel.phase_error)} nm (half the peak-to-peak). Empty places: no hole sits there (few distinct places when the pitch is close to a whole number of pixels).`));
+  fig.appendChild(h("figcaption", null, `${sel.name}: mean y error (nm) by where the true center sits inside its pixel. Pixel-position error ${fmt(sel.phase_error)} nm (half the peak-to-peak); a whole row shares it, so it never averages away. Gaps: no hole sits there.`));
 }
-function multiples(im, sel) {
+function multiples(im) {
   const box = $("multiples");
   box.replaceChildren();
   const M = byKey(im);
-  const yMax = yRange(im, state.n);
-  for (const m of tableOrder(im)) {
-    if (m.group === "truth") continue;
-    const card = h("div", "mcard" + (m.key === sel.key ? " on" : ""));
-    card.tabIndex = 0;
-    card.setAttribute("role", "button");
-    card.setAttribute("aria-pressed", String(m.key === sel.key));
+  const truthCurve = cut(curveOf(M.truth, state.n));
+  const count = (truthCurve || []).length;
+  $("multiples-note").textContent = `${nLabel(state.n, im)} column${state.n === "1" ? "" : "s"} averaged, same scale (±${Y_MAX} nm) as above. Grey: true centers; blue: each method alone. Click one to pick it.`;
+  const card = (m, truth) => {
+    const c = h("div", "mcard" + (truth ? " truth" : "") + (!truth && m.key === state.method ? " on" : ""));
     const t = h("div", "t");
     const need = needOf(m, state.mode);
-    t.append(h("span", null, m.name), h("span", null, m.failed ? "" : `${fmt(m.center_sd_y)} nm · ${need == null ? "never" : needText(need, im) + " col"}`));
-    card.appendChild(t);
-    if (m.failed || !m.profiles || !m.profiles[state.n]) card.appendChild(h("div", "none", "No centers on this image."));
+    t.append(h("span", null, truth ? "True centers" : m.name),
+      h("span", null, m.failed ? "" : `${truth ? "" : fmt(m.center_sd_y) + " nm · "}${need == null ? "never" : needText(need, im) + " col"}`));
+    c.appendChild(t);
+    const values = cut(curveOf(m, state.n));
+    if (!values) c.appendChild(h("div", "none", "No centers on this image."));
     else {
-      if (m.found < 0.99) card.appendChild(h("div", "t", `found ${pct(m.found)} of the holes`));
-      card.appendChild(pitchPlot({ w: 320, hgt: 96, compact: true, planted: cut(im.planted), yMax, name: m.name,
-        curve: cut(m.profiles[state.n]), truth: cut(M.truth.profiles[state.n]), label: `${m.name} y pitch` }));
+      if (!truth && m.found < 0.99) c.appendChild(h("div", "t", `found ${pct(m.found)} of the holes`));
+      c.appendChild(stackPlot({ w: 320, compact: true, panelH: 64, axis: false, count, rowPitch: im.meta.pitch_nm[1],
+        panels: [{ label: truth ? "true centers" : m.name, values, truth }], label: `${m.name} y pitch`,
+        extra: truth ? null : (i) => [[truthCurve ? truthCurve[i] : undefined, "true centers", "truth"]] }));
     }
-    const select = () => { state.method = m.key; renderImage(); };
-    card.addEventListener("click", select);
-    card.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(); } });
-    box.appendChild(card);
-  }
+    if (!truth) {
+      c.tabIndex = 0;
+      c.setAttribute("role", "button");
+      c.setAttribute("aria-pressed", String(m.key === state.method));
+      c.addEventListener("click", () => pick(m.key));
+      c.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(m.key); } });
+    }
+    return c;
+  };
+  box.appendChild(card(M.truth, true));
+  for (const m of measured(im)) box.appendChild(card(m, false));
 }
 function tableOrder(im) {
   const rank = (m) => (m.group === "truth" ? -1 : m.failed ? 3 : m.found < 0.99 ? 2 : 0);
@@ -863,7 +1052,7 @@ function tableOrder(im) {
     || (needOf(a, state.mode) ?? 1e9) - (needOf(b, state.mode) ?? 1e9)
     || (a.center_sd_y ?? 1e9) - (b.center_sd_y ?? 1e9));
 }
-function table(im, sel) {
+function table(im) {
   const t = $("table");
   t.replaceChildren();
   const head = h("thead"), tr = h("tr");
@@ -873,8 +1062,8 @@ function table(im, sel) {
   t.appendChild(head);
   const body = h("tbody");
   for (const m of tableOrder(im)) {
-    const row = h("tr", "pick" + (m.key === sel.key ? " on" : "") + (m.failed || m.found < 0.99 ? " weak" : ""));
-    row.tabIndex = 0;
+    const truth = m.group === "truth";
+    const row = h("tr", (truth ? "" : "pick") + (m.key === state.method ? " on" : "") + (m.failed || m.found < 0.99 ? " weak" : ""));
     const who = h("td", null, m.name);
     who.appendChild(h("span", "tag", groupTag(m)));
     if (m.needs_blur) who.appendChild(h("span", "tag", "true blur"));
@@ -883,28 +1072,37 @@ function table(im, sel) {
     row.appendChild(who);
     const cells = m.failed ? [pct(m.found), "–", "–", "–", "–", "–", fmt(m.seconds, 1)] :
       [pct(m.found), fmt(m.center_sd_y), fmt(m.phase_error), fmt(m.spike), needText(m.need_seen, im), needText(m.need_method, im),
-        m.group === "truth" ? "–" : fmt(m.seconds, 1)];
+        truth ? "–" : fmt(m.seconds, 1)];
     cells.forEach((v) => row.appendChild(h("td", "num", v)));
-    const select = () => { state.method = m.key; renderImage(); };
-    row.addEventListener("click", select);
-    row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(); } });
+    if (!truth) {
+      row.tabIndex = 0;
+      row.addEventListener("click", () => pick(m.key));
+      row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(m.key); } });
+    }
     body.appendChild(row);
   }
   t.appendChild(body);
 }
+function renderMethod() {
+  const im = IMAGES[state.img];
+  showPicked();
+  compareSelect(im);
+  focusPlot(im);
+  noiseChart(im);
+  phaseChart(im);
+  multiples(im);
+  table(im);
+}
 function renderImage() {
   const im = IMAGES[state.img];
   const M = byKey(im);
-  if (!state.method || !M[state.method]) state.method = defaultMethod(im);
-  const sel = M[state.method];
+  if (!state.method || !M[state.method] || M[state.method].group === "truth") state.method = defaultMethod(im);
+  $("tabs").querySelectorAll("button").forEach((b, j) => b.setAttribute("aria-pressed", String(j === state.img)));
+  methodList(im);
   nButtons(im);
   rowButtons(im);
   imageHead(im);
-  focusPlot(im, sel);
-  noiseChart(im, sel);
-  phaseChart(im, sel);
-  multiples(im, sel);
-  table(im, sel);
+  renderMethod();
 }
 
 /* ---------- notes ---------- */
@@ -917,26 +1115,35 @@ function notes() {
     if (items) { const ul = h("ul"); items.forEach((t) => ul.appendChild(h("li", null, t))); d.appendChild(ul); }
     box.appendChild(d);
   };
+  const periods = IMAGES.map((im) => (im.meta.row_shift_every * im.meta.pitch_nm[1]) / 1000);
+  const periodText = `${Math.min(...periods).toFixed(2)} to ${Math.max(...periods).toFixed(2)} µm`;
+  let wins = 0, ties = 0, losses = 0;
+  for (const r of bestPerImage()) {
+    if (!r.neu || !usable(r.neu)) continue;
+    const others = measured(r.im).filter((m) => m.group !== "new" && usable(m) && !m.needs_blur);
+    const best = Math.min(...others.map((m) => m.need_seen ?? 1e9));
+    const own = r.neu.need_seen ?? 1e9;
+    if (own < best) wins++; else if (own === best) ties++; else losses++;
+  }
   block("The test pages", [
-    "Square or staggered arrays of circles, squares and ellipses on a 2048 × 1378 px page of 21 nm pixels, 8-bit, bright holes on a dark background.",
-    "Each hole is drawn from its exact shape: shape × blur × pixel area in Fourier space, so a noiseless hole's centroid is its true center to 1e-9 px. No drawing grid can fake a pixel-position error.",
-    `Per hole: CD ${S.cd_sigma} nm, placement ${S.placement_sigma} nm (x and y) and brightness ${Math.round(S.brightness_sigma * 100)} % at random (1 sd); photon noise (${S.photons} photons per grey level) and read noise.`,
-    `The rows closest to every ${S.row_period} nm are moved +${S.row_shift} nm in y. Rows run parallel to the pixel rows.`,
+    `Square or staggered arrays of circles, squares and ellipses on a ${S.shape[1]} × ${S.shape[0]} px page of ${S.pixel_nm} nm pixels, 8-bit, bright holes on a dark background.`,
+    "Each hole is drawn from its exact shape: shape × blur × pixel area in Fourier space, so a noiseless hole's centroid is its true center to better than 1e-6 px. No drawing grid can fake a pixel-position error.",
+    `Per hole at random (1 sd): CD ${S.cd_sigma} nm, placement ${S.placement_sigma} nm (x and y), brightness ${Math.round(S.brightness_sigma * 100)} %; photon noise (${S.photons} photons per grey level) and read noise.`,
+    `Moved rows: +${S.row_shift} nm in y, the rows closest to ${S.row_period} nm apart but at least ${S.min_rows_apart ?? 2} rows apart, so each moved row shows as its own jump up and down; here ${periodText} apart. Rows run parallel to the pixel rows.`,
   ]);
   block("The numbers", [
     "Found: share of holes (one pitch or more from the page edge) the method gave a center for, within half a spacing of the true one.",
     "Center error: spread (1 sd) of measured − true y over all found holes.",
     "Pixel-position error: half the peak-to-peak of the mean y error against where the true center sits inside its pixel. It is shared by a whole row and never averages away.",
-    "y pitch: as analyze_pitch, the mean of the (row r, column k) → (row r + 1, column k) pairs over a band of N columns. Curve noise: its root-mean-square error over every band, after removing each band's mean.",
+    "y pitch: as analyze_pitch, the mean of the (row r, column k) → (row r + 1, column k) pairs over a band of N columns. The graphs show the band in the middle of the page. Curve noise: the root-mean-square error over every band, after removing each band's mean.",
     "Columns needed: fewest N whose curve noise is at most a third of the step. With the mask's placement noise (against design + planted step) or method alone (against the true centers).",
     "Step seen: least-squares size of the planted pattern in the all-columns curve; the true centers give about the planted size.",
-    "Best possible per hole: Cramér–Rao bound for one hole alone with its brightness and background fitted, photon, read and rounding noise only.",
+    "Best possible per hole: the smallest center error any method can reach on one hole alone (Cramér–Rao bound with its brightness and background fitted; photon, read and rounding noise only).",
   ]);
   block("The methods", [
-    "CD methods: centers from one measure_cds call with all methods on the GPU (summary mode). The blurred-hole fit and flux ratio are given the true blur, which real pages lack.",
+    "CD methods: centers from one measure_cds call with all methods on the GPU (summary mode). The blurred-hole fit and flux ratio are given the true blur, which real pages lack, so they never count as best.",
     "GPU finders: detect_centers with each refine method on the GPU, Otsu threshold, area limits from the design hole: the finders the workbench offers for pitch.",
-    "Template fit (prototype): each hole fitted with the image's own average hole (scripts/template_fit_prototype.py). Not in the library: it did not pass the bar set before the test (best on at least 6 of the 8 images).",
-    "Fixed on the way: the GPU edge-erf finder measured its straight-line background from the page's left or top edge, so holes more than ~140 px from it were refused. On 300 nm squares it found 0.6 % of the holes before the fix and 100 % after.",
+    `Template fit (prototype): each hole fitted with the image's own average hole (scripts/template_fit_prototype.py), not in the library. Here it needs fewer columns than the best existing method on ${wins} images, as many on ${ties}, more on ${losses}.`,
   ]);
   block("Not in these pages", [
     "Rotation: rows tilted against the pixel rows spread the pixel-position error over the row and help every method.",
@@ -946,7 +1153,7 @@ function notes() {
   const st = h("div");
   st.appendChild(h("h3", null, "Settings"));
   const kv = h("dl", "kv");
-  for (const k of ["seed", "blur", "lens", "photons", "cd_sigma", "placement_sigma", "brightness_sigma", "row_shift", "row_period", "rotation", "backend"]) {
+  for (const k of ["seed", "blur", "lens", "photons", "cd_sigma", "placement_sigma", "brightness_sigma", "row_shift", "row_period", "min_rows_apart", "rotation", "backend", "timing_note"]) {
     if (S[k] === undefined) continue;
     kv.append(h("dt", null, k), h("dd", null, String(S[k])));
   }
@@ -955,9 +1162,11 @@ function notes() {
   box.appendChild(st);
 }
 
+$("mlist-box").addEventListener("keydown", listKeys);
+$("compare").addEventListener("change", (e) => { state.compare = e.target.value || "none"; renderMethod(); });
 runFacts();
-answer();
 featured();
+answer();
 bestTable();
 modeButtons();
 matrix();

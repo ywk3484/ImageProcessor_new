@@ -7,11 +7,49 @@ import pytest
 
 pytest.importorskip("scipy")
 
-from scripts.pitch_signature_test import PIXEL_NM, evaluate, evaluation_set, main, match_points, pitch_pairs  # noqa: E402
+from scripts.pitch_signature_test import (  # noqa: E402
+    PATTERNS, PIXEL_NM, evaluate, evaluation_set, main, match_points, pitch_pairs, rows_apart)
 from scripts.template_fit_prototype import template_fit_centers  # noqa: E402
 from subpx.synthetic_arrays import render_hole_array  # noqa: E402
 
 QUIET = dict(photons_per_level=None, bits=None, read_noise=0.0, backend="cpu")
+
+
+def test_moved_rows_are_about_1um_but_at_least_5_rows_apart():
+    assert rows_apart((200.0, 200.0)) == 5  # 1.0 um
+    assert rows_apart((200.0, 175.0)) == 6
+    assert rows_apart((140.0, 100.0)) == 10
+    assert rows_apart((600.0, 600.0)) == 5  # 1 um would be every 2nd row: a zig-zag
+    assert rows_apart((300.0, 300.0), min_rows=2) == 3
+    assert rows_apart((600.0, 600.0), period_nm=3000.0, min_rows=0) == 5
+
+
+def _edge_gap_nm(page, spec):
+    """Smallest distance between the edges of neighbouring design holes (nm)."""
+    from scipy.spatial import cKDTree
+
+    c = page.design_xy[page.inside] * PIXEL_NM
+    a, b = spec["size_nm"][0] / 2, spec["size_nm"][1] / 2
+    distance, index = cKDTree(c).query(c, k=7)
+    v = c[index[:, 1:]] - c[:, None, :]
+    u = v / distance[:, 1:, None]
+    if spec["hole"] == "square":  # half-width of the square along u
+        reach = np.minimum(a / np.maximum(np.abs(u[..., 0]), 1e-12), b / np.maximum(np.abs(u[..., 1]), 1e-12))
+    else:  # radius of the ellipse along u
+        reach = 1.0 / np.sqrt((u[..., 0] / a) ** 2 + (u[..., 1] / b) ** 2)
+    return float((distance[:, 1:] - 2 * reach).min())
+
+
+@pytest.mark.parametrize("name", list(PATTERNS))
+def test_every_page_moves_rows_5_or_more_apart_and_no_holes_touch(name):
+    spec = PATTERNS[name]
+    every = rows_apart(spec["pitch_nm"])
+    page = render_hole_array((200, 260), hole=spec["hole"], size_nm=spec["size_nm"], pitch_nm=spec["pitch_nm"],
+                             layout=spec["layout"], row_shift_every=every, seed=3, **QUIET)
+    assert every >= 5 and page.meta["row_shift_every"] == every
+    moved = np.unique(page.indices_rc[page.row_shift_nm != 0, 0])
+    assert len(moved) >= 1 and (len(moved) == 1 or np.all(np.diff(moved) == every))
+    assert _edge_gap_nm(page, spec) >= 69.9  # nm between neighbouring holes
 
 
 def _score(page, centers):
@@ -89,6 +127,14 @@ def test_end_to_end_on_cpu(tmp_path):
     assert gaussian["found"] >= 0.99 and 0.1 < gaussian["center_sd_y"] < 1.5
     assert image["best_cd"] == "gaussian" and image["best_gpu"] is None
     assert 0.2 < image["limit_nm"] < 0.6
+    assert image["meta"]["row_shift_every"] == 5 and data["settings"]["min_rows_apart"] == 5
     html = (tmp_path / "report.html").read_text(encoding="utf-8")
     assert "<title>Pitch Signature Test</title>" in html and "circle100_square" in html
+    assert 'id="mlist-box"' in html and 'id="compare"' in html  # method list and compare list beside the graph
+    start = html.index('<script type="application/json" id="report-data">') + len(
+        '<script type="application/json" id="report-data">')
+    page = json.loads(html[start:html.index("</script>", start)])
+    shown = page["images"][0]
+    assert [m["key"] for m in shown["methods"]] == ["gaussian", "truth"]
+    assert all(len(m["profiles"]["1"]) == shown["row_intervals"] for m in shown["methods"])
     assert data["images"][0]["key"] == "circle100_square"

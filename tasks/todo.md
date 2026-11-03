@@ -1,35 +1,31 @@
 Finished tasks up to 2026-10-26 (both parts of the diagnostic) are in `tasks/archive/todo-2026-10.md`;
 from November 2026 in `tasks/archive/todo-2026-11.md`.
 
-# Pitch signature test: does each center method see a 1 nm row shift? (2026-11-03)
+# Pitch signature report, round 2: clearer graphs, rarer shifts, small ellipses (2026-11-03)
 
-User: synthetic square / staggered arrays of circles, squares, ellipses (21 nm px), CD and placement noise, every
-row ~1 um apart moved ~1 nm in y; test every CD method's centers and the GPU center finders for the y pitch with few
-columns averaged; compare each pattern with its best GPU finder; implement a better method if one exists; HTML
-report. Plan: ~/.claude/plans/sprightly-seeking-hummingbird.md (approved).
+User (on the round-1 report): truth and measured cannot be told apart and the 1 nm step cannot be seen (large
+pitches just zig-zag: noise too large or shifts too often; no "shift here" marker wanted); ellipses are for small,
+dense patterns, so add smaller circles and ellipses; switching methods needs scrolling to a table and back.
+Plan: ~/.claude/plans/sprightly-seeking-hummingbird.md (approved).
 
-- [x] Generator `subpx/synthetic_arrays.py` (exact Fourier rendering per hole) + tests
-- [x] `scripts/pitch_signature_test.py`: 8 images, 19 CD methods + 6 GPU finders, matched to truth; center error,
-      pixel-position error, y-pitch noise vs columns averaged, spike seen, columns needed, seconds
-- [x] Gate: template-fit prototype (M2) on the 8 images; library + workbench finder only if it wins on >= 6 of 8
-      -> did not pass; kept as `scripts/template_fit_prototype.py`, in the report
-- [x] HTML report (self-contained) + CSV + settings
-- [x] Fix found on the way: GPU edge-erf refused edges > ~140 px from the page's left/top edge
-- [x] Docs (`docs/pitch_signature_test.md`, `docs/centers.md`), review here, commit + push
+- [x] Pages: moved rows ~1 um but >= 5 rows apart (`--min-rows-apart`); placement 0.2 nm, CD 0.5 nm (1 sd);
+      5 new small / dense circle and ellipse pages (13 in all)
+- [x] Graphs: stacked panels (true centers grey / picked method blue / compare method blue), no planted line,
+      x axis in um
+- [x] Explorer: sticky method list beside the graph (click, up/down keys), compare list, pick kept across pages
+- [x] Tests, full GPU run, browser check (no scrolling while switching, dark theme, 400 px)
+- [x] Docs, lessons, review here, commit + push
 
-Review: full run 250 s on the RTX 4060 Ti (CD methods one call 11-33 s per page, template 5-11 s). With 0.5 nm mask
-placement noise even perfect centers need 8 columns on all 8 pages; best CD method reaches 8 on 7/8 (Gaussian fit on
-6; dense 60 nm: 16; 300 nm squares: edge area), best GPU finder on 3/8 (edge-erf on 250 nm circles and 300 nm squares,
-log-quadratic on 160x80 ellipses; 16-32 elsewhere), template prototype on 7/8 (dense: 32). Gaussian fit's center
-error is 6-17 % above the per-hole Cramer-Rao limit on small/elongated holes. Template gate: best on 4/8 (250 nm
-circles, 300/150 nm squares, 100x200 ellipses: 9-41 % less noise; 0.17 nm on 300 nm squares = the limit), ties 2,
-loses 2 (staggered 100 nm +2-6 %, dense +6-10 %, step 14 % too large from neighbours' light) -> not added; kept in
-scripts/. Fixed in the prototype: a failed hole (start off the page) turned the average hole into NaN; failed holes
-are now left out of the next round and the output stays aligned with the starts. Edge-erf fix: 0.6 % -> 100 % of
-300 nm squares found. Tests: test_pitch_signature (6), test_gpu_edge_erf (2; the first fails on the old code),
-test_synthetic_arrays, test_pattern, test_workbench_data pass. Pre-existing, not touched: 5 failures in
-tests/test_tiled_gpu_pipeline.py (same with the pre-fix code; e.g. expects "Unknown refine method", tiny tiled pages
-find 0 of 9 dots).
+Review: true centers now show the step with 1 column on all 13 pages (0.28 nm curve noise). Best CD method: 4 columns
+on 7 pages, 8 on 3, 16 on 2, 32 on the 50 nm circles; Gaussian fit on 12 of 13 (edge area on 300 nm squares). Best
+GPU finder: as few columns on 3 pages, more on 10 (8-64), never fewer. Dense pages: Gaussian center error 30-32 %
+above the per-hole limit and the step read 9-19 % too large (template 18-30 %). Template prototype: fewer columns on
+3 (large holes, at the limit), as many on 9, more on 1; still not in the library. Runs: two full runs gave identical
+numbers; another program (a Stable Diffusion WebUI started on this PC, not mine) shared the GPU, one stall took the
+template fit 606 s instead of 6 s, so the report keeps the faster time of the two runs (total 664 s; dense pages
+66-150 s, the 50 nm page's single CD call 90 s). Browser: 1400 x 900 method clicks / up / down / End / compare / N
+leave scrollY unchanged; dark theme; 400 px no sideways scroll; no console errors. Tests: test_pitch_signature (20),
+test_synthetic_arrays, test_gpu_edge_erf pass (33).
 
 # Workbench UI/UX rework (review 2026-10-31; decisions made, implementation in a new session)
 
@@ -108,34 +104,3 @@ testing interactively on sample images.
   run (the library reports none), a typed region. 9 GPU / library tests (tiled GPU pipeline, pitch GPU, radial
   symmetry, isophote) fail, the same at 6aca236 without any pending edits: not from the workbench.
 - [ ] P3 later: open a cd_batch run (run.json settings, pages.csv page list, batch vs workbench mean)
-
-# Workbench: measure all pages of a multipage TIFF (2026-11-02)
-
-User: the workbench cannot process all pages of a multipage TIFF at once; add it, with GPU acceleration and batch
-processing. User's choices: per page the means plus one CSV of hole CDs (no full results; Measure CD on a page to
-inspect it); skip pages without holes by the batch's hole check against the page on screen; CD and pitch.
-Plan: ~/.claude/plans/zany-enchanting-cerf.md. Measured first (RTX 4060 Ti, 39,042-hole page): the batch's fast mode
-(summary_only) 3.0 s/page vs 7.3 s in the window, same CDs bit for bit; two pages in flight on one GPU 2.79 vs 3.31 s.
-
-- [x] Engine `subpx/_workbench_pages.py`: reader thread, one worker process per GPU with two pages in flight, hole
-      check, preprocess / region, summary-mode CD, pitch + GPU finders, pages.csv (cd_batch columns) + holes CSVs +
-      run.json, failed / hung workers, stop
-- [x] Session: run / stop, progress, page marks, runs and open/close refused while it runs
-- [x] Window: Run menu + Pages tab button, dialog, status-bar progress with Stop, All pages tab (table + plot)
-- [x] Tests (engine + window), timing on the 48-page file, screenshot, docs/workbench.md, commit + push
-
-## Review (2026-11-02)
-
-- stripe1_board1.tif, 48 pages (40 with 39,042 holes, 8 without: 3, 11, 19, 27, 35, 43, 46, 47), ten batch methods,
-  RTX 4060 Ti: 132 s without GPU finders (2.6 s/page running), 209 s with the 3 default finders (4.1 s/page); Measure CD
-  page by page 8.1-8.8 s/page (~5.5 min for the 40). Pages 5 and 20: Measure CD's mean CDs equal the run's (0 diff).
-- One page alone: hole check 0.17 s, CD 3.25 s, pitch 0.5 s, 3 finders +2.2 s, hole CSV 0.5 s (was 1.0 s with
-  np.char.mod; Python lists halve it).
-- Found on the way: starting a worker froze the window 1.6 s (Windows writes process arguments, here the 2.8 MB
-  reference page, into the child's start-up pipe and waits until the child has imported its modules); the settings now
-  go through the worker's queue (start 0.10 s). Waiting for the workers to exit at the end (0.4 s) moved off the
-  window's thread. Longest window pause during a run now 0.05 s.
-- Not done: reopening an earlier run's folder (P3), resume of a stopped run, more than one GPU measured (one here).
-- Tests: tests/test_workbench_pages.py (4: rows equal cd_batch page_values and the window's Measure CD / pitch, blank
-  page skipped, region + preprocessing, failed page, stop, GPU with a finder); tests/test_workbench.py (2: the run
-  beside the window, Esc stops). Workbench suite 57 passed.

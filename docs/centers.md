@@ -43,5 +43,5 @@ a straight-line background. The background's slope used page coordinates, so the
 farther the edge sat from the page's left or top edge, and every edge beyond about 140 px was refused: on a page of
 300 nm squares it found 0.6 % of the holes. The slope now uses coordinates relative to the edge's own start (the
 same model, so edges found before move only by rounding): 100 % of those squares found, 0.28 nm per hole in y.
-Test: `tests/test_gpu_edge_erf.py`. Edge-erf still finds few holes smaller than about 250 nm (7–20 % of them on the
+Test: `tests/test_gpu_edge_erf.py`. Edge-erf still finds few holes smaller than about 250 nm (4–32 % of them on the
 test pages of `docs/pitch_signature_test.md`); use it for large holes.
