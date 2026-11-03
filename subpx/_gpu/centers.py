@@ -685,6 +685,9 @@ def _edge_from_profile_erf_gpu(
         return x_seed.astype(cp.float64), cp.zeros((B,), dtype=bool)
 
     xs = base_x[:, None] + cp.arange(L, dtype=cp.float64)[None, :]
+    # The linear background term is measured from the seed: on absolute image coordinates its column grew with
+    # the position, cond(JTJ) with its square, and every edge beyond ~140 px failed the cond_max check.
+    xr = xs - x_seed[:, None]
     pol = _edge_polarity_from_profile_gpu(prof, base_x, x_seed, loc_rad=loc_rad)
 
     ymin = cp.min(prof, axis=1)
@@ -710,7 +713,7 @@ def _edge_from_profile_erf_gpu(
         sig = cp.clip(cp.exp(lsig), float(sigma_min), float(sigma_max))
         z = (xs - x0[:, None]) / (sqrt_2 * sig[:, None])
         s = 0.5 * (1.0 + pol[:, None] * _erf_gpu(z))
-        model = a[:, None] + b[:, None] * xs + c[:, None] * s
+        model = a[:, None] + b[:, None] * xr + c[:, None] * s
 
         w_fit = (cp.abs(xs - x0[:, None]) <= fit_rad_f).astype(cp.float64)
         if L >= 7:
@@ -724,7 +727,7 @@ def _edge_from_profile_erf_gpu(
 
         J = cp.stack([
             sw,
-            sw * xs,
+            sw * xr,
             sw * s,
             sw * (c[:, None] * ds_dx0),
             sw * (c[:, None] * ds_dlsig),
@@ -760,7 +763,7 @@ def _edge_from_profile_erf_gpu(
     sig = cp.clip(cp.exp(lsig), float(sigma_min), float(sigma_max))
     z = (xs - x0[:, None]) / (sqrt_2 * sig[:, None])
     s = 0.5 * (1.0 + pol[:, None] * _erf_gpu(z))
-    model = a[:, None] + b[:, None] * xs + c[:, None] * s
+    model = a[:, None] + b[:, None] * xr + c[:, None] * s
     w_fit = (cp.abs(xs - x0[:, None]) <= fit_rad_f).astype(cp.float64)
     n_fit = cp.maximum(cp.sum(w_fit, axis=1), 1.0)
     rms = cp.sqrt(cp.sum(w_fit * (prof - model) ** 2, axis=1) / n_fit)

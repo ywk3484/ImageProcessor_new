@@ -1,6 +1,36 @@
 Finished tasks up to 2026-10-26 (both parts of the diagnostic) are in `tasks/archive/todo-2026-10.md`;
 from November 2026 in `tasks/archive/todo-2026-11.md`.
 
+# Pitch signature test: does each center method see a 1 nm row shift? (2026-11-03)
+
+User: synthetic square / staggered arrays of circles, squares, ellipses (21 nm px), CD and placement noise, every
+row ~1 um apart moved ~1 nm in y; test every CD method's centers and the GPU center finders for the y pitch with few
+columns averaged; compare each pattern with its best GPU finder; implement a better method if one exists; HTML
+report. Plan: ~/.claude/plans/sprightly-seeking-hummingbird.md (approved).
+
+- [x] Generator `subpx/synthetic_arrays.py` (exact Fourier rendering per hole) + tests
+- [x] `scripts/pitch_signature_test.py`: 8 images, 19 CD methods + 6 GPU finders, matched to truth; center error,
+      pixel-position error, y-pitch noise vs columns averaged, spike seen, columns needed, seconds
+- [x] Gate: template-fit prototype (M2) on the 8 images; library + workbench finder only if it wins on >= 6 of 8
+      -> did not pass; kept as `scripts/template_fit_prototype.py`, in the report
+- [x] HTML report (self-contained) + CSV + settings
+- [x] Fix found on the way: GPU edge-erf refused edges > ~140 px from the page's left/top edge
+- [x] Docs (`docs/pitch_signature_test.md`, `docs/centers.md`), review here, commit + push
+
+Review: full run 250 s on the RTX 4060 Ti (CD methods one call 11-33 s per page, template 5-11 s). With 0.5 nm mask
+placement noise even perfect centers need 8 columns on all 8 pages; best CD method reaches 8 on 7/8 (Gaussian fit on
+6; dense 60 nm: 16; 300 nm squares: edge area), best GPU finder on 3/8 (edge-erf on 250 nm circles and 300 nm squares,
+log-quadratic on 160x80 ellipses; 16-32 elsewhere), template prototype on 7/8 (dense: 32). Gaussian fit's center
+error is 6-17 % above the per-hole Cramer-Rao limit on small/elongated holes. Template gate: best on 4/8 (250 nm
+circles, 300/150 nm squares, 100x200 ellipses: 9-41 % less noise; 0.17 nm on 300 nm squares = the limit), ties 2,
+loses 2 (staggered 100 nm +2-6 %, dense +6-10 %, step 14 % too large from neighbours' light) -> not added; kept in
+scripts/. Fixed in the prototype: a failed hole (start off the page) turned the average hole into NaN; failed holes
+are now left out of the next round and the output stays aligned with the starts. Edge-erf fix: 0.6 % -> 100 % of
+300 nm squares found. Tests: test_pitch_signature (6), test_gpu_edge_erf (2; the first fails on the old code),
+test_synthetic_arrays, test_pattern, test_workbench_data pass. Pre-existing, not touched: 5 failures in
+tests/test_tiled_gpu_pipeline.py (same with the pre-fix code; e.g. expects "Unknown refine method", tiny tiled pages
+find 0 of 9 dots).
+
 # Workbench UI/UX rework (review 2026-10-31; decisions made, implementation in a new session)
 
 Review, target layout and phases: `docs/superpowers/specs/2026-10-31-workbench-ux-review-design.md`. Baseline:
