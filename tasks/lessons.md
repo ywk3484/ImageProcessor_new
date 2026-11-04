@@ -194,3 +194,9 @@
   Gaussian fit was only 7-34 % above it, so the user saw "barely a difference" and asked for a better method. Put
   the floor in every comparison (a line in each noise chart, a column in each table) from the first version, so a
   small gain reads as "nothing left to win", and say what would move the floor (here: more light).
+- **When the user does not understand a method, show its mechanism in the page's own data and isolate its effect
+  with a swap test.** Two dense-array reports described the learned hole picture in words; the user still did not
+  understand it. The explainer plotted the light at three spots against each hole's brightness (96 / 45 / 1 % of
+  it follows the hole), drew the picture from those rises alone (within 1.5 % of the exact one), and ran the same
+  fit with only the picture swapped (step: bell 1.24, learned 1.00, exact 1.00). Give one plot of the data the
+  method learns from and one test that changes only the part being explained, before any description.
