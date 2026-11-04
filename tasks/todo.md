@@ -1,7 +1,14 @@
 Finished tasks up to 2026-10-26 (both parts of the diagnostic) are in `tasks/archive/todo-2026-10.md`;
 from November 2026 in `tasks/archive/todo-2026-11.md`.
 
-# Dense arrays: one learned hole picture, all holes fitted together (2026-11-04, plan awaiting approval)
+# Dense arrays: one learned hole picture, all holes fitted together (2026-11-04, DROPPED)
+
+Dropped 2026-11-04: its premise is false for the user's data. User: the brightness flicker comes from the plasma
+source at that instant, and the source lights thousands of holes at once, so neighbours brighten and dim together.
+Learning the hole picture from brighter minus dimmer holes needs each hole to vary on its own (the test pages were
+drawn that way); with linked neighbours, bright minus dim gives back the hole plus its neighbours, the same mix as a
+plain average. Still true: on dense arrays a center finder that looks at one hole at a time reads its neighbours'
+light as a shift (optics and packing, not flicker). Nothing below is to be built.
 
 User: on the small dense pages of the pitch signature report no method shows the 1 nm row step within 8 columns.
 Develop a method stable enough for accurate pitch variation that is also used for CD; judge pitch first, then CD.

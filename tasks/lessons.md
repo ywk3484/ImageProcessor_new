@@ -249,3 +249,17 @@
   case first (three holes, five pixels: what each hole puts on each pixel, what the image shows, what changes when
   only B gets 10 % brighter: the change is B's own light), then one step to the real data (thousands of holes,
   average of the brighter minus average of the dimmer). Nothing else in the reply.
+- **Before building a method on a property of the data, ask the user how the data is made; a method's core premise
+  is not a side "assumption to check".** The learned template is learned from brighter minus dimmer holes, which
+  separates a hole's light from its neighbours' only if each hole's brightness varies on its own. That came from a
+  note ("per-hole source fluctuation") and from test pages drawn with it built in; nobody asked. The user: the
+  flicker comes from the plasma source at that instant, and the source lights thousands of holes at once, so
+  neighbours brighten and dim together; "I have no idea where you got the idea that adjacent holes will not have a
+  correlation at all." Several sessions and four explainer pages rested on it. Before building, list what the
+  method's core needs from the data and ask the user about each in plain words (how the light is made, what varies
+  together and over what distance); a test page with the property built in cannot show that it is false.
+- **In an explanation, give each thing one name and one role, and keep them.** I said every hole gets a cut-out and
+  the cut-outs are sorted into bright and dim, then claimed "the neighbours around the bright holes" are "the same
+  in both" without saying that they are the other holes showing at each cut-out's edges, and that they are not
+  sorted. The user: "What on Earth are you talking about?" Say which hole is sorted (the one in the middle) and what
+  the others are (whatever sits at the edges) before claiming anything about them.
