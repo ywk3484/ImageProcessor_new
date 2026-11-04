@@ -218,3 +218,11 @@
   For each step give: the physical or statistical effect it removes, the property of the data that makes the effect
   exist, the assumption the step adds, and how to check that property on each dataset. Test numbers are size
   references only, labelled as such.
+- **A verdict is a few plain lines and one picture, not an audit in my own terms; and do not defend a method's
+  core as minimal when its gain comes from the polish.** My fundamentals diagnosis listed about 25 items with step
+  numbers and words like "local level", "imprint", "correlation fix", and called the core "the least the problem
+  allows". The user: "It is overcomplicated. I cannot understand a thing you are talking about." The core alone does
+  not deliver the gain (its first, unpolished template read the 1 nm step as 1.15 nm, the Gaussian fit 1.19 nm); the
+  polish does, and the polish is the complexity. Lead with the verdict and the trade-off in the user's words (holes,
+  gap, rim, Gaussian fit), one ASCII picture, at most three reference numbers, and one question that decides what to
+  do next.
