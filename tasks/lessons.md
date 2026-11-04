@@ -183,3 +183,14 @@
   the Gaussian fit (1.19, 1.06 nm). The columns were the same, but the step range I quoted to the user (1.09-1.15)
   was wrong. Make every comparison cell in a script with the same function the report uses, and quote ranges from
   that output.
+- **Test the user's cheap hypothesis instead of arguing theory against it.** The user said several times that
+  enlarging the page before Otsu should help; I kept answering that interpolation adds no information, until they
+  wrote "you never agreed with me on this, but just do it". The test took one script and 20 minutes of GPU at 2x,
+  and the answer was mixed (simple GPU finders up to 25 % less noise on the dense pages, the fits unchanged, some
+  area methods worse). When the user proposes something that can be run, run it first, report the numbers per
+  method, and keep the theory to one line.
+- **When a new method is near the physical floor, show the floor before showing the gain.** The first dense-array
+  report showed the learned hole picture beside the Gaussian fit; it sat on the floor (0.405 vs 0.400 nm), but the
+  Gaussian fit was only 5-34 % above it, so the user saw "barely a difference" and asked for a better method. Put
+  the floor in every comparison (a line in each noise chart, a column in each table) from the first version, so a
+  small gain reads as "nothing left to win", and say what would move the floor (here: more light).
