@@ -18,18 +18,23 @@ until the pitch noise is <= 1/3 nm; step = measured / planted 1 nm row step, tru
 
 | page | best existing (columns, step) | new: columns | new: step | hole noise nm, new / best | s |
 |---|---|---|---|---|---|
-| 50 nm circles, dense | 32, 1.13 (half area min) | 16 | 0.995 | 0.90 / 1.28 | 220 |
+| 50 nm circles, dense | 32, 1.19 (Gaussian) | 16 | 0.995 | 0.90 / 1.06 | 220 |
 | 60 nm circles, dense | 16, 1.09 (Gaussian) | **8** | 1.010 | 0.65 / 0.72 | 212 |
 | 70 x 45 ellipses, dense | 16, 1.15 (Gaussian) | 16 (0.335 nm at 8, needs 0.333) | 0.978 | 0.72 / 0.85 | 291 |
 | 80 nm circles, square | 8, 1.01 (Gaussian) | 8 | 1.006 | 0.47 / 0.48 | 132 |
 | 90 x 60 ellipses, stagger | 8, 1.03 (Gaussian) | 8 | 1.003 | 0.48 / 0.52 | 158 |
 | 60 x 100 ellipses, square | 8, 1.00 (Gaussian) | 8 | 1.024 | 0.55 / 0.56 | 182 |
 
+- "Best existing" is ranked like the report's best_of (columns, then method-alone noise at 1 column, then center
+  error); an earlier version of this table listed half area min (1.13, 1.28 nm) for the 50 nm page by mistake.
+- Report: `artifacts/learned_hole_prototype/report.html` (the pitch signature report with the prototype added, a
+  summary on top, and two stress pages at 2 nm size spread; made by `make_report.py` in the same folder).
 - Limit: given the exact hole picture, the 50 nm circles and 70 x 45 ellipses still need 16 columns at this noise
   (50 nm: 0.40 nm at 8 columns; about 1.5x more light would reach 8).
 - Weak point: holes 4x more different in size than on the test pages (2 nm sd instead of 0.5) make most of the
-  brightness differences come from size; the learned picture widens and the step reads 0.86 (50 nm) / 0.93
-  (80 nm). The true picture is fine there (1.011). A per-hole size term did not fix it (compact: wrong shape;
+  brightness differences come from size; the learned picture widens and the step reads 0.87 (50 nm) / 0.95
+  (80 nm) in the report (learn7; learn8 gave 0.86 / 0.93), while the columns still drop (32 -> 16, 8 -> 4 against
+  the Gaussian fit's 1.19 / 1.02). The true picture is fine there (1.011). A per-hole size term did not fix it (compact: wrong shape;
   full: absorbs the light outside the picture, step 0.93). The user's failed light-sum CD suggests flicker > size
   effect on real images, the good case.
 - Noise correction: the page's own leftover noise includes model error when the picture is wrong (80 nm, 2 nm

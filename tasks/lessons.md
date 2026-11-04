@@ -178,3 +178,8 @@
   mask placement noise (my guess; the user gave none) made even perfect centers need 8 columns, so every good method
   looked the same. State such a floor as an assumption, and pick test noise that leaves the methods' differences
   visible (here 0.2 nm), with the larger value one option away.
+- **Fill "best existing" cells with the report's own ranking code, never by eye.** My dense-array table named half
+  area min (step 1.13, 1.28 nm per hole) as the best existing method on the 50 nm page; the report's `best_of` picks
+  the Gaussian fit (1.19, 1.06 nm). The columns were the same, but the step range I quoted to the user (1.09-1.15)
+  was wrong. Make every comparison cell in a script with the same function the report uses, and quote ranges from
+  that output.
