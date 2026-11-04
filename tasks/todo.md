@@ -96,9 +96,15 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       size-blur degeneracy below the cut-off; the per-hole switch did not catch it (sd 0.11 px against a sharp
       template looks readable); centers 1.10 nm vs Gaussian 1.06, step 1.32 vs 1.19 (worse). The only sign is the
       fitted blur, half of the other pages'. Page and todo say so; a blur prior from a big-hole page of the same tool
-      is the obvious (unbuilt) remedy. Queue: the machine's committed memory reached 88 of 91 GB (other work), so the
-      queue runs one job at a time now (driver2: four centers pages + real page; then driver3 via a detached waiter:
-      the three stress reruns + the 60 nm dense page, which was stopped mid-run to free memory)
+      is the obvious (unbuilt) remedy. QUEUE PAUSED: the machine's committed memory filled up (90.7 of 91.2 GB, other
+      work; it had grown from 82 GB over the night) and every job died with MemoryError within seconds, so all my
+      processes were stopped. Done 7 of 17 (two lens stress pages, four focus pages, the 50 nm dense centers page).
+      Left (about 5 h at one worker): five centers pages (70x45 dense, 80 square, 90x60 stagger, 60x100 square,
+      60 dense), the real page with both families, the three stress reruns (their numbers on the page are from
+      before the hole-stage rework, labelled so). Resume when memory is free:
+      `cd artifacts/outline_fit; python -X utf8 runs/driver.py workers=1 resume=1 skip=stress_circle50_dense
+      force=stress_circle80_square,stress_circle100_square,stress_square150_stagger`, then
+      `python -X utf8 make_page.py`
 - [ ] Real page 0 (and several pages): residual vs noise, fitted blur, CD distribution; page-mean CD across the hole
       pages against the Gaussian fit's
 - [ ] HTML page (problem, idea, flow, each step with why, payoff, is it general, checks on own images); review here;
