@@ -191,6 +191,6 @@
   method, and keep the theory to one line.
 - **When a new method is near the physical floor, show the floor before showing the gain.** The first dense-array
   report showed the learned hole picture beside the Gaussian fit; it sat on the floor (0.405 vs 0.400 nm), but the
-  Gaussian fit was only 5-34 % above it, so the user saw "barely a difference" and asked for a better method. Put
+  Gaussian fit was only 7-34 % above it, so the user saw "barely a difference" and asked for a better method. Put
   the floor in every comparison (a line in each noise chart, a column in each table) from the first version, so a
   small gain reads as "nothing left to win", and say what would move the floor (here: more light).

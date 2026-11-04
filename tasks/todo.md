@@ -57,7 +57,7 @@ Round 2 (user: "barely see differences against the Gaussian fit; propose a bette
 Otsu, just do it"). Scratch code and data in the same artifacts folder (README there):
 - Floor (Cramer-Rao bound of the report's pitch noise; exact hole pictures given; x, y, brightness unknown; the
   page's own noise) at 8 columns: 50 nm 0.400, 60 nm 0.319, 70 x 45 0.338, 80 nm 0.240, 90 x 60 0.250, 60 x 100
-  0.271 nm. Learned method 0.405 / 0.322 / 0.335 / 0.244 / 0.250 / 0.283: on the floor. The Gaussian fit is 5-34 %
+  0.271 nm. Learned method 0.405 / 0.322 / 0.335 / 0.244 / 0.250 / 0.283: on the floor. The Gaussian fit is 7-34 %
   above it, all that any method could win. Brightness known exactly lowers the floor 2 %. So 8 columns on the
   50 nm and 70 x 45 dense pages is impossible at this light for every method.
 - Enlarged first (bicubic, 8-bit, before Otsu; pixel settings scaled; x1 reproduces the report), x2 on all six
