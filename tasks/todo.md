@@ -91,7 +91,14 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       and off, three light levels (scratchpad `slope_diag.py`, log `runs/slope_diag.log`); it was stopped by the
       machine's memory guard (other work holds the memory) and is to be run when memory is free; also a tiny
       noise-free page through the whole fit (`tiny_page.py`): does the outline come back exact without noise
-- [ ] Centers scored with pitch_signature_test.evaluate on the six report pages (columns, step, noise at 8, error)
+- [ ] Centers scored with pitch_signature_test.evaluate on the six report pages (columns, step, noise at 8, error).
+      50 nm dense page: the fit FAILS as the bound predicts - outline 66.7 nm under a 36.9 nm blur (true 50 / 65), the
+      size-blur degeneracy below the cut-off; the per-hole switch did not catch it (sd 0.11 px against a sharp
+      template looks readable); centers 1.10 nm vs Gaussian 1.06, step 1.32 vs 1.19 (worse). The only sign is the
+      fitted blur, half of the other pages'. Page and todo say so; a blur prior from a big-hole page of the same tool
+      is the obvious (unbuilt) remedy. Queue: the machine's committed memory reached 88 of 91 GB (other work), so the
+      queue runs one job at a time now (driver2: four centers pages + real page; then driver3 via a detached waiter:
+      the three stress reruns + the 60 nm dense page, which was stopped mid-run to free memory)
 - [ ] Real page 0 (and several pages): residual vs noise, fitted blur, CD distribution; page-mean CD across the hole
       pages against the Gaussian fit's
 - [ ] HTML page (problem, idea, flow, each step with why, payoff, is it general, checks on own images); review here;
