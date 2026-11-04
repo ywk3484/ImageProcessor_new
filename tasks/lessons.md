@@ -241,3 +241,11 @@
   instead of 1.00. It keeps each hole's brightness from taking up flat light that the model gets wrong. Before
   calling a step unnecessary, list everything it absorbs or protects against, and write "not pinned down" when
   unsure.
+- **Explain a mechanism on one tiny concrete case with numbers the reader can add up; no symbolic rows, no
+  add-ons.** Asked to explain the idea paragraph of the why page (brighter holes minus dimmer holes leave one
+  hole's light), I answered with a table of symbols ("bright half: same + 1.05 x one hole + 1.00 x neighbours"),
+  three bullets, a note on how the code weights the holes, a caveat and an offer. The user: "Oh my god, you still
+  can't provide a good explanation." Symbols state the result without showing why it happens. Show it on one tiny
+  case first (three holes, five pixels: what each hole puts on each pixel, what the image shows, what changes when
+  only B gets 10 % brighter: the change is B's own light), then one step to the real data (thousands of holes,
+  average of the brighter minus average of the dimmer). Nothing else in the reply.
