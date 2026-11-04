@@ -226,3 +226,18 @@
   polish does, and the polish is the complexity. Lead with the verdict and the trade-off in the user's words (holes,
   gap, rim, Gaussian fit), one ASCII picture, at most three reference numbers, and one question that decides what to
   do next.
+- **When the user asks for a page that explains a method, deliver the page, with the why of every step and number
+  on it; do not answer with chat verdicts.** After a 15-step page with real-output pictures (what each step does)
+  and two chat diagnoses, the user wrote: "I have asked you and the previous session over several times to create
+  the html so that I can actually understand every step, and I still don't understand the flow completely and all
+  you are saying is that this isn't overcomplicated." A list of steps with pictures is not the flow, and "what it
+  does" is not "why it is there". The page needs: the problem in one picture, the idea in one picture, a flow
+  diagram with what each step hands to the next and each step's role (the idea / start only / bookkeeping / repairs
+  a side effect / assumption), and per step: what goes wrong without it, each number with a tag saying whether its
+  value matters, is a guess, a fixed count or has no reason, what it assumes, and an honest "is it general" with
+  checks for the user's own images.
+- **"I found no job for this step" is not "it has no job".** In the fundamentals diagnosis I called the per-hole
+  local level over-built because I could not name its job; a reference run without it read the 1 nm step as 1.06
+  instead of 1.00. It keeps each hole's brightness from taking up flat light that the model gets wrong. Before
+  calling a step unnecessary, list everything it absorbs or protects against, and write "not pinned down" when
+  unsure.

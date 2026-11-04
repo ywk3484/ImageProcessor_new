@@ -84,14 +84,26 @@ Otsu, just do it"). Scratch code and data in the same artifacts folder (README t
   synthetic scores and was rejected, see lessons). Core needed whenever neighbours' light overlaps: joint fit, one
   learned template, learning from brightness differences (on a regular array a patch of template light moved one
   spacing out gives the same page; only per-hole flicker tells whose light it is), solve with the neighbours'
-  copies, alternate fit/learning. Over-built: per-hole local level (no job found: brightness-linked background is
-  learned into the template, a drifting one needs a smooth background) whose noise imprint is most of what steps
-  11-13 remove; centering after half-turn symmetry (no-op); round 1's extra fit (= round 2's fit); numbers where
-  rules belong (window from the light, smoothness cut-off from the page spectrum, stop rules). Wrong premise:
+  copies, alternate fit/learning. Per-hole local level: its noise imprint is all that steps 11-13 remove (without it
+  they change nothing), but it is not without a job as first said: it keeps brightness from taking up flat light the
+  model gets wrong (beyond the window, uneven background, neighbours' copies while the template is learned); without
+  it the 1 nm step reads 1.06 (which part: open). Over-built: centering after half-turn symmetry (no-op); round 1's
+  extra fit (= round 2's fit); numbers where rules belong (window from the light, smoothness cut-off from the page
+  spectrum, stop rules, blob area limits, 51 px edge margin where 21 do). Wrong premise:
   half-turn symmetry (against "any shape", EUV shadowing); correlation fix (treats real linked flicker as an
   artefact; step 8's solve already handles real links). Per-dataset checks proposed: neighbour overlap, flicker vs
   brightness noise and its link between neighbours, half-turn symmetry of the template, pixel-noise link.
   Scratch: `ablate7.py`, `tsens.py`, `ablate7_table.py` (score runs kept as size references only).
+- Explainer v4, the why of every step (user: "I have asked several times to create the html so that I can actually
+  understand every step... I still don't understand the flow"): `how_it_works.html` (`make_why.py`; v3 kept as
+  `how_it_works_v3.html`). The problem (light along a row through three holes: page vs one hole alone), the idea
+  (average vs bright minus dim vs exact), a flow diagram of the 15 steps with what each hands on and its role, then
+  per step: why it is there, what it does, its real-output figure, every number tagged (from the page / matters but
+  guessed / fixed count / no reason / any similar value / start only / speed only / safety net) with why that value,
+  what it assumes, test-page references; then "Is it general?" with checks for real images, and "What could be
+  simpler". Verdict on the page: partly overcomplicated (the idea is steps 7, 8, 10; 1-6 only start it; 11-13
+  repair the local level's side effect; step 9 = 3 bookkeeping jobs + 2 assumptions); general in packing, not in
+  what it needs (independent flicker above the noise, one shape per area, light that simply adds up).
 
 # Workbench UI/UX rework (review 2026-10-31; decisions made, implementation in a new session)
 
