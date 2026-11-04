@@ -80,6 +80,18 @@ Otsu, just do it"). Scratch code and data in the same artifacts folder (README t
   15 steps, each with that step's real output on the 50 nm page. Control run (6 plain rounds, no noise-bend
   removal): the 1 nm step stops at 1.094 nm, noise 0.445 nm at 8 columns; with the removal 0.995 / 0.405. So the
   noise correction, not the extra rounds, makes the last gain.
+- Diagnosis from fundamentals (user: "excessively overcomplicated, no justification"; my first try ranked steps by
+  synthetic scores and was rejected, see lessons). Core needed whenever neighbours' light overlaps: joint fit, one
+  learned template, learning from brightness differences (on a regular array a patch of template light moved one
+  spacing out gives the same page; only per-hole flicker tells whose light it is), solve with the neighbours'
+  copies, alternate fit/learning. Over-built: per-hole local level (no job found: brightness-linked background is
+  learned into the template, a drifting one needs a smooth background) whose noise imprint is most of what steps
+  11-13 remove; centering after half-turn symmetry (no-op); round 1's extra fit (= round 2's fit); numbers where
+  rules belong (window from the light, smoothness cut-off from the page spectrum, stop rules). Wrong premise:
+  half-turn symmetry (against "any shape", EUV shadowing); correlation fix (treats real linked flicker as an
+  artefact; step 8's solve already handles real links). Per-dataset checks proposed: neighbour overlap, flicker vs
+  brightness noise and its link between neighbours, half-turn symmetry of the template, pixel-noise link.
+  Scratch: `ablate7.py`, `tsens.py`, `ablate7_table.py` (score runs kept as size references only).
 
 # Workbench UI/UX rework (review 2026-10-31; decisions made, implementation in a new session)
 

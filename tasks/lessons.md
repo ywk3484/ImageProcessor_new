@@ -208,3 +208,13 @@
   (thresholds and seeds included) its own short text and picture, in order; the one idea goes in the step where it
   acts. Before the page says a step causes a gain, test it with a control run: here the noise-bend removal, not
   the extra rounds, took the 1 nm step reading from 1.09 to 1.00 nm.
+- **Whether a step is needed, and why, comes from what it removes, not from a test score.** Asked whether the
+  learned-template method was overcomplicated, I switched its steps off one at a time on the synthetic 50 nm page
+  and ranked them by the 1 nm step reading. The user: "your decision on whether something is needed, 'why' this is
+  needed must not depend on the numbers you obtained from test calculations". The test page obeys the method's own
+  assumptions by construction (flat background, unlinked flicker, half-turn-symmetric holes, independent pixel
+  noise), so a step that guards against their failure shows nothing and a step that relies on them looks fine; a
+  score also cannot tell a real fix from one step offsetting another; and the user has many datasets that differ.
+  For each step give: the physical or statistical effect it removes, the property of the data that makes the effect
+  exist, the assumption the step adds, and how to check that property on each dataset. Test numbers are size
+  references only, labelled as such.
