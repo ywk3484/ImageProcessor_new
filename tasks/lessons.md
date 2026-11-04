@@ -194,9 +194,11 @@
   Gaussian fit was only 7-34 % above it, so the user saw "barely a difference" and asked for a better method. Put
   the floor in every comparison (a line in each noise chart, a column in each table) from the first version, so a
   small gain reads as "nothing left to win", and say what would move the floor (here: more light).
-- **When the user does not understand a method, show its mechanism in the page's own data and isolate its effect
-  with a swap test.** Two dense-array reports described the learned hole picture in words; the user still did not
-  understand it. The explainer plotted the light at three spots against each hole's brightness (96 / 45 / 1 % of
-  it follows the hole), drew the picture from those rises alone (within 1.5 % of the exact one), and ran the same
-  fit with only the picture swapped (step: bell 1.24, learned 1.00, exact 1.00). Give one plot of the data the
-  method learns from and one test that changes only the part being explained, before any description.
+- **To explain how a method works, walk through the steps it runs, one plain picture each, built on the one idea
+  that makes it work; evidence that it works is not an explanation.** My first explainer of the learned hole
+  picture plotted light-vs-brightness regressions (96 / 45 / 1 %), error percentages and a swap test; the user
+  answered "I don't understand a thing". The second one says what the method does in three steps: every hole is a
+  copy of one template; the template is the brighter half of the holes minus the dimmer half (a plain average keeps
+  the neighbours, because they always sit in the same places); all holes are fitted at once. Find the single idea
+  first (here: bright minus dim cancels the neighbours), show it with the page's own images, keep proofs (slopes,
+  error percentages) to one line, and use the user's own words (template, Gaussian fit, columns).
