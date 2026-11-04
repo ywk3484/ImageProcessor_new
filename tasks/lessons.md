@@ -45,7 +45,8 @@ General rules from past corrections, one or two lines each. Incident details are
   and explain every outlier before reporting.
 
 ## Reporting
-- Never state a cause that was not measured. Never call a partial fix "fixed": say what is left and what it costs.
+- Never state a cause that was not measured: a model error seen at the truth is the cause only once removing it
+  moves the estimate. Never call a partial fix "fixed": say what is left and what it costs.
 - Before reporting, check the deliverable against the literal request (the level, the place, the view asked for).
 - When something failed, say so plainly; never explain a miss by what the user did not say.
 - When raising a defect, say: bug or not, the measured cause (isolated by a test that changes one thing), how often

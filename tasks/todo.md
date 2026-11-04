@@ -96,11 +96,28 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       structure when each hole is rendered to 9 px (the lens tail is below 1e-3 of the peak there, but thirty holes
       lie within 30 px); rendered to 40 px it leaves 0.02 rms. The hole stage on that page reads edge offsets 1.030 x
       true - 0.87 nm and +0.11 nm per 10 % light with the exact template; the whole fit reads slope 1.071, +0.25 nm
-      per 10 %, outline 79.56 (p 1.91, blur 64.5): the big pages' numbers, reproduced without noise. So the slope,
-      the light move and the offset are the neighbours' far light missing from the page model, not noise and not
-      the estimator. Fix under test: `PageFit(reach_px=40)` (noisefree_check.py reach=40 lens_size=96); production
-      form to build: near field per hole as now + far field by one FFT of the brightness map with the template's
-      tail per sweep (the 81 x 81 px per-hole render is 18 x the pixels)
+      per 10 %, outline 79.56 (p 1.91, blur 64.5): the big pages' numbers, reproduced without noise.
+      (3) THE FAR LIGHT WAS NOT THE CAUSE (Nov 5, all on that page, exact template, hole stage, uniform weights):
+      rendered to 40 px the hole stage reads 1.025 x - 0.76 nm, light +0.11 (noisefree_check_reach40.log; the run
+      was then killed by the memory guard); with the far field (built today, `PageFit(far_field=True)`: near part
+      per hole + FFT of a cubic splat with the template's tail to 128 px; exact to 0.001 grey levels against a direct
+      render, far_check.log; 0.35 s per call on a full page) 1.0255 x - 0.845 nm, +0.114, converged by sweep 4 and
+      identical through 32 sweeps (noisefree_far.log) - not a slow mode. (4) The generator renders each hole on a
+      periodic 64 px patch, so the lens tail beyond 32 px folds back (-0.05 mean, 0.034 rms); re-rendered with a
+      512 px patch the page model at the truth leaves 0.004 rms (the model is exact) and the hole stage STILL reads
+      1.031 x - 0.97 nm, +0.127, brightness 1.2 % high, levels +0.26 (noisefree_far_patch512.log). (5) The bias is the
+      estimator's: fit window 9 px with free levels -> 1.22 x - 6.8 nm, +0.70; levels fixed at the true background
+      -> window 6: 1.004 x + 0.33 nm, -0.05; window 9: 1.0006 x + 0.59 nm, -0.07; window 14: 0.877 x with leftover
+      6 grey levels (the off-page holes are not in the model and the robust weights were off: not a clean test yet)
+      (noisefree_far_window*.log). Reading: the hole stage is a per-window relaxation - each hole fits only its own
+      window and its free level absorbs the neighbours' excess light - so a common shift of size, brightness and
+      level over the page is weakly determined and the fixed point is not the joint least squares (it moves with
+      the window and the level freedom; the isolated hole, with no neighbours, reads 1.000). Fix to build: a page
+      background model (coarse bilinear grid solved in alternation with the holes) instead of a level per hole, a
+      fit window out to the hole's light, robust weights kept; check first on the complete-model page (on-page
+      holes only, no fold), then the small noisy page. `fit_holes(free_level=False)` exists for the tests.
+      STOPPED BY MEMORY (commit 89 of 91 GB, the user's node process at 39 GB): the window-9 fixed-level rerun died
+      with MemoryError; no Python test runs until memory frees
 - [ ] Centers scored with pitch_signature_test.evaluate on the six report pages (columns, step, noise at 8, error).
       50 nm dense page: the fit FAILS as the bound predicts - outline 66.7 nm under a 36.9 nm blur (true 50 / 65), the
       size-blur degeneracy below the cut-off; the per-hole switch did not catch it (sd 0.11 px against a sharp
