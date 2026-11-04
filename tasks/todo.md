@@ -123,15 +123,16 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       size-blur degeneracy below the cut-off; the per-hole switch did not catch it (sd 0.11 px against a sharp
       template looks readable); centers 1.10 nm vs Gaussian 1.06, step 1.32 vs 1.19 (worse). The only sign is the
       fitted blur, half of the other pages'. Page and todo say so; a blur prior from a big-hole page of the same tool
-      is the obvious (unbuilt) remedy. QUEUE PAUSED: the machine's committed memory filled up (90.7 of 91.2 GB, other
-      work; it had grown from 82 GB over the night) and every job died with MemoryError within seconds, so all my
-      processes were stopped. Done 7 of 17 (two lens stress pages, four focus pages, the 50 nm dense centers page).
-      Left (about 5 h at one worker): five centers pages (70x45 dense, 80 square, 90x60 stagger, 60x100 square,
-      60 dense), the real page with both families, the three stress reruns (their numbers on the page are from
-      before the hole-stage rework, labelled so). Resume when memory is free:
+      is the obvious (unbuilt) remedy. QUEUE: paused twice on Nov 5 when the machine's committed memory filled
+      (other work; 90.7 of 91.2 GB both times). Resumed in between as driver3 (one worker, per-hole-level code):
+      done 12 of 17 (two lens stress pages, four focus pages, all six centers pages). Left: the real page with both
+      families (they failed on a repeated keyword in run_real.py, fixed) and the three stress reruns (died with
+      MemoryError; their numbers on the page are from before the hole-stage rework, labelled so). Stopped my queue
+      processes at 06:15 so that the full machine is not pushed further. Resume when memory is free (about 2.5 h):
       `cd artifacts/outline_fit; python -X utf8 runs/driver.py workers=1 resume=1 skip=stress_circle50_dense
-      force=stress_circle80_square,stress_circle100_square,stress_square150_stagger`, then
-      `python -X utf8 make_page.py`
+      force=stress_circle80_square,stress_circle100_square,stress_square150_stagger status=driver4`, then
+      `python -X utf8 make_page.py`. The new scheme (far field + page background) runs beside it with
+      `extra=far=1;bg=grid;window=9 suffix=_grid` once its page tests pass
 - [ ] Real page 0 (and several pages): residual vs noise, fitted blur, CD distribution; page-mean CD across the hole
       pages against the Gaussian fit's
 - [ ] HTML page (problem, idea, flow, each step with why, payoff, is it general, checks on own images); review here;
