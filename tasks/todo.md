@@ -87,10 +87,20 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       neither is the template nor the estimator; both appear only on the page (neighbours, their cleaning, or the
       noise: the slope part shrinks with light, the light move does not). The same isolated hole read with the 80 nm
       page's lens template comes out 1.6 nm bigger than the page reads its holes (81.6 vs 79.6): the page's average
-      hole is not the isolated hole. Next: the page test with the exact template fixed, robust / variance weights on
-      and off, three light levels (scratchpad `slope_diag.py`, log `runs/slope_diag.log`); it was stopped by the
-      machine's memory guard (other work holds the memory) and is to be run when memory is free; also a tiny
-      noise-free page through the whole fit (`tiny_page.py`): does the outline come back exact without noise
+      hole is not the isolated hole. The page test with noise (`slope_diag.py`) was stopped by the machine's memory
+      guard; the cause was then found without it, on noise-free pages (logs runs/tiny_*.log, noisefree_check*.log):
+      (1) FALSE TRAIL: the generator rounds even "noise-free" pages to 8 bits (bits=8 default), 0.29 rms of
+      rounding locked to the signal; every tiny-page number before noisefree_check.py (plane per hole, patch size,
+      render reach, outside holes) was that artefact. (2) MEASURED CAUSE, unrounded noise-free 300 px page, exact
+      lens template, no noise: the page model at the truth leaves +0.70 grey levels (1 % of the peak) with 0.08 rms
+      structure when each hole is rendered to 9 px (the lens tail is below 1e-3 of the peak there, but thirty holes
+      lie within 30 px); rendered to 40 px it leaves 0.02 rms. The hole stage on that page reads edge offsets 1.030 x
+      true - 0.87 nm and +0.11 nm per 10 % light with the exact template; the whole fit reads slope 1.071, +0.25 nm
+      per 10 %, outline 79.56 (p 1.91, blur 64.5): the big pages' numbers, reproduced without noise. So the slope,
+      the light move and the offset are the neighbours' far light missing from the page model, not noise and not
+      the estimator. Fix under test: `PageFit(reach_px=40)` (noisefree_check.py reach=40 lens_size=96); production
+      form to build: near field per hole as now + far field by one FFT of the brightness map with the template's
+      tail per sweep (the 81 x 81 px per-hole render is 18 x the pixels)
 - [ ] Centers scored with pitch_signature_test.evaluate on the six report pages (columns, step, noise at 8, error).
       50 nm dense page: the fit FAILS as the bound predicts - outline 66.7 nm under a 36.9 nm blur (true 50 / 65), the
       size-blur degeneracy below the cut-off; the per-hole switch did not catch it (sd 0.11 px against a sharp
