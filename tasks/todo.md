@@ -78,7 +78,9 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       half the slope excess and the offset away, the light move stays. Focus series, 80 nm circles, blur 58 / 65 /
       72 nm (two Gaussians): page CD 79.14 / 79.15 / 78.95 (moves 0.2 nm; fitted blur 57.7 / 64.9 / 71.9), slope
       1.078 / 1.080 / 1.085, scatter 1.49 / 1.86 / 2.44; Gaussian fit page mean +0.03 / +4.51 / +8.67 (moves 8.6 nm),
-      edge area +22.1 / +27.3 / +32.3 (10.1 nm), half area -2.1 / +0.3 / +2.6 (4.7 nm)
+      edge area +22.1 / +27.3 / +32.3 (10.1 nm), half area -2.1 / +0.3 / +2.6 (4.7 nm). 100 nm circles: page CD
+      99.67 / 99.51 / 99.42 (moves 0.25 nm; fitted blur 57.0 / 64.5 / 72.0), slope 1.040 / 1.054 / 1.067; Gaussian
+      fit -10.0 / -5.8 / +0.4 (10.4 nm), edge area +15.5 / +20.1 / +26.5 (11.0 nm), half area -5.9 / -4.2 / -2.0 (3.9 nm)
 - [ ] Where the rest of the slope and the light move come from. Measured so far (`runs/slope_template.log`, one
       noise-free hole, the page fit's window and weights): with the very templates the page fits landed on, an
       isolated hole reads slope 0.99-1.02 and a light move under 0.02 nm per 10 % (the exact template 1.00 and 0), so
