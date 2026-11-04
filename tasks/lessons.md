@@ -202,3 +202,9 @@
   the neighbours, because they always sit in the same places); all holes are fitted at once. Find the single idea
   first (here: bright minus dim cancels the neighbours), show it with the page's own images, keep proofs (slopes,
   error percentages) to one line, and use the user's own words (template, Gaussian fit, columns).
+- **"How does it work" means every step the code runs, each with a picture of that step's real output.** After
+  the three-step page (one idea, three pictures) the user wrote "PROVIDE A STEP BY STEP DESCRIPTION OF EVERY SINGLE
+  STEP WITH VISUALIZATIONS!". Record the intermediates with a trace run of the unchanged code and give every step
+  (thresholds and seeds included) its own short text and picture, in order; the one idea goes in the step where it
+  acts. Before the page says a step causes a gain, test it with a control run: here the noise-bend removal, not
+  the extra rounds, took the 1 nm step reading from 1.09 to 1.00 nm.

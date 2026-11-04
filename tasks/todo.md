@@ -74,6 +74,12 @@ Otsu, just do it"). Scratch code and data in the same artifacts folder (README t
   `artifacts/learned_hole_prototype/how_it_works.html` (`make_explainer.py`). Swap test on the 50 nm page, same
   fit and seeds, only the picture changed: bell (the Gaussian fit's median width) step 1.24, noise at 8 columns
   0.519, 32 columns; learned 1.00 / 0.405 / 16; exact picture 1.00 / 0.405 / 16. The gain is the shape alone.
+- Explainer v2, three steps (user: "I don't understand a thing"): kept as `how_it_works_v2.html`.
+- Explainer v3, every step (user: "PROVIDE A STEP BY STEP DESCRIPTION OF EVERY SINGLE STEP WITH VISUALIZATIONS!"):
+  `how_it_works.html` (`make_steps.py`; data from `learn7_trace.py` = learn7 unchanged, intermediates recorded).
+  15 steps, each with that step's real output on the 50 nm page. Control run (6 plain rounds, no noise-bend
+  removal): the 1 nm step stops at 1.094 nm, noise 0.445 nm at 8 columns; with the removal 0.995 / 0.405. So the
+  noise correction, not the extra rounds, makes the last gain.
 
 # Workbench UI/UX rework (review 2026-10-31; decisions made, implementation in a new session)
 
