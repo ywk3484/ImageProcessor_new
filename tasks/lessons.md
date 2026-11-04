@@ -1,268 +1,72 @@
 # Lessons
 
-- **Committing:** commit directly on `main` when asked; no feature branch. Stage only the files
-  you changed, by explicit path: the working tree usually holds the user's own uncommitted work,
-  which must stay out of your commit.
-- **Keep your edits out of the user's pending files.** Appending to a file the user has not
-  committed yet (e.g. an untracked doc) entangles your work with theirs at commit time. Put new
-  content in files that carry no pending changes of theirs.
-- **A nuisance the user names is a hard constraint.** When asked for a method that is insensitive
-  to something (e.g. per-hole source-intensity fluctuation the reference cannot remove), every
-  candidate must be invariant to it; do not propose one that needs the nuisance removed by a
-  reference. Ask what has already been tried before proposing a method.
-- **Explain in the user's terms.** Build the argument step by step in plain language, with the
-  physical picture first. Define every term, avoid statistics/optics jargon (Cramér–Rao bound, SNR,
-  slope, d/PSF), and give only the few numbers that matter, in nm with an example, not tables of
-  percentages.
-- **Every number shown must be explained before it is used.** Before showing a table or example,
-  say what each row, column and value is (e.g. "brightness counts of 9 pixels in a line through the
-  middle of one spot"), where it comes from (simulated, which assumptions, or measured), and only
-  then what to look at. Build examples on the user's real sizes, not on made-up ones.
-- **Ask which population a spread statistic is over.** "3 sigma" for CD can mean hole-to-hole
-  inside one image or image-to-image of the image means (repeatability). The user meant between
-  images; I built within-image. When a statistic could be over more than one population, state the
-  equation in the output and confirm which one is wanted.
-- **Never calibrate each image to the same target when images are compared.** Matching every
-  image's median to a nominal CD forces their means equal and fakes perfect repeatability. Calibrate
-  once and reuse the calibration for every image in a comparison.
-- **A smaller spread is not better precision unless the method follows the true CD at slope 1.**
-  A method that moves 0.5 nm per 1 nm of real change also halves the real image-to-image
-  differences. Say so whenever methods are ranked by their spread.
-- **Test a diagnostic on planted causes before shipping its reading guide.** My first band-profile guide
-  ("CD follows brightness → light leak") was wrong: real CD changes also change brightness. Plant each
-  candidate cause in a synthetic image and check the guide names the right one.
-- **Keep display data at the precision the method used where the method is sensitive.** 8-bit cells were
-  fine to look at but moved steepest-slope edges by up to 1.5 px; store what the method computed on exactly.
-- **Console output must survive non-UTF-8 consoles** (the user's Windows uses cp949): print ASCII only.
-- **Never assume the pattern shape.** The user's patterns can be any shape, unknown in advance. I proposed a
-  round-hole profile model, then tested on holes and squares only; both were assumptions the user never made.
-  Ask what shapes occur before using a shape model; otherwise use shape-free measures and test them on
-  mixed, irregular, rotated shapes the method knows nothing about.
-- **Do not build new methods on a method the user found failing on real data.** The disk fit (and anything
-  that needs `--psf-fwhm` / `--nominal-cd`) did not give good range or repeatability on the user's images;
-  re-proposing it in a new form was rejected twice.
-- **Check that the suspected cause is the real error source before replacing it.** "No interpolation" was
-  the user's guess; the spline was there. A better interpolation did not help; the width definition (2
-  points per edge) and noise did. Test the replacement before proposing it.
-- **Report speed matters on the user's machine.** Time every stage on a full-size image and drop or move to
-  the GPU what dominates before adding more.
-- **Never state a cause in a result summary that was not measured.** "Neighbours' light gets in" at a low
-  threshold was a guess; the measured cause was the feature's own tail being wider than its cell (Voronoi
-  cell clipped to box + pad) and the edge-based local level holding that tail. Diagnose (e.g. render each
-  feature alone, noiseless) before explaining a failure rate.
-- **Test on harder synthetic patterns before shipping a method.** The wide tail_area passed on 100 nm round-ish
-  features but failed on the user's patterns; bigger or square features (Gaussian neighbour models misfit) made
-  almost all fail. Run the stress set (bigger, squares, more blur) and check the share measured, not just error.
-- **Test array layouts, not only square grids, and use the user's own example image.** tail_area took its level
-  from "own territory beyond 0.6 pitch"; on a staggered array the territory ends at ~0.56 pitch, so the level was
-  empty and almost every hole got no value. examples/data/synthetic_ch (staggered) reproduces it in seconds.
-  Define per-hole regions relative to the hole's own territory, never by a fixed fraction of the pitch.
-- **Measure the user's suspected noise source before building around it.** "The peak makes it noisy" was
-  plausible but the oracle test (true peak instead of the estimate) showed the peak causes ~5 % of the noise.
-  Run an oracle test first and report it with the new method.
-- **Build what was asked, at the place asked.** The user asked for a peak-free TAIL boundary; I shipped a
-  steepest-slope level (~0.4 of the peak, what projection reads) and called it done. Check the delivered level
-  against the request (here: cut/peak must be near the background) before reporting.
-- **Never replace or rename a method the user already has.** Add new methods next to existing ones; the user
-  compares them on real data.
-- **A measurement tool measures; do not add statistics the user did not ask for.** For the batch run I proposed a
-  between-page 3 sigma per TIFF; the user computes statistics afterwards, and repeatability ("between-image") is
-  between 3 datasets of the same area, while hundreds of TIFFs are ONE dataset. Ask what one file / one dataset is
-  before grouping anything.
-- **Ask questions in the user's terms.** "Which pages should the between-image 3 sigma compare?" was not understood.
-  Say what the choice changes in their output, with their own objects (dataset, TIFF, page), not my internal plan.
-- **When raising a defect, answer what the user will ask next.** "Do you want me to fix it?" about the cell-size
-  coupling made the user ask whether it is a bug and how exactly I would fix it. Say: bug or not, the measured cause
-  (isolated by a test that changes only that one thing), how often it triggers on their data, the exact fix with a
-  prototype result, and how the fix changes their numbers.
-- **For a batch tool, give the whole-dataset time up front.** Explaining the per-page design did not answer "is
-  this realistic on my dataset?". Give pages x seconds per page / GPUs, the assumptions behind it, and what the
-  trial run measures.
-- **Measure I/O under the user's conditions.** "Opening a 1500-page TIFF takes 0.03 s" came from a 64x64-px file
-  already in RAM; the user's TIFFs are ~2 GB on an HDD (~1 min to load). Cold on this PC's HDD (evict the file:
-  open it unbuffered), counting the pages alone took 14 s and the batch's 8-worker reads 56 s vs 19 s sequential.
-  Use the real file size, the real disk and a cold cache, or say the number is unknown.
-- **Ask for the direct quantity; do not derive it from two rough totals.** From "~2 GB, up to 1500 pages" I derived
-  1.4 MB per page and guessed the page size; the real page is 2048x1378 8-bit (2.8 MB), so a 2 GB file holds ~700
-  pages. Before estimating a run, ask page size (px), bit depth, compression, pages per file, files per dataset and how
-  many pages hold holes, then measure one page of that size.
-- **"The GPU is busy" is not "the GPU is used well".** Two workers on one GPU giving no speed-up only showed
-  contention (without MPS, processes take turns and evict each other's cache). Before claiming a limit, compare
-  the work with the hardware: bytes moved vs data size (one page created 157 GB of temporaries for 2.7 MB of
-  pixels), double-precision use (1/64 rate on Ada), GPU idle time (29 %), number of launches (~16,000 per page).
-- **A test threshold tuned on a buggy implementation encodes the bug.** After the grid fix, unit tests failed whose
-  limits had been met by the old code only at the one cell size the test used (edge_area's bright-top shift: 1.8 % in
-  a 31-px cell, 4.2 % in a 41-px cell, old code). Before changing a test, recompute its quantity with the old code at
-  another array size or mask shape; report the change, do not just relax the limit.
-- **Profile before trusting a "the GPU is the limit" picture, and measure the worker counts the target will run.**
-  After the kernel work, half of each page was CPU-side (many small steps), and a second worker gave no gain on this
-  Windows GPU. Give the remote estimate as a range with the deciding unknown named (workers per GPU on Linux, MPS),
-  and the trial run that measures it.
-- **The library call is not the disk, and read the library before naming why it is slow.** tifffile.imread read a
-  2 GB HDD file in 29-33 s against 16 s for a plain read. I told the user "it reads pages in parallel, so the head
-  jumps", unmeasured; tifffile reads uncompressed pages one at a time (so maxworkers changed nothing, as the user had
-  seen). Measured: it first walks every page header through the whole file (13 s cold, one seek per page), then reads
-  the pixels. Time a plain read, then each step of the library call, before giving a cause.
+General rules from past corrections, one or two lines each. Incident details are in git history and tasks/archive/.
 
-- **Show every option the user's own case needs in the example commands, and check inputs before saving state.**
-  The docs' commands had `--reference /data/reference.tif` without `--reference-page` (it was only in the table), so
-  the user read the reference as a whole TIFF; it is one page of one. And the reference page was first read by the
-  workers, after run.json was saved: a wrong page number stopped the run and the corrected command was then refused
-  as "other settings". Read and check every input before writing anything a later run is compared with.
-- **Never infer the target machine from files in the repo; write commands for the shell it really has.** I took the
-  repo's Dockerfile / compose.yaml for the remote and wrote bash loops, `\` continuations, tmux / nohup, MPS and
-  Docker notes; the remote is Windows Server 2022 without Docker, and the first loop the user pasted failed to parse
-  in PowerShell. Ask for (or state) the target OS and shell before writing commands for another machine, and give
-  copy-paste instructions as one plain command per line, without loops or line continuations.
-- **Estimate speed from pages that behave like real data, and explain every outlier before reporting.** I told the
-  user 4-16 pages/s for 4 RTX 6000 Ada from GPU specs and clean synthetic pages; the remote measured 3.5 s per hole
-  page, 2.0 s of it deblend. Clean synthetic pages meet deblend's stop rule (99 % of holes move < 0.001 px) in 6-7
-  rounds; real pages likely never do and run all 30 (forced here: 1.6 s). My own test file had such a page (2.7 s)
-  and I reported "slowest page 2.7 s" without asking why. Also the GPU is busy only ~60 % of a page, mostly with small
-  kernels a bigger GPU does not speed up. Before any estimate: measure the GPU's busy share, time a page that never
-  settles, and find the cause of each slow page.
-- **Never call a partial fix "fixed".** The blob page went from 15 s to 3.3 s (normal page 1.7 s): the numbers were
-  fixed, the time only partly (full-size cell stacks remain). Say what is left, with its cost.
-- **The user types every line from the remote by hand: give one command and a short result, never a paste.** I
-  explained the slowness one hypothesis at a time and each time asked the user to paste a long PowerShell script and
-  type back its output; they called it using them as a testbed and stopped trusting the diagnosis. For another
-  machine, build one script that measures every candidate at once (code version, environment, machine, GPU sharing,
-  the real pages' stage split and deblend behaviour, the numbers), verify it here first, and make it print a few
-  short lines of labelled tokens in which no letter looks like a digit. Ask for those lines only.
-- **Count the characters before asking for typed output, and say what the goal is before any method.** Part 2
-  printed six lines of about 400 characters of letter tokens; the user, who types them by hand, asked whether I
-  really thought that was typable and what I was even trying to do. Hand-typed output must be the few numbers that
-  decide the next step (about 150 characters at most), each with its meaning in plain words next to it, with the
-  full record left in a file for later questions. And every report starts with the goal in one plain sentence.
-- **Lead with the user's operational questions, and never gate an answer on more typing.** After part 2 the user
-  asked, in capitals, what the throughput is now, how long a dataset takes, why the remote is slow, what the loops
-  are and whether the changes give a realistic time. Every one of those was answerable from numbers already in hand,
-  but my reports had led with tokens, candidates and a request for one more typed line. Each report starts with:
-  pages per second now, hours per dataset now, what changes, hours per dataset after, measured or estimated. Method
-  comes last and only in plain words.
-- **A reference that uses the stop rule under test is no reference.** "Today's loop allowed 200 rounds" stopped at
-  round 36 by the same 1e-3 rule, 1 nm short of where the loop ends; cures compared with it looked like different
-  fixed points. Run the reference to a stop the drift cannot meet by chance (here 1e-5; the plain loop, Anderson and
-  a wider start then agree within 0.01 nm) and judge each cure by its distance from that end point.
-- **Fix a feature the user has; do not propose removing it.** The workbench review recommended replacing "Stack
-  vertically" with a page list because it was slow and narrow at full view; the user needs both. When an existing
-  feature is slow or awkward, propose making it work (load on demand, a better fit) and add the new one beside it;
-  removing it is the user's call, asked as a plain question with what it would cost them.
-- **For a "looks wrong" report, ask where and on which image before reproducing.** "The Voronoi cells differ from
-  before" sent me through settings, padding, GPU vs CPU and the stack for an hour; one question (which view, which
-  image, what is wrong) pointed at the display of one view, which no calculation check could find.
-- **"Different from before" means compare what the user looked at, not the widget with the same name.** I
-  checked the "Voronoi cells" stage in old versions, found it unchanged and said so; the user had looked at the
-  "Voronoi edges" layer (boundaries on the image), which the new layout hid in a menu. Before claiming "it was always
-  like this", list every way the old UI could show the thing (stages, layers, overlays) and screenshot each; and a
-  view meant for judging a result must show it on the image, never a picture without the image.
-- **An explainer must answer the next question with a tested payoff, not redraw the doc.** The picture page for the
-  ACTIS proposal re-illustrated each sentence ("stack the holes into one average hole") and added an astronomy
-  analogy; the user asked what you do after the average hole, whether fitting each hole to it improves the
-  measurement, and said other fields are none of their business. Before explaining a method, simulate what it
-  buys on the user's own numbers and against their existing methods (here: no per-hole gain while each hole's
-  brightness is unknown, 2x once it is known), lead with that result and the condition it depends on, and leave
-  out analogies from other fields.
-- **"Registration" means pattern placement from pitch here, not image alignment; ask when a word names two things.**
-  Asked to add the old GPU "registration methods" to the workbench, I planned the Align view's image-to-image shift
-  (`registration.py`); the user meant the Pitch panel's placement error and the GPU center finders behind it. I had
-  even noted both meanings and picked one. When a term means two things in the repo, ask which one first, naming
-  both in the user's words (here: "shift between two pages" vs "hole placement error from the pitch").
-- **Look at every plot of a report the way the user will, at its default view, before shipping it.** The pitch
-  signature report drew the planted, true and measured y pitch as three same-weight lines on top of each other, and
-  "a row every ~1 um" meant every 2nd row on 500-600 nm pitches, so even perfect centers drew a pure zig-zag; the user
-  could not see the step anywhere. A planted pattern must be rare enough to read as an event (here >= 5 rows apart),
-  truth and measured go in separate panels (one line each, same scale), and the selector sits beside the graph it
-  changes, never in a table the user must scroll to.
-- **When a noise level I assumed decides the headline, check it does not hide what the user asked about.** 0.5 nm
-  mask placement noise (my guess; the user gave none) made even perfect centers need 8 columns, so every good method
-  looked the same. State such a floor as an assumption, and pick test noise that leaves the methods' differences
-  visible (here 0.2 nm), with the larger value one option away.
-- **Fill "best existing" cells with the report's own ranking code, never by eye.** My dense-array table named half
-  area min (step 1.13, 1.28 nm per hole) as the best existing method on the 50 nm page; the report's `best_of` picks
-  the Gaussian fit (1.19, 1.06 nm). The columns were the same, but the step range I quoted to the user (1.09-1.15)
-  was wrong. Make every comparison cell in a script with the same function the report uses, and quote ranges from
-  that output.
-- **Test the user's cheap hypothesis instead of arguing theory against it.** The user said several times that
-  enlarging the page before Otsu should help; I kept answering that interpolation adds no information, until they
-  wrote "you never agreed with me on this, but just do it". The test took one script and 20 minutes of GPU at 2x,
-  and the answer was mixed (simple GPU finders up to 25 % less noise on the dense pages, the fits unchanged, some
-  area methods worse). When the user proposes something that can be run, run it first, report the numbers per
-  method, and keep the theory to one line.
-- **When a new method is near the physical floor, show the floor before showing the gain.** The first dense-array
-  report showed the learned hole picture beside the Gaussian fit; it sat on the floor (0.405 vs 0.400 nm), but the
-  Gaussian fit was only 7-34 % above it, so the user saw "barely a difference" and asked for a better method. Put
-  the floor in every comparison (a line in each noise chart, a column in each table) from the first version, so a
-  small gain reads as "nothing left to win", and say what would move the floor (here: more light).
-- **To explain how a method works, walk through the steps it runs, one plain picture each, built on the one idea
-  that makes it work; evidence that it works is not an explanation.** My first explainer of the learned hole
-  picture plotted light-vs-brightness regressions (96 / 45 / 1 %), error percentages and a swap test; the user
-  answered "I don't understand a thing". The second one says what the method does in three steps: every hole is a
-  copy of one template; the template is the brighter half of the holes minus the dimmer half (a plain average keeps
-  the neighbours, because they always sit in the same places); all holes are fitted at once. Find the single idea
-  first (here: bright minus dim cancels the neighbours), show it with the page's own images, keep proofs (slopes,
-  error percentages) to one line, and use the user's own words (template, Gaussian fit, columns).
-- **"How does it work" means every step the code runs, each with a picture of that step's real output.** After
-  the three-step page (one idea, three pictures) the user wrote "PROVIDE A STEP BY STEP DESCRIPTION OF EVERY SINGLE
-  STEP WITH VISUALIZATIONS!". Record the intermediates with a trace run of the unchanged code and give every step
-  (thresholds and seeds included) its own short text and picture, in order; the one idea goes in the step where it
-  acts. Before the page says a step causes a gain, test it with a control run: here the noise-bend removal, not
-  the extra rounds, took the 1 nm step reading from 1.09 to 1.00 nm.
-- **Whether a step is needed, and why, comes from what it removes, not from a test score.** Asked whether the
-  learned-template method was overcomplicated, I switched its steps off one at a time on the synthetic 50 nm page
-  and ranked them by the 1 nm step reading. The user: "your decision on whether something is needed, 'why' this is
-  needed must not depend on the numbers you obtained from test calculations". The test page obeys the method's own
-  assumptions by construction (flat background, unlinked flicker, half-turn-symmetric holes, independent pixel
-  noise), so a step that guards against their failure shows nothing and a step that relies on them looks fine; a
-  score also cannot tell a real fix from one step offsetting another; and the user has many datasets that differ.
-  For each step give: the physical or statistical effect it removes, the property of the data that makes the effect
-  exist, the assumption the step adds, and how to check that property on each dataset. Test numbers are size
-  references only, labelled as such.
-- **A verdict is a few plain lines and one picture, not an audit in my own terms; and do not defend a method's
-  core as minimal when its gain comes from the polish.** My fundamentals diagnosis listed about 25 items with step
-  numbers and words like "local level", "imprint", "correlation fix", and called the core "the least the problem
-  allows". The user: "It is overcomplicated. I cannot understand a thing you are talking about." The core alone does
-  not deliver the gain (its first, unpolished template read the 1 nm step as 1.15 nm, the Gaussian fit 1.19 nm); the
-  polish does, and the polish is the complexity. Lead with the verdict and the trade-off in the user's words (holes,
-  gap, rim, Gaussian fit), one ASCII picture, at most three reference numbers, and one question that decides what to
-  do next.
-- **When the user asks for a page that explains a method, deliver the page, with the why of every step and number
-  on it; do not answer with chat verdicts.** After a 15-step page with real-output pictures (what each step does)
-  and two chat diagnoses, the user wrote: "I have asked you and the previous session over several times to create
-  the html so that I can actually understand every step, and I still don't understand the flow completely and all
-  you are saying is that this isn't overcomplicated." A list of steps with pictures is not the flow, and "what it
-  does" is not "why it is there". The page needs: the problem in one picture, the idea in one picture, a flow
-  diagram with what each step hands to the next and each step's role (the idea / start only / bookkeeping / repairs
-  a side effect / assumption), and per step: what goes wrong without it, each number with a tag saying whether its
-  value matters, is a guess, a fixed count or has no reason, what it assumes, and an honest "is it general" with
-  checks for the user's own images.
-- **"I found no job for this step" is not "it has no job".** In the fundamentals diagnosis I called the per-hole
-  local level over-built because I could not name its job; a reference run without it read the 1 nm step as 1.06
-  instead of 1.00. It keeps each hole's brightness from taking up flat light that the model gets wrong. Before
-  calling a step unnecessary, list everything it absorbs or protects against, and write "not pinned down" when
-  unsure.
-- **Explain a mechanism on one tiny concrete case with numbers the reader can add up; no symbolic rows, no
-  add-ons.** Asked to explain the idea paragraph of the why page (brighter holes minus dimmer holes leave one
-  hole's light), I answered with a table of symbols ("bright half: same + 1.05 x one hole + 1.00 x neighbours"),
-  three bullets, a note on how the code weights the holes, a caveat and an offer. The user: "Oh my god, you still
-  can't provide a good explanation." Symbols state the result without showing why it happens. Show it on one tiny
-  case first (three holes, five pixels: what each hole puts on each pixel, what the image shows, what changes when
-  only B gets 10 % brighter: the change is B's own light), then one step to the real data (thousands of holes,
-  average of the brighter minus average of the dimmer). Nothing else in the reply.
-- **Check a method's core premise against what is known about the equipment before building it, and never explain a
-  miss by what the user did not say.** The learned template is learned from brighter minus dimmer holes, which
-  separates a hole's light from its neighbours' only if each hole's brightness varies on its own. The user had named
-  the tool (Lasertec ACTIS) and an earlier session had researched it, so how its plasma source lights the mask
-  (thousands of holes at once, so neighbours share the flicker) was knowable. The method took its premise from test
-  pages drawn with independent flicker and from the word "per-hole" in my notes instead. User: "I have no idea where
-  you got the idea that adjacent holes will not have a correlation at all." When I then wrote "nobody asked you how
-  the source works": "Saying 'nobody asked about the source' is just a lame excuse." Several sessions and four
-  explainer pages rested on it. Before building, list what the method's core needs from the data (what varies
-  together, over what distance, how the light is made) and check each against the equipment research; where it is
-  silent, research further or ask. A test page with the property built in cannot show that it is false. When
-  something fails, state my failure plainly.
-- **In an explanation, give each thing one name and one role, and keep them.** I said every hole gets a cut-out and
-  the cut-outs are sorted into bright and dim, then claimed "the neighbours around the bright holes" are "the same
-  in both" without saying that they are the other holes showing at each cut-out's edges, and that they are not
-  sorted. The user: "What on Earth are you talking about?" Say which hole is sorted (the one in the middle) and what
-  the others are (whatever sits at the edges) before claiming anything about them.
+## Before building
+- Ask for the quantity you need directly (image size, bit depth, what one file or dataset is, which population a
+  statistic is over, the target OS and shell). Never derive it from rough totals or infer it from files in the repo.
+- When a word names two things in this repo, ask which one, naming both in the user's terms.
+- A nuisance the user names is a hard constraint: every candidate must be insensitive to it. Ask what has already
+  been tried; never re-propose, in a new form, a method the user found failing on real data.
+- Before building a method, list what its core premise needs from the data (what varies together, over what
+  distance, how the instrument forms the image) and check each against what is known about the equipment; where
+  that is silent, research or ask. A synthetic test with the premise built in cannot show it false.
+- Do not assume shapes, layouts, noise levels or other properties the user has not stated. Label each assumed value,
+  and pick it so it does not hide the differences the user asked about.
+- Before replacing what the user suspects is the error source, measure that it is (oracle test: give the method the
+  true value of the suspect and see how much error goes away).
+- When the user proposes a test that is cheap to run, run it and report the numbers; keep counter-theory to a line.
+
+## Testing and comparing
+- Test beyond the happy path: the user's example image (examples/data/synthetic_ch), staggered as well as square
+  arrays, larger, irregular and rotated shapes, more blur; check the share of features measured, not only the error.
+- Define per-feature regions relative to the feature's own territory, never as a fixed fraction of the pitch.
+- Test a diagnostic's reading guide on planted causes: plant each candidate and check it names the right one.
+- Comparisons: calibrate once and reuse it for every image compared (per-image calibration fakes repeatability); a
+  smaller spread is better precision only if the method follows the true change at slope 1; a reference must not
+  use the stop rule under test; show the physical floor in every comparison.
+- Fill comparison tables with the report's own ranking code, never by eye, and quote ranges from that output.
+- A claimed gain from one step needs a control run that changes only that step.
+- Whether a step is needed follows from the effect it removes and the data property behind that effect, not from
+  synthetic scores (test pages obey the method's assumptions by construction). "I found no job for it" is not "it
+  has no job": list what it absorbs, or say "not pinned down".
+- A test limit met only by buggy code encodes the bug: after a fix, recompute the quantity with the old code at
+  another size before changing the limit, and report the change rather than just relaxing it.
+- Keep stored or displayed data at the precision the method used wherever the method is sensitive to it.
+
+## Speed and I/O
+- Measure under the user's conditions: real file size, real disk, cold cache, pages that behave like real data
+  (real pages may never converge the way synthetic ones do), and the worker count the target runs. If not
+  possible, say the number is unknown.
+- Profile before naming a bottleneck or its cause: time each stage; for a library call, time a plain read, then
+  each step of the call, and read its source. "The GPU is busy" is not "the GPU is used well": compare bytes moved
+  with the data size, float64 use, idle share and number of launches.
+- Give the whole-dataset time first (pages x seconds per page / GPUs), as a range that names the deciding unknown,
+  and explain every outlier before reporting.
+
+## Reporting
+- Never state a cause that was not measured. Never call a partial fix "fixed": say what is left and what it costs.
+- Before reporting, check the deliverable against the literal request (the level, the place, the view asked for).
+- When something failed, say so plainly; never explain a miss by what the user did not say.
+- When raising a defect, say: bug or not, the measured cause (isolated by a test that changes one thing), how often
+  it triggers on the user's data, the exact fix with a prototype result, and how it changes the user's numbers.
+- A measurement tool measures: add no statistics the user did not ask for.
+- Look at every plot as the user will, at its default view: truth and measured in separate panels, planted events
+  rare enough to read as events, controls next to the graph they change.
+
+## Commands, tools and UI
+- Commands for another machine: written for the shell it really has, one plain command per line, with every option
+  the user's case needs shown in the example itself.
+- Check every input before writing any state that a later run is compared with.
+- Console output: ASCII only (the user's Windows console is cp949).
+- For a "looks wrong / differs from before" report, ask which view and which image first. Compare what the user
+  looked at (every stage, layer and overlay of the old UI), not the widget with the same name. A view for judging
+  a result shows it on the image.
+
+## Repo hygiene
+- Stage only your own files, by explicit path; the working tree holds the user's uncommitted work. Do not edit
+  files that hold the user's pending changes.
+
+## Writing lessons
+- Add a lesson only for a rule that would change behaviour on a different task: one or two lines, no story, quotes,
+  dates or incident numbers. Sharpen an existing rule rather than append a new one. Task notes go in tasks/todo.md.

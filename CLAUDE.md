@@ -43,7 +43,12 @@ GPU implementations are **hybrid**: segmentation stays on CPU (OpenCV), expensiv
 |---|---|
 | `centers.py` | Center detection: Otsu → connected components → subpixel refinement |
 | `pitch.py` | Pitch estimation: KNN or index_regression, global and per-line |
-| `registration.py` | Phase cross-correlation shift estimation |
+| `registration.py` | Phase cross-correlation shift between two images (not pattern placement; see `pattern.py`) |
+| `cd.py` | Contact-hole contours, CD methods, spatial maps, raw exports (backends `_cpu/`/`_gpu/` `cd.py`, `local_cd.py`, `deblend.py`) |
+| `pattern.py` | CD-center lattice indexing, pitch profiles, placement ("registration") reports |
+| `preprocess.py` | Denoising and the super-resolved average hole (from the ACTIS preprocessing proposal) |
+| `synthetic_arrays.py` | Synthetic hole arrays with exactly known centers, for center and pitch tests |
+| `workbench/` | PyQt6 inspection UI (`python -m subpx.workbench`) |
 | `spectra.py` | FFT-based periodic error analysis |
 | `calibration.py` | Row/column clustering, residual maps, distortion field fitting |
 | `mosaic.py` | TIFF stripe/board parsing and global coordinate mapping |
@@ -81,8 +86,8 @@ GPU implementations are **hybrid**: segmentation stays on CPU (OpenCV), expensiv
 - One tack per subagent for focused execution
 
 ### 3. Self-Improvement Loop
-- After ANY correction from the user: update `tasks/lessons.md` with the pattern
-- Write rules for yourself that prevent the same mistake
+- After a correction from the user, add or sharpen a rule in `tasks/lessons.md` only if it would change behaviour on a different task
+- One or two lines per rule: no incident story, quotes, dates or numbers; merge into an existing rule where one fits
 - Review lessons at session start
 
 ### 4. Verification Before Done
@@ -105,7 +110,7 @@ GPU implementations are **hybrid**: segmentation stays on CPU (OpenCV), expensiv
 3. **Track Progress**: Mark items complete as you go
 4. **Explain Changes**: High-level summary at each step
 5. **Document Results**: Add review section to `tasks/todo.md`; once it passes ~150 lines, move finished sections to `tasks/archive/todo-YYYY-MM.md`
-6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
+6. **Capture Lessons**: After corrections, per the rules in section 3 above
 
 ## Core Principles
 
