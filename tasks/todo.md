@@ -79,7 +79,13 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       came from the defective code (kept in runs/before_fix/). Relaunched in full at about 09:20 as driver5 (two
       workers, 17 jobs, the new defaults): `cd artifacts/outline_fit; python -X utf8 runs/driver.py workers=2
       status=driver5`, then `python -X utf8 make_page.py` (to show the before_fix numbers beside the new ones). The
-      grid background can run beside it later with `extra=bg=grid suffix=_grid`
+      grid background can run beside it later with `extra=bg=grid suffix=_grid`. MOVED TO THE GPU at 13:00 after the
+      user asked why the CPU (the morning's memory squeeze was over, the GPU idle): the CPU driver stopped after 9 of
+      17 (its two in-flight centers pages finish on their own), the 80 nm stress page run on the GPU as the test
+      (`backend=gpu`, far field included: fit 190 s for 48,689 holes and 14 rounds, 7-10 s a round once settled,
+      against about 3,000 s on two CPU threads; the existing methods for comparison take 279 s on the CPU), then
+      the remaining six jobs as `runs/driver.py workers=2 gpu=1 status=driver6 only=... skip=stress_circle100_square_lens`.
+      Lesson applied: recheck the machine's state before relaunching a queue under a rule made for an earlier state
 - [ ] Real page 0 (and several pages): residual vs noise, fitted blur, CD distribution; page-mean CD across the hole
       pages against the Gaussian fit's
 - [ ] HTML page (problem, idea, flow, each step with why, payoff, is it general, checks on own images); review here;
