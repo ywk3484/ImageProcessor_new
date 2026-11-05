@@ -27,6 +27,8 @@ General rules from past corrections, one or two lines each. Incident details are
   use the stop rule under test; show the physical floor in every comparison.
 - Fill comparison tables with the report's own ranking code, never by eye, and quote ranges from that output.
 - A claimed gain from one step needs a control run that changes only that step.
+- A stage that converges on an exact noise-free page to a leftover above the model's precision has a defect in what
+  it shows each block (its bookkeeping), whatever the model looks like: check that before chasing model errors.
 - Whether a step is needed follows from the effect it removes and the data property behind that effect, not from
   synthetic scores (test pages obey the method's assumptions by construction). "I found no job for it" is not "it
   has no job": list what it absorbs, or say "not pinned down".

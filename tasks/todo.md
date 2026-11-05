@@ -81,7 +81,7 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       edge area +22.1 / +27.3 / +32.3 (10.1 nm), half area -2.1 / +0.3 / +2.6 (4.7 nm). 100 nm circles: page CD
       99.67 / 99.51 / 99.42 (moves 0.25 nm; fitted blur 57.0 / 64.5 / 72.0), slope 1.040 / 1.054 / 1.067; Gaussian
       fit -10.0 / -5.8 / +0.4 (10.4 nm), edge area +15.5 / +20.1 / +26.5 (11.0 nm), half area -5.9 / -4.2 / -2.0 (3.9 nm)
-- [ ] Where the rest of the slope and the light move come from. Measured so far (`runs/slope_template.log`, one
+- [x] Where the rest of the slope and the light move come from. Measured so far (`runs/slope_template.log`, one
       noise-free hole, the page fit's window and weights): with the very templates the page fits landed on, an
       isolated hole reads slope 0.99-1.02 and a light move under 0.02 nm per 10 % (the exact template 1.00 and 0), so
       neither is the template nor the estimator; both appear only on the page (neighbours, their cleaning, or the
@@ -108,31 +108,35 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       1.031 x - 0.97 nm, +0.127, brightness 1.2 % high, levels +0.26 (noisefree_far_patch512.log). (5) The bias is the
       estimator's: fit window 9 px with free levels -> 1.22 x - 6.8 nm, +0.70; levels fixed at the true background
       -> window 6: 1.004 x + 0.33 nm, -0.05; window 9: 1.0006 x + 0.59 nm, -0.07; window 14: 0.877 x with leftover
-      6 grey levels (the off-page holes are not in the model and the robust weights were off: not a clean test yet)
-      (noisefree_far_window*.log). Reading: the hole stage is a per-window relaxation - each hole fits only its own
-      window and its free level absorbs the neighbours' excess light - so a common shift of size, brightness and
-      level over the page is weakly determined and the fixed point is not the joint least squares (it moves with
-      the window and the level freedom; the isolated hole, with no neighbours, reads 1.000). Fix to build: a page
-      background model (coarse bilinear grid solved in alternation with the holes) instead of a level per hole, a
-      fit window out to the hole's light, robust weights kept; check first on the complete-model page (on-page
-      holes only, no fold), then the small noisy page. `fit_holes(free_level=False)` exists for the tests.
-      STOPPED BY MEMORY (commit 89 of 91 GB, the user's node process at 39 GB): the window-9 fixed-level rerun died
-      with MemoryError; no Python test runs until memory frees
+      6 grey levels; the frame holes' frozen size is not it (fitted, window 9: 0.995 x + 0.23, as frozen; nf_A2)
+      (noisefree_far_window*.log, nf_A*.log). (6) MEASURED CAUSE AND FIX (Nov 5, runs/nf_*_own_*.log): the hole
+      stage took the whole colour class's light out of the page model and put only the hole's own light back, so
+      inside each window the same-coloured neighbours' light (1.5 spacings away: their tails, with wide windows their
+      cores) was missing from the model; the stage converged to a leftover of 0.14 grey levels where the truth leaves
+      0.004 - the signature of an estimator defect, overlooked while the model was chased. Fitting against the
+      complete model (the hole's cached light is its own current render; the removal moved after the solve): exact
+      page, window 6, free levels 1.004 x - 0.04 nm, +0.03 nm per 10 % light, converged in two sweeps (was 1.031 x
+      - 0.97, +0.13); window 9 with fixed levels 0.998 x - 0.04 (was 0.992 x + 0.25); the grid background no longer
+      oscillates (0.999 x - 0.07 after 8 sweeps) but settles slower than a level per hole, so the level stays the
+      default. With the frame holes' size fitted as well the page is read to the model's precision at every window
+      (6, 9, 14 px): 0.999 x - 0.01 nm, light 0.00, per-hole scatter 0.003 nm, page residual 0.002-0.004 - the
+      wide-window failures were the frozen frame sizes carried inward. Without the far field 1.017 x - 0.30 nm
+      (levels +0.8). Defaults set from these: far field on, frame holes' size fitted, level per hole, window 0.75
+      spacing. Whole fit with the template free (14 rounds, exact page, frame frozen; nf_L): CD slope 1.027, mean
+      error +0.03 nm, scatter 0.08 nm, +0.11 nm per 10 % light, outline 80.04 (true 80), p 2.03 (2.0), blur 64.1
+      (65): what is left is the shape stage's (blur 1.4 % small, p off) - to check with the holes held at the truth
 - [ ] Centers scored with pitch_signature_test.evaluate on the six report pages (columns, step, noise at 8, error).
       50 nm dense page: the fit FAILS as the bound predicts - outline 66.7 nm under a 36.9 nm blur (true 50 / 65), the
       size-blur degeneracy below the cut-off; the per-hole switch did not catch it (sd 0.11 px against a sharp
       template looks readable); centers 1.10 nm vs Gaussian 1.06, step 1.32 vs 1.19 (worse). The only sign is the
       fitted blur, half of the other pages'. Page and todo say so; a blur prior from a big-hole page of the same tool
-      is the obvious (unbuilt) remedy. QUEUE: paused twice on Nov 5 when the machine's committed memory filled
-      (other work; 90.7 of 91.2 GB both times). Resumed in between as driver3 (one worker, per-hole-level code):
-      done 12 of 17 (two lens stress pages, four focus pages, all six centers pages). Left: the real page with both
-      families (they failed on a repeated keyword in run_real.py, fixed) and the three stress reruns (died with
-      MemoryError; their numbers on the page are from before the hole-stage rework, labelled so). Stopped my queue
-      processes at 06:15 so that the full machine is not pushed further. Resume when memory is free (about 2.5 h):
-      `cd artifacts/outline_fit; python -X utf8 runs/driver.py workers=1 resume=1 skip=stress_circle50_dense
-      force=stress_circle80_square,stress_circle100_square,stress_square150_stagger status=driver4`, then
-      `python -X utf8 make_page.py`. The new scheme (far field + page background) runs beside it with
-      `extra=far=1;bg=grid;window=9 suffix=_grid` once its page tests pass
+      is the obvious (unbuilt) remedy. QUEUE: paused twice on Nov 5 when the machine's committed memory filled (other
+      work; 90.7 of 91.2 GB both times), resumed as driver3/driver4 with the per-hole-level code (12 of 17 done),
+      then stopped by me at about 09:05 when the hole-stage defect (slope item, (6)) was found: every result so far
+      came from the defective code (kept in runs/before_fix/). Relaunched in full at about 09:40 as driver5 (two
+      workers, 17 jobs, the new defaults): `cd artifacts/outline_fit; python -X utf8 runs/driver.py workers=2
+      status=driver5`, then `python -X utf8 make_page.py` (to show the before_fix numbers beside the new ones). The
+      grid background can run beside it later with `extra=bg=grid suffix=_grid`
 - [ ] Real page 0 (and several pages): residual vs noise, fitted blur, CD distribution; page-mean CD across the hole
       pages against the Gaussian fit's
 - [ ] HTML page (problem, idea, flow, each step with why, payoff, is it general, checks on own images); review here;
