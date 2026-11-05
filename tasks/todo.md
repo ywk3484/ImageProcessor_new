@@ -52,6 +52,18 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       edge area +22.1 / +27.3 / +32.3 (10.1 nm), half area -2.1 / +0.3 / +2.6 (4.7 nm). 100 nm circles: page CD
       99.67 / 99.51 / 99.42 (moves 0.25 nm; fitted blur 57.0 / 64.5 / 72.0), slope 1.040 / 1.054 / 1.067; Gaussian
       fit -10.0 / -5.8 / +0.4 (10.4 nm), edge area +15.5 / +20.1 / +26.5 (11.0 nm), half area -5.9 / -4.2 / -2.0 (3.9 nm)
+- [ ] What is left on the exact noise-free page after the hole-stage fix (Nov 5, runs/nf_M/N/O/P*.log): the whole
+      fit (template free, new defaults) reads CD slope 1.022, mean error +0.13 nm, scatter 0.06 nm, +0.10 nm per
+      10 % light, blur 64.0 for 65, p 2.03 (before the fix 1.071, +0.25). Each stage alone is exact: the hole stage
+      with the exact template 0.999 x - 0.01 nm (nf_H2), the shape stage on the stack of the holes held at the
+      truth CD +0.03 nm, blur +0.05 nm, p +0.005 (nf_N, 96 and 48 px templates). ORACLE (nf_P, every level held at
+      the true background through the alternation): slope 0.999, +0.01 nm per 10 %, blur 64.9, p 1.99, scatter
+      0.02 nm, converged in 11 rounds - the holes' free levels are the coupling that pulls the joint point off (the
+      mean error +0.12 nm stays: outline 80.15 for 80.0). The page-background grid in the levels' place is no remedy
+      as built (nf_O: 1.065, -0.11 nm, scatter 0.42 nm, +0.21 nm per 10 %, blur 64.3 after 13 rounds: the common
+      shift of size, brightness and background settles too slowly in alternation). Costs 2 % of the CD spread and
+      0.1 nm per 10 % light. Next step if wanted: the background solved jointly with the holes' common size and
+      brightness shift (two dense columns in fit_background), not built; production default stays level per hole
 - [ ] Centers scored with pitch_signature_test.evaluate on the six report pages (columns, step, noise at 8, error).
       50 nm dense page: the fit FAILS as the bound predicts - outline 66.7 nm under a 36.9 nm blur (true 50 / 65), the
       size-blur degeneracy below the cut-off; the per-hole switch did not catch it (sd 0.11 px against a sharp
