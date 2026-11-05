@@ -99,6 +99,31 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       build. Real page 0: outline CD 100.6 (gauss2) / 100.5 (lens), blur 63 / 63, p 2.00 / 2.05, per-hole robust
       sd 2.6 nm, leftover 7.32 against noise sd 7.7, stack chi2 0.96; the two families agree to 0.1 nm; Gaussian
       fit 96.1, edge area 122.0, half area 92.6 on the same holes (corr with outline 0.83 / 0.81 / 0.41)
+- [x] Outline fit in the learned-hole report's format (user, Nov 5 afternoon: "add the results for the new method
+      in the report.html format so that I can visually diagnose what is going on"). Plan: (1) run the outline fit
+      on the report's seven remaining pages and the three two-exposure pages on the GPU (runs/driver.py gpu=1
+      only=centers_,two_ resume=1 status=driver7; run_synth.py gained read_noise=); (2) make_report3.py in
+      artifacts/learned_hole_prototype on top of make_report2: "Outline fit" as a method (group new) on every page it
+      ran on, scored by the report's evaluate() from the saved centers, in the explorer, matrix, best table (own
+      column) and floor chart (own marker); a section on top with, per page, the page piece, the fit's model rebuilt
+      from the saved fit, the leftover at 4 sigma, the fitted outline over the true one and the fitted hole profile
+      over the true hole's, plus the pitch table (existing -> learned -> outline) and a CD table on the four stress
+      pages; (3) report.html rewritten (v2 kept as report_v2.html), layout checked in the browser.
+      DONE 2026-11-05 ~17:40. Queue driver7: 10 pages on the GPU in 1559 s (60-312 s each). Report: outline fit on
+      18 of 18 pages (13 report pages, 2 stress, 3 two-exposure), 18 picture rows, pitch and CD tables, floor chart
+      mark, best-table column, explorer default. Found by the pictures: (a) 300 nm squares at the 24 px template
+      box read blur 89 nm for 65, centres 1.5 x the bound with a 0.22 nm pixel-position error (the hole's light
+      reaches 11 px, the box rendered 10): fit.py now doubles the template box when the hole's light reaches past
+      it; rerun reads blur 65.1, centres 0.18 nm against the 0.17 bound, CD -0.2 nm, 2 columns (was 4), at 2.7 x
+      the time (runs/centers_square300_square_t24.* kept); the 250 nm circles grow too and are unchanged. (b) The
+      60 nm dense page was never a reading: the fit walks the size-blur valley round after round (CD 72 -> 62 nm,
+      blur 46 -> 61 over 14 rounds, still moving 5 nm a round when the rounds ran out); with two exposures the walk
+      goes further and the last shape proposal jumps to CD 31 nm with 74 % of the holes at the edge-offset clip.
+      Both said on the page (status per page: read right 9, size-blur 3, walking or ran away 2, boxy 4). Columns
+      needed against the best existing method: fewer on 0 pages, as many on 14, more on 4 (the dense ones); step
+      0.99-1.03 on the 9 pages read right. Method page (outline_fit.html): centers table extended to the 13 pages,
+      template-growth finding in the open item. Still open: the dense and elongated degeneracies (blur prior from a
+      round-hole page), the alternation's stopping rule on a degenerate page (it should stop and say so, not walk)
 - [ ] Real page 0 (and several pages): residual vs noise, fitted blur, CD distribution; page-mean CD across the hole
       pages against the Gaussian fit's
 - [ ] HTML page (problem, idea, flow, each step with why, payoff, is it general, checks on own images); review here;
