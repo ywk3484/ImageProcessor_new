@@ -46,7 +46,11 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       +0.21 / -0.48; square150 1.004 / 0.53 / +0.21 / +0.27 (edge area 1.021 / 0.86 / -0.61 / +36.2).
       Generator's own blur form (lens family, reworked hole stage): circle80 1.065 / 1.89 / +0.25 / -0.36 (outline
       79.64, p 1.90, blur 64.2 for a true 65); circle100 1.033 / 1.22 / +0.13 / -0.24: the right family takes about
-      half the slope excess and the offset away, the light move stays. Focus series, 80 nm circles, blur 58 / 65 /
+      half the slope excess and the offset away, the light move stays. RERUN with the fixed hole stage (driver5, Nov
+      5; slope / scatter / +10 % light / mean error): circle80 lens 1.013 / 1.96 / +0.08 / -0.16 (was 1.065 / 1.89 /
+      +0.25 / -0.36), circle100 lens 1.008 / 1.24 / +0.03 / -0.19 (was 1.033 / 1.22 / +0.135 / -0.24); centers step
+      read 1.011 and 1.000 (was 1.030, 1.012); 1.7-1.9 x the time per page (far field, 14 px render, frame holes).
+      Focus series, 80 nm circles, blur 58 / 65 /
       72 nm (two Gaussians): page CD 79.14 / 79.15 / 78.95 (moves 0.2 nm; fitted blur 57.7 / 64.9 / 71.9), slope
       1.078 / 1.080 / 1.085, scatter 1.49 / 1.86 / 2.44; Gaussian fit page mean +0.03 / +4.51 / +8.67 (moves 8.6 nm),
       edge area +22.1 / +27.3 / +32.3 (10.1 nm), half area -2.1 / +0.3 / +2.6 (4.7 nm). 100 nm circles: page CD
