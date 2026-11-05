@@ -85,7 +85,20 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       (`backend=gpu`, far field included: fit 190 s for 48,689 holes and 14 rounds, 7-10 s a round once settled,
       against about 3,000 s on two CPU threads; the existing methods for comparison take 279 s on the CPU), then
       the remaining six jobs as `runs/driver.py workers=2 gpu=1 status=driver6 only=... skip=stress_circle100_square_lens`.
-      Lesson applied: recheck the machine's state before relaunching a queue under a rule made for an earlier state
+      Lesson applied: recheck the machine's state before relaunching a queue under a rule made for an earlier state.
+      QUEUE COMPLETE 14:10 (17 of 17, all exit 0; GPU jobs 143-269 s of fit per full page, the 96k-hole 50 nm page
+      238 s); page rebuilt (`outline_fit.html`, before-fix rows beside the new ones). Old -> new (slope / light per
+      10 % / mean error): circle80 gauss2 1.080 / +0.24 / -0.85 -> 1.043 / +0.12 / -0.72; circle80 lens 1.065 /
+      +0.25 / -0.36 -> 1.013 / +0.08 / -0.16; circle100 gauss2 1.054 / +0.21 / -0.48 -> 1.053 / +0.21 / -0.45;
+      circle100 lens 1.033 / +0.13 / -0.24 -> 1.008 / +0.03 / -0.19; square150 1.004 / +0.21 / +0.27 -> 1.008 /
+      +0.20 / +0.20; focus 80 nm slope 1.078 / 1.080 / 1.085 -> 1.066 / 1.043 / 1.069; centers step read 1.021 ->
+      1.012 (circle80), 1.030 -> 1.011 (circle80 lens). Unchanged where the degeneracy dominates (dense 50 / 60 /
+      70x45 pages) and on the two sparser ELLIPSE pages, which land on blur 52 for 65 and p 2.9-3.5 for 2.0 with
+      the CD +5 to +8 nm (90x60 stagger +7.8, 60x100 square +5.4): the outline exponent trades against the blur
+      for elongated holes - unresolved, said on the page; a blur prior from a round-hole page is the remedy to
+      build. Real page 0: outline CD 100.6 (gauss2) / 100.5 (lens), blur 63 / 63, p 2.00 / 2.05, per-hole robust
+      sd 2.6 nm, leftover 7.32 against noise sd 7.7, stack chi2 0.96; the two families agree to 0.1 nm; Gaussian
+      fit 96.1, edge area 122.0, half area 92.6 on the same holes (corr with outline 0.83 / 0.81 / 0.41)
 - [ ] Real page 0 (and several pages): residual vs noise, fitted blur, CD distribution; page-mean CD across the hole
       pages against the Gaussian fit's
 - [ ] HTML page (problem, idea, flow, each step with why, payoff, is it general, checks on own images); review here;
