@@ -128,6 +128,12 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       pages against the Gaussian fit's
 - [ ] HTML page (problem, idea, flow, each step with why, payoff, is it general, checks on own images); review here;
       proposal for the library (new methods beside the existing ones)
+      2026-11-08: the idea section expanded after review (the 1.22/D looked like the Airy formula; arrays vs
+      isolated holes): shapes and their spectra with how they are computed (disk, blurred disk, edge-less blob,
+      square; signed cuts), where 1.22 comes from (2 J1(pi D nu)/(pi D nu), the Airy duality, zero-ring table
+      against the cut-off), isolated vs array (comb under the envelope, harmonic tables for 160/200 nm pitch,
+      neighbour share 7.5 % in the window, the fit's de-neighboured average) and an assumption box: the model adds
+      light (incoherent imaging); partial coherence on the tool is unchecked. make_page_data.py -> page_detail.npz
 
 # Context cleanup (2026-11-04, done)
 
