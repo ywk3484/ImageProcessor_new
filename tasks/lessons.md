@@ -60,6 +60,10 @@ General rules from past corrections, one or two lines each. Incident details are
 - A measurement tool measures: add no statistics the user did not ask for.
 - Look at every plot as the user will, at its default view: truth and measured in separate panels, planted events
   rare enough to read as events, controls next to the graph they change.
+- In a page with many figures, number every figure in page order and refer to it by that number; letters name
+  panels inside one figure only. Typeset mathematics (TeX), never as HTML entities. A process (a sum built term by
+  term, a kernel sliding) is shown as a stepped animation the reader can scrub, not as a row of stills. Say each
+  thing once; a later mention is a pointer to the figure or part that said it.
 
 ## Commands, tools and UI
 - Commands for another machine: written for the shell it really has, one plain command per line, with every option

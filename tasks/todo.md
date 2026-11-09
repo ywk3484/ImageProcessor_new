@@ -150,6 +150,18 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       (sharp disk's column sums = sum of cosines with weights 2J1 at k/W, sign change from wave 5). Found on the
       way: the 320 nm picture field holds 95 % of the blurred hole's light and the 12 px window 93 % (lens tail);
       the 5.3 text now says so
+      2026-11-09 (night): third review: panel letters reused across figures ("picture (c)" was ambiguous), maths
+      unreadable as HTML, 1.5 not followable, repeats, the o / h sentence without a picture, static where moving
+      would help. Done: every figure numbered in page order (figure()/fig() placeholders, number_figures), letters
+      only inside one figure, text refers to "Fig. N(b)"; TeX via a local KaTeX 0.16.11 (katex/, works from
+      file://); 1.5 rewritten in four steps (column sums as a sweep animation, which waves fit the field, the weight
+      integral and its link to F(k/W, 0), the sum built one cosine per frame, why waves 5-8 are subtracted: they
+      take height off the middle and put it at the shoulders); 4.1 has the mask / point image / picture figure, the
+      picture built from 80 point images row by row (1 % from the exact convolution) and the 1-D sliding product;
+      1.3 is an animation over every whole c/um (energy share per frame); repeats cut (part 0's F(0,0) sentence,
+      1.3's and 6's "this is why the average hole", 5.3's window description, 7.3's re-description of the cleaning,
+      the post-lecture "never computes a spectrum", part 8 down to four lines). Animations: play / pause, step,
+      scrub, autoplay in view, off under prefers-reduced-motion. Page 1.7 MB
 
 # Context cleanup (2026-11-04, done)
 
