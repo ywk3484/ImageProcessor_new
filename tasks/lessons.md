@@ -47,6 +47,8 @@ General rules from past corrections, one or two lines each. Incident details are
   and explain every outlier before reporting.
 
 ## Reporting
+- A method page's physics section is written as lecture notes: define each quantity, derive each equation, justify
+  each numerical choice (grid, frequency step, window), walk through each figure. Compact prose there is not an explanation.
 - Never state a cause that was not measured: a model error seen at the truth is the cause only once removing it
   moves the estimate. Never call a partial fix "fixed": say what is left and what it costs.
 - Before reporting, check the deliverable against the literal request (the level, the place, the view asked for).

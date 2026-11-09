@@ -134,6 +134,12 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       against the cut-off), isolated vs array (comb under the envelope, harmonic tables for 160/200 nm pitch,
       neighbour share 7.5 % in the window, the fit's de-neighboured average) and an assumption box: the model adds
       light (incoherent imaging); partial coherence on the tool is unchecked. make_page_data.py -> page_detail.npz
+      2026-11-09: rewritten as lecture notes after review (compact prose rejected): 8 numbered parts, waves ->
+      slit -> disk (chord integral to 2 J1) -> Airy duality -> convolution theorem and the transfer functions ->
+      how the pictures are made and why the 0.24 c/um padding step carries no information (un-padded samples
+      shown on the padded curve; a hard-cut 12 px window adds +-2 thousandths of ripple, as large as the mark, so
+      the fit compares pixels, not spectra) -> gallery -> array (comb derivation, line tables, de-neighbouring) ->
+      how light adds (1-D coherent vs incoherent example, 5.7 % difference) -> summary
 
 # Context cleanup (2026-11-04, done)
 
