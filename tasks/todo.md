@@ -140,6 +140,16 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       shown on the padded curve; a hard-cut 12 px window adds +-2 thousandths of ripple, as large as the mark, so
       the fit compares pixels, not spectra) -> gallery -> array (comb derivation, line tables, de-neighbouring) ->
       how light adds (1-D coherent vs incoherent example, 5.7 % difference) -> summary
+      2026-11-09 (later): review: still not understandable; "cycles per um" had no illustration and the text never
+      said which image F belonged to (whole page? Voronoi cell?). Added part 0 "Which picture, exactly" from a real
+      fit on the smoke page (make_which_picture.py: page piece with the window outlined, the 13 px window as pixels /
+      model of everything else / cleaned, raw vs cleaned average hole, fitted template, leftover at the noise:
+      2.4 thousandths measured vs 2.2 expected) and rewrote part 1 (make_primer_data.py): wave strips on a 1 um
+      scale beside the hole, period table, 2-D waves with the frequency plane, the hole rebuilt from waves up to
+      3/6/9/12.5 c/um (energy 38/84/98/99.98 %), F(0,0) and the sign stated on picture (c), a 1-D worked case
+      (sharp disk's column sums = sum of cosines with weights 2J1 at k/W, sign change from wave 5). Found on the
+      way: the 320 nm picture field holds 95 % of the blurred hole's light and the 12 px window 93 % (lens tail);
+      the 5.3 text now says so
 
 # Context cleanup (2026-11-04, done)
 
