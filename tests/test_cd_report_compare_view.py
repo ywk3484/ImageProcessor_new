@@ -67,7 +67,7 @@ def test_comparison_plot_writes_png_without_pyplot(tmp_path):
     from PIL import Image
 
     path = tmp_path / "figures" / "comparison.png"
-    rows = [_row(), _row(image_id="b.png", method_candidate="pixel_half_area", mean_candidate=4.5),
+    rows = [_row(), _row(image_id="b.png", method_candidate="local_half_area_min_avg", method_reference="half_area_min_avg", mean_candidate=4.5),
             _row(axis="x", mean_candidate=4.1)]
     assert write_comparison_plot(path, rows, "px") is True
     with Image.open(path) as image:

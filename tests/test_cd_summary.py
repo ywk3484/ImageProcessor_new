@@ -5,13 +5,15 @@ import pytest
 
 from scripts.benchmark_cd import lattice
 from subpx import measure_cds, plot_cd_map, save_cd_results, save_cd_viewer
-from subpx.cd import PIXEL_METHODS
+from subpx.cd import LOCAL_METHODS
 from subpx.types import CDResult, CDSummary
+
+AREA_METHODS = tuple(name for name in LOCAL_METHODS if name != "local_projection")
 
 
 @pytest.mark.parametrize("backend", ["cpu", "gpu"])
-@pytest.mark.parametrize("methods", [PIXEL_METHODS, ("local_half_area",), ("gaussian",),
-                                     ("gaussian", "pixel_half_area")])
+@pytest.mark.parametrize("methods", [AREA_METHODS, ("local_half_area",), ("gaussian",),
+                                     ("gaussian", "local_half_area")])
 def test_summary_preserves_measurements_without_full_result(backend, methods, monkeypatch):
     if backend == "gpu":
         cp = pytest.importorskip("cupy")
@@ -43,11 +45,11 @@ def test_summary_preserves_measurements_without_full_result(backend, methods, mo
 
 
 def test_empty_summary_and_export_contract(tmp_path):
-    summary = measure_cds(np.zeros((20, 20), np.uint8), methods=PIXEL_METHODS,
+    summary = measure_cds(np.zeros((20, 20), np.uint8), methods=AREA_METHODS,
                            summary_only=True, backend="cpu")
     assert summary.seeds_xy.shape == (0, 2)
     assert summary.meta["metrics_only"] and summary.meta["summary_only"]
-    for name in PIXEL_METHODS:
+    for name in AREA_METHODS:
         assert summary.measurements[name].valid.size == 0
     for writer in (save_cd_results, save_cd_viewer):
         with pytest.raises(ValueError, match="summary_only=False|metrics_only=False"):
@@ -71,7 +73,7 @@ def test_summary_cpu_measurement_with_gpu_cells():
     if cp.cuda.runtime.getDeviceCount() == 0:
         pytest.skip("CUDA unavailable")
     image, _ = lattice((50, 70), 10, 4.4, 20)
-    result = measure_cds(image, methods=PIXEL_METHODS, summary_only=True,
+    result = measure_cds(image, methods=AREA_METHODS, summary_only=True,
                          area_max=200, backend="cpu", cell_backend="gpu")
     assert isinstance(result.seeds_xy, np.ndarray)
-    assert result.measurements["pixel_half_area"].valid.any()
+    assert result.measurements["local_half_area"].valid.any()

@@ -26,7 +26,7 @@ the default of two overlaps CPU and GPU work with bounded local scratch memory.
 
 ## Optional experiments with different measurement definitions
 
-The `local_*` and `pixel_*` methods below are experimental estimators. They
+The `local_*` methods below are experimental estimators. They
 are not equivalent accelerated implementations of the original measurements.
 The speed command preserves the interpolated local calculation. Select the
 original method names explicitly when Gaussian deblending is required.

@@ -16,7 +16,7 @@ _AXES = (("cd", "CD"), ("x", "x width"), ("y", "y width"))
 _FAMILIES = (("half_area", "Half area"),
              ("half_area_min_avg", "Minimum level, averaged peak"),
              ("tail_area", "Tail area"))
-_COLORS = {"local_": "#2563a6", "pixel_": "#d96616"}
+_COLORS = {"local_": "#2563a6"}
 
 
 def _escape(value):
@@ -157,7 +157,7 @@ def comparison_html(rows, aggregates, unit, *, max_difference=None, plot_file=No
         parts.append(f"<figure><img class='cd-compare-plot' src='{_escape(plot_file)}' "
                      "alt='Candidate versus reference paired image means, with identity lines'>"
                      "<figcaption>One point per image and candidate method, using that pair's shared valid holes. "
-                     "The dashed line marks equal values. Blue: local 4x; orange: native pixel.</figcaption></figure>")
+                     "The dashed line marks equal values. Blue: local 4x.</figcaption></figure>")
     by_image = defaultdict(list)
     for row in rows:
         by_image[str(row.get("image_id", ""))].append(row)
@@ -211,8 +211,8 @@ def write_comparison_plot(output_path, rows, unit) -> bool:
                 group = [r for r in selected if r["method_candidate"].startswith(prefix)]
                 if group:
                     panel.scatter([r["mean_reference"] for r in group], [r["mean_candidate"] for r in group],
-                                  color=color, marker="o" if prefix == "local_" else "x", s=28, alpha=0.8,
-                                  label="Local 4x" if prefix == "local_" else "Native pixel", zorder=2)
+                                  color=color, marker="o", s=28, alpha=0.8,
+                                  label="Local 4x", zorder=2)
             panel.set_xlim(low, high)
             panel.set_ylim(low, high)
             panel.set_aspect("equal", adjustable="box")

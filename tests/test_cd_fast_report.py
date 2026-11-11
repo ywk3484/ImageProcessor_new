@@ -16,8 +16,7 @@ from subpx import load_cd_results, measure_cds
 
 ORIGINAL = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area",
             "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
-FAST = ("local_projection", "local_half_area", "local_half_area_min_avg", "local_tail_area",
-        "pixel_half_area", "pixel_half_area_min_avg", "pixel_tail_area")
+FAST = ("local_projection", "local_half_area", "local_half_area_min_avg", "local_tail_area")
 METHODS = ORIGINAL + FAST
 
 
@@ -124,7 +123,7 @@ def test_all_methods_recursive_and_empty_images(tmp_path, backend):
     Image.fromarray(np.zeros((60, 80), np.uint8)).save(folder / "empty.png")
     output = tmp_path / "report"
     assert fast_report.main([str(folder), "--output", str(output), "--backend", backend,
-                             "--recursive", "--include-pixel"]) == 0
+                             "--recursive"]) == 0
     manifest = json.loads((output / "run.json").read_text(encoding="utf-8"))
     assert manifest["successful_images"] == 2
     assert {r["file"] for r in manifest["images"]} == {"empty.png", "nested/holes.PNG"}
@@ -160,4 +159,13 @@ def test_invalid_options_do_not_create_output(tmp_path, option, value):
     output = tmp_path / "report"
     with pytest.raises((SystemExit, ValueError)):
         fast_report.main([str(folder), "--output", str(output), option, value])
+    assert not output.exists()
+
+
+def test_removed_pixel_option_is_rejected(tmp_path, capsys):
+    output = tmp_path / "report"
+    with pytest.raises(SystemExit) as error:
+        fast_report.main([str(tmp_path), "--output", str(output), "--include-pixel"])
+    assert error.value.code == 2
+    assert "unrecognized arguments: --include-pixel" in capsys.readouterr().err
     assert not output.exists()

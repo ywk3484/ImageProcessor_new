@@ -393,7 +393,7 @@ def test_batch_intensity_keeps_its_model_tail_definition():
     from subpx import measure_cds
 
     image = lattice((60, 80), 10, 4, 25)[0]
-    for method in ("local_tail_area", "pixel_tail_area"):
-        result = measure_cds(image, methods=(method,), summary_only=True, backend="cpu", area_max=200)
-        assert cell_intensity(result) is not None  # the report labels this raw-cell intensity explicitly
-        assert np.isnan(page_values(result, image, (method,))["cell_intensity"])
+    method = "local_tail_area"
+    result = measure_cds(image, methods=(method,), summary_only=True, backend="cpu", area_max=200)
+    assert cell_intensity(result) is not None  # the report labels this raw-cell intensity explicitly
+    assert np.isnan(page_values(result, image, (method,))["cell_intensity"])

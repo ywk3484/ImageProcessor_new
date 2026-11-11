@@ -16,9 +16,8 @@ import numpy as np
 
 
 DEFAULT_PAIRS = tuple(
-    (reference, prefix + reference)
+    (reference, "local_" + reference)
     for reference in ("half_area", "half_area_min_avg", "tail_area")
-    for prefix in ("local_", "pixel_")
 )
 AXES = (("cd", "cd_equivalent_px"), ("x", "cd_x_px"), ("y", "cd_y_px"))
 
@@ -148,13 +147,11 @@ def compare_image(reference, candidate, *, image_id, pairs=DEFAULT_PAIRS, max_di
     for old, new in pairs:
         if f"{old}_valid" not in a or f"{new}_valid" not in b:
             continue
-        different_window = old == "tail_area" and new in ("local_tail_area", "pixel_tail_area")
+        different_window = old == "tail_area" and new == "local_tail_area"
         notes = []
-        if old in ("half_area", "half_area_min_avg", "tail_area") and new.startswith(("local_", "pixel_")):
+        if old in ("half_area", "half_area_min_avg", "tail_area") and new.startswith("local_"):
             notes.append("model-shared wide window vs raw Voronoi cell" if different_window
                          else "deblended cell vs raw Voronoi cell")
-        if new.startswith("pixel_") and not old.startswith("pixel_"):
-            notes.append("native pixels vs 4x cubic grid")
         for axis, metric in AXES:
             if f"{old}_{metric}" not in a or f"{new}_{metric}" not in b:
                 continue

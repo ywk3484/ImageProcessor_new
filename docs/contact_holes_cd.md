@@ -48,9 +48,8 @@ Voronoi cells without Gaussian deblending. The minimum-level variant uses an
 averaged peak; local tail area uses the cell-edge median and the low threshold
 inside that cell. Neighbour overlap is uncorrected, and border-touching regions
 are invalid. These are different estimators, not equivalent accelerated versions
-of the original methods. The `local_*` area methods retain 4x cubic interpolation;
-the `pixel_*` variants omit it and count native pixels. Fixed-territory
-gain/offset invariance does not imply end-to-end
+of the original methods. The `local_*` area methods retain 4x cubic interpolation.
+Fixed-territory gain/offset invariance does not imply end-to-end
 invariance when detection changes. `local_projection` is also available but can
 switch edges on concave shapes. See the remote guide's comparison command for
 timing, coverage, stability and per-hole outputs.
@@ -89,24 +88,20 @@ shown for CD, x width and y width, within each image and between images. Cell
 intensity again comes from the original `tail_area` region, and the band-profile
 spot peak is the fitted Gaussian amplitude.
 
-All 17 methods run by default. The ten original methods retain their names:
+All 14 methods run by default. The ten original methods retain their names:
 `gaussian`, `projection`, `half_area`, `half_area_min`, `half_area_min_avg`,
 `tail_area`, `tail_area_norm`, `edge_area`, `foot_area` and `foot_area_ratio`.
-The seven additional methods are `local_projection`, `local_half_area`,
-`local_half_area_min_avg`, `local_tail_area`, `pixel_half_area`,
-`pixel_half_area_min_avg` and `pixel_tail_area`. Every method appears in the
-same statistics, map selector, histograms and hole-value panel. `--include-pixel`
-is still accepted for older commands, but is unnecessary because pixel methods
-are always included.
+The four additional methods are `local_projection`, `local_half_area`,
+`local_half_area_min_avg` and `local_tail_area`. Every method appears in the
+same statistics, map selector, histograms and hole-value panel.
 
 The original and experimental methods share the original pipeline's final hole list
 and cell partition, keeping hole IDs consistent throughout the viewer. The
-`local_*` and `pixel_*` methods measure raw cells; the original methods use
+`local_*` methods measure raw cells; the original methods use
 the model-corrected inputs. They remain included to preserve the requested
 all-method report. Local acceleration preserves the interpolated local
 calculation; it does not make that estimator equivalent to the deblended
-methods. A standalone local-only
-or pixel-only batch can detect a different hole list because
+methods. A standalone local-only batch can detect a different hole list because
 it skips the model's seed revision. The full report also computes measured
 outlines and cell inputs, so its total time includes both the original methods
 and display-data generation.
@@ -120,7 +115,7 @@ Outputs:
 - `index.html`, `images/`, `data/`: the offline report, source-image previews,
   measured outlines and hole-detail data.
 - `summary.csv`, `between_images.csv`: the original style of image statistics,
-  with all 17 methods.
+  with all 14 methods.
 - `arrays/*.npz`: per-hole numerical arrays for all methods, in pixels with
   calibration metadata; these are not full `CDResult` exports.
 - `timings.csv`: per-image loading, measurement and export times.
@@ -156,8 +151,6 @@ Use `--workers-per-gpu 1` for a single-worker timing or to limit concurrent
 memory use when selecting the original deblended methods with
 `--methods half_area half_area_min_avg tail_area`. Other report methods remain
 available through `--methods`.
-The `pixel_*` variants require explicit selection and use native-pixel counts;
-they are not part of the default interpolated path.
 
 The batch uses `summary_only=True`: `measure_cds` returns a lightweight
 `CDSummary` containing seeds, per-method numerical arrays, calibration and

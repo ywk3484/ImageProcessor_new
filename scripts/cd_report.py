@@ -111,12 +111,6 @@ DESCRIPTIONS.update({
                                "pixels as the peak.",
     "local_tail_area": "Area connected to the peak above the low local threshold in the raw Voronoi cell, "
                        "enlarged 4x; median edge level and averaged peak; neighbour light remains in the cell.",
-    "pixel_half_area": "Raw-cell half-height area counted on original pixels, using the median edge level and "
-                       "maximum peak; no enlargement or neighbour subtraction.",
-    "pixel_half_area_min_avg": "Raw-cell half-height area counted on original pixels, using the minimum edge "
-                               "level and averaged brightest pixels; no enlargement or neighbour subtraction.",
-    "pixel_tail_area": "Raw-cell area above the low local threshold counted on original pixels, using the "
-                       "median edge level and averaged peak; no enlargement or neighbour subtraction.",
 })
 # The CD and the x / y widths: statistics key suffix, metric, label.
 AXES = (("", "cd_equivalent_px", "CD"), ("_x", "cd_x_px", "x"), ("_y", "cd_y_px", "y"))
@@ -156,14 +150,14 @@ def layer_values(result) -> dict[str, np.ndarray]:
 
 def intensity_source(methods) -> str | None:
     """The tail-area method supplying cell intensity, preferring the modelled one."""
-    return next((name for name in ("tail_area", "local_tail_area", "pixel_tail_area") if name in methods), None)
+    return next((name for name in ("tail_area", "local_tail_area") if name in methods), None)
 
 
 def cell_intensity(result) -> np.ndarray | None:
     """Per-hole mean signal in the selected tail-area region, NaN where invalid.
 
-    Prefers tail_area, then local_tail_area, then pixel_tail_area; the latter
-    two measure raw cells, without fitted background or neighbour subtraction.
+    Prefers tail_area, then local_tail_area; the latter measures raw cells,
+    without fitted background or neighbour subtraction.
     """
     measured = result.measurements.get(intensity_source(result.measurements))
     return None if measured is None else np.where(measured.valid, measured.metrics["mean_signal"], np.nan)
@@ -352,7 +346,7 @@ def detail_data(result) -> dict:
         cells = np.where(result.masks, result.rois, 0.0)
         out["prof_x"], out["prof_y"] = _b64(cells.sum(axis=1), "<f4"), _b64(cells.sum(axis=2), "<f4")
     raw = next((m.inputs for name, m in result.measurements.items()
-                if name.startswith(("local_", "pixel_")) and "cells" in m.inputs), None)
+                if name.startswith("local_") and "cells" in m.inputs), None)
     if raw is not None:
         cells, inside, origins = raw["cells"], raw["inside"], raw["origins"]
         local = {"h": int(cells.shape[1]), "w": int(cells.shape[2]),
@@ -380,11 +374,9 @@ def detail_data(result) -> dict:
             ("edge_area", "zero: no background step", "not used (shown for comparison: " + averaged + ")"),
             ("foot_area", "zero: no background step", "not used (shown for comparison: " + averaged + ")"),
             ("foot_area_ratio", "zero: no background step", "not used (shown for comparison: " + averaged + ")")]
-    for prefix in ("local", "pixel"):
-        peak = averaged if prefix == "local" else f"mean of the brightest {peak_pixels:g} original pixels"
-        specs.extend(((f"{prefix}_half_area", f"median {edge}", "highest point"),
-                      (f"{prefix}_half_area_min_avg", f"minimum {edge}", peak),
-                      (f"{prefix}_tail_area", f"median {edge}", peak)))
+    specs.extend((("local_half_area", f"median {edge}", "highest point"),
+                  ("local_half_area_min_avg", f"minimum {edge}", averaged),
+                  ("local_tail_area", f"median {edge}", averaged)))
     for name, background, peak in specs:
         if name not in result.measurements:
             continue
@@ -399,8 +391,8 @@ def detail_data(result) -> dict:
                              "level_fraction": float(result.meta.get(
                                  "tail_area_level" if "tail_area" in name else "half_area_level",
                                  0.2 if "tail_area" in name else 0.5))}
-        if name.startswith(("local_", "pixel_")):
-            out["half"][name].update(input="local", factor=1 if name.startswith("pixel_") else 4)
+        if name.startswith("local_"):
+            out["half"][name].update(input="local")
         if name == "foot_area":
             out["half"][name]["threshold_rule"] = ("brightness at the foot of the edge, where the falling slope bends "
                                                    "into the flat surroundings")
@@ -469,8 +461,7 @@ COLORS = {"gaussian": "#5bbf2a", "projection": "#7a7a7a", "projection_x": "#2b8c
           "tail_area_norm": "#2e86c1", "edge_area": "#c0392b",
           "foot_area": "#16a085", "foot_area_ratio": "#7d3c98"}
 COLORS.update({"local_projection": "#64748b", "local_half_area": "#b83280",
-               "local_half_area_min_avg": "#b7791f", "local_tail_area": "#0d9488",
-               "pixel_half_area": "#a855f7", "pixel_half_area_min_avg": "#ea580c", "pixel_tail_area": "#0284c7"})
+               "local_half_area_min_avg": "#b7791f", "local_tail_area": "#0d9488"})
 # x / y width layers: the method's colour, lighter for x and darker for y (projection keeps its own two).
 COLORS["cell_intensity"] = "#b8860b"
 for _name, _color in list(COLORS.items()):
@@ -1052,7 +1043,7 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
     const poly=(g,s)=>{if(old)old(g,s);if(!fin(hx))return;g.strokeStyle=COLORS[base];g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
     const wideNote=old?"<p class='meta'>Shown: the wider window this method measures on, holding this hole's share of the light (each pixel's light shared among the holes in proportion to their fitted models). Dashed: the hole's ordinary cell, which the other methods are limited to; the region may reach past it.</p>":"";
     const inputNote=F.input==="local"?"The raw cell; fitted background and neighbours have not been removed.":"The cell with background and neighbours removed.";
-    const gridNote=F.factor===1?"The region is counted on the original pixels, without enlargement":"The cell is enlarged 4x by smooth (cubic spline) interpolation";
+    const gridNote="The cell is enlarged 4x by smooth (cubic spline) interpolation";
     out+=`<h3>${base}</h3><p class="explain">${inputNote} Its local level b is the ${F.background}; its peak is the ${F.peak_rule}. ${gridNote}; the region is the connected area around the peak brighter than the threshold ${F.threshold_rule?"= the "+F.threshold_rule+"; the peak is not used":"b + "+F.level_fraction+" × (peak − b)"}. CD = diameter of a circle with the region's area. If a pulse brightens the feature and its surroundings by the same factor, b, the peak and the threshold scale together and the area stays the same.</p>
       ${wideNote}<div class="cells"><figure><canvas id="dc-a"></canvas>${old?"wider window":"cell"} and region outline</figure><figure><canvas id="dc-b"></canvas>original pixels above the threshold (red)</figure></div>
       <table><tr><td>local level b</td><td>${fin(b)?b.toPrecision(4):"–"}</td></tr><tr><td>peak height above b (${F.peak_rule})</td><td>${fin(pk)?pk.toPrecision(4):"–"}</td></tr>
@@ -1060,7 +1051,7 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
       <tr><td>mean light above b in the region${base==="tail_area"?" (cell intensity)":""}</td><td>${fin(F.mean[i])?F.mean[i].toPrecision(4):"–"}</td></tr>
       <tr><td>region area</td><td>${fin(cdv)?(Math.PI*cdv*cdv/4).toFixed(2)+" px²":"–"}</td></tr>
       <tr><td>CD = 2 √(area / π)</td><td>${fin(cdv)?cdv.toFixed(3)+" px = "+(cdv*cur.scale).toFixed(2)+" "+cur.unit:"–"}</td></tr></table>
-      <p class="meta">The outline is drawn from 32 directions around the region's centre, so it is approximate for very irregular shapes; the area itself is counted pixel by pixel on ${F.factor===1?"the original pixels":"the enlarged cell"}.</p>`;
+      <p class="meta">The outline is drawn from 32 directions around the region's centre, so it is approximate for very irregular shapes; the area itself is counted pixel by pixel on the enlarged cell.</p>`;
     $("detail").innerHTML=out;drawCell("dc-a",G,vals,poly);drawCell("dc-b",G,above,poly,true);return;}
   const vals=cellValues(D,D.clean,i);
   out+=`<h3>${k}</h3><p class="explain">The cell this method measured (background and neighbours removed; dark pixels are outside the cell), with its outline at the CD.</p><div class="cells"><figure><canvas id="dc-a"></canvas>cell and outline</figure></div>`;

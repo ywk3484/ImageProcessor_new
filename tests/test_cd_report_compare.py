@@ -118,15 +118,15 @@ def test_result_objects_metadata_and_tail_definition_are_preserved():
 
     a = result("tail_area", 3, {"deblend_converged": False, "deblend_iterations_used": 30,
                                  "seconds": {"total": 2.0}})
-    b = result("pixel_tail_area", 3.2, {"seconds": {"total": 0.1}})
+    b = result("local_tail_area", 3.2, {"seconds": {"total": 0.1}})
     rows = compare_image(a, b, image_id="real.png", reference_meta={"measure_s": 2.1})
     assert len(rows) == 3
     for row in rows:
         assert row["different_window"] is True
-        assert "wide window" in row["definition_note"] and "native pixels" in row["definition_note"]
+        assert "wide window" in row["definition_note"]
         assert row["reference_converged"] is False and row["reference_iterations"] == 30
         assert row["reference_measure_s"] == 2.1 and row["candidate_measure_s"] == 0.1
-    assert len(DEFAULT_PAIRS) == 6
+    assert len(DEFAULT_PAIRS) == 3
     json.dumps(rows, allow_nan=False)
 
 
@@ -137,7 +137,7 @@ def test_missing_methods_and_empty_inputs_do_not_fabricate_pairs():
     assert row["n"] == 0 and row["bias"] is None
     assert row["paired_coverage_reference"] == 0
     assert row["paired_coverage_candidate"] is None
-    assert compare_image(a, b, image_id="none", pairs=[("tail_area", "pixel_tail_area")]) == []
+    assert compare_image(a, b, image_id="none", pairs=[("tail_area", "local_tail_area")]) == []
     with pytest.raises(ValueError, match="align"):
         _cd_row(a, _numbers([[0, 0]], [1, 2], method="local_half_area"))
     with pytest.raises(ValueError, match="unique"):

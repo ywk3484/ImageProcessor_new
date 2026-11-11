@@ -1,8 +1,8 @@
 """Fused numerical-only measurements of raw Voronoi cells.
 
-Factor 4 retains the cubic grid of ``_cpu.local_cd``; factor 1 counts native
-pixels without interpolation. Local levels, connected regions and validity
-rules match the corresponding reference. One block holds a cell's small
+The 4x cubic grid retains the interpolation of ``_cpu.local_cd``.
+Local levels, connected regions and validity rules match the corresponding
+reference. One block holds a cell's small
 working arrays in shared memory. Enlarged cells use bounded device
 scratch storage; no enlarged stack or mask crosses the host.
 """
@@ -96,18 +96,13 @@ extern "C" __global__ void local_areas(
     const int n_top, const int methods, const double half_level, const double tail_level, double* enlarged)
 {
     const int tid = threadIdx.x, bd = blockDim.x, cell = blockIdx.x;
-    const int F = LOCAL_FACTOR, H = F * h, W = F * w, raw_n = h * w, big_n = H * W;
+    const int F = 4, H = F * h, W = F * w, raw_n = h * w, big_n = H * W;
     const int WW = (W + 31) >> 5, words_n = H * WW;
     extern __shared__ double smem[];
     double* raw = smem;
     double* intermediate = raw + raw_n;
-#if LOCAL_FACTOR > 1
     double* big = enlarged + (long long)cell * big_n;
     double* sorted = intermediate + H * w;
-#else
-    double* big = intermediate + H * w;
-    double* sorted = big + big_n;
-#endif
     double* picked = sorted + sort_length;
     const int top_capacity = n_top <= 8 ? n_top : (1 << (32 - __clz((unsigned int)max(32, n_top) - 1)));
     unsigned int* M = (unsigned int*)(picked + top_capacity);
@@ -121,7 +116,6 @@ extern "C" __global__ void local_areas(
     __shared__ double partial[4][NV], total[NV];
     __shared__ double best[4];
     __shared__ long long best_index[4];
-    __shared__ long long picked_index[8];
     const double INF = __longlong_as_double(0x7FF0000000000000ll);
     const double NAN_ = __longlong_as_double(0x7FF8000000000000ll);
     const long long ox = metadata[5 * cell], oy = metadata[5 * cell + 1];
@@ -175,19 +169,12 @@ extern "C" __global__ void local_areas(
         if (level_kind == 0 ? !(methods & 5) : !(methods & 2)) continue;
         const double baseline = local_levels[level_kind];
         // Complete zero-extended cubic spline on the same 4x sample grid.
-#if LOCAL_FACTOR > 1
         prepare_cubic_rows(raw, mask, baseline, h, w, intermediate, big);
-#endif
         double bv = -INF;
         long long bi = 0x7FFFFFFFFFFFFFFFll;
         for (int i = tid; i < big_n; i += bd) {
             const int Y = i / W, X = i % W;
-            double sum = 0;
-#if LOCAL_FACTOR > 1
-            sum = cubic_sample4(intermediate + Y * w, w, 1, X);
-#else
-            sum = raw[i] - baseline;
-#endif
+            const double sum = cubic_sample4(intermediate + Y * w, w, 1, X);
             const double value = mask[(Y / F) * w + X / F] ? sum : -INF;
             big[i] = value;
             if (value > bv || (value == bv && i < bi)) { bv = value; bi = i; }
@@ -209,37 +196,6 @@ extern "C" __global__ void local_areas(
         }
         __syncthreads();
         if (level_kind == 1 || (methods & 4)) {
-#if LOCAL_FACTOR == 1
-            if (n_top <= 8) {
-                // Native pixels normally average four samples. Four block
-                // maxima avoid eight radix passes and their shared atomics.
-                for (int rank = 0; rank < n_top; ++rank) {
-                    double value = -INF;
-                    long long index = 0x7FFFFFFFFFFFFFFFll;
-                    for (int i = tid; i < big_n; i += bd)
-                        if (big[i] > value || (big[i] == value && i < index)) { value = big[i]; index = i; }
-                    for (int offset = 16; offset > 0; offset >>= 1) {
-                        const double other = __shfl_down_sync(0xffffffffu, value, offset);
-                        const long long at = __shfl_down_sync(0xffffffffu, index, offset);
-                        if (other > value || (other == value && at < index)) { value = other; index = at; }
-                    }
-                    if (lane == 0) { best[warp] = value; best_index[warp] = index; }
-                    __syncthreads();
-                    if (tid == 0) {
-                        for (int j = 1; j < (bd >> 5); ++j)
-                            if (best[j] > best[0] || (best[j] == best[0] && best_index[j] < best_index[0])) {
-                                best[0] = best[j]; best_index[0] = best_index[j];
-                            }
-                        picked[rank] = best[0];
-                        picked_index[rank] = isfinite(best[0]) ? best_index[0] : -1;
-                        if (picked_index[rank] >= 0) big[picked_index[rank]] = -INF;
-                    }
-                    __syncthreads();
-                }
-                if (tid < n_top && picked_index[tid] >= 0) big[picked_index[tid]] = picked[tid];
-                __syncthreads();
-            } else
-#endif
             select_top(Plain{big}, big_n, n_top, picked);
             __syncthreads();  // select_top finishes with writes from every warp
             // Preserve the same ascending FP64 sum after parallel sorting.
@@ -316,31 +272,29 @@ extern "C" __global__ void local_areas(
 """
 
 
-def _shared_bytes(h, w, n_top, factor=4):
+def _shared_bytes(h, w, n_top):
+    factor = 4
     sort_length = 1 << max(0, (h * w - 1).bit_length())
     words = factor * h * ((factor * w + 31) // 32)
     peak_capacity = n_top if n_top <= 8 else 1 << (max(32, n_top) - 1).bit_length()
-    enlarged = factor * factor * h * w if factor == 1 else 0
-    return 8 * (h * w + factor * h * w + enlarged + sort_length + peak_capacity) + 16 * words + h * w
+    return 8 * (h * w + factor * h * w + sort_length + peak_capacity) + 16 * words + h * w
 
 
 def measure_local_areas(signal, labels, origins, sizes, report, *, methods, n_angles=16,
-                        half_area_level=0.5, half_area_peak_pixels=4.0, tail_area_level=0.2, factor=4):
+                        half_area_level=0.5, half_area_peak_pixels=4.0, tail_area_level=0.2):
     """Numerical-only local area results, or None when any cell is too large.
 
     Origins/sizes contain only reported cells; ``report`` maps them to labels.
     Returning None leaves oversized inputs to the existing bounded fallback.
     All result arrays are NumPy arrays. Reduction order can differ by rounding.
-    ``factor=1`` is a distinct pixel-count estimator; ``factor=4`` keeps the
-    established cubic grid. Method names here are the canonical local names.
+    Measurements retain the established 4x cubic grid and local method names.
     """
     from .._cpu.invariant_cd import _empty
 
     require_cupy()
     if any(name not in AREA_METHODS for name in methods):
         raise ValueError("the fused local path supports area methods only")
-    if factor not in (1, 4):
-        raise ValueError("factor must be 1 or 4")
+    factor = 4
     count = len(report)
     buckets = (np.asarray(sizes, dtype=np.int64) + 3) // 4 * 4
     width_key = int(buckets[:, 1].max()) + 1 if count else 1
@@ -348,7 +302,7 @@ def measure_local_areas(signal, labels, origins, sizes, report, *, methods, n_an
     shapes = np.column_stack((keys // width_key, keys % width_key))
     top = max(1, int(round(half_area_peak_pixels * factor * factor)))
     capacity = min(optin_shared_bytes(), 96 * 1024)
-    if any(_shared_bytes(int(h), int(w), min(top, int(h * w * factor * factor)), factor) + 3072 > capacity
+    if any(_shared_bytes(int(h), int(w), min(top, int(h * w * factor * factor))) + 3072 > capacity
            for h, w in shapes):
         return None
     found = {name: _empty(name, count, n_angles, ("local_level", "threshold", "mean_signal"), metrics_only=True)
@@ -358,29 +312,26 @@ def measure_local_areas(signal, labels, origins, sizes, report, *, methods, n_an
     image_d = cp.asarray(signal, dtype=cp.float64)
     labels_d = cp.asarray(labels, dtype=cp.int32)
     bits = sum(1 << AREA_METHODS.index(name) for name in methods)
-    execute = kernel(_SOURCE, "local_areas", exact=True, defines=(f"LOCAL_FACTOR={factor}",))
+    execute = kernel(_SOURCE, "local_areas", exact=True)
     indices = np.argsort(groups, kind="stable")
     boundaries = np.concatenate(([0], np.bincount(groups).cumsum()))
     metadata = cp.asarray(np.column_stack((origins, sizes, report))[indices], dtype=cp.int64)
     out = cp.empty((count, 3, 10), dtype=cp.float64)
-    if factor > 1:
-        # Reuse one allocation across every bucket, including shape changes.
-        # Allocating a replacement before releasing the previous bucket would
-        # transiently double the scratch budget.
-        work_cells = factor * factor * shapes[:, 0] * shapes[:, 1]
-        work_counts = np.minimum(np.diff(boundaries), np.maximum(1, _WORK_BYTES // (8 * work_cells)))
-        scratch = cp.empty(int(np.max(work_counts * work_cells)), dtype=cp.float64)
-    else:
-        scratch = image_d  # unused by the native-pixel kernel
+    # Reuse one allocation across every bucket, including shape changes.
+    # Allocating a replacement before releasing the previous bucket would
+    # transiently double the scratch budget.
+    work_cells = factor * factor * shapes[:, 0] * shapes[:, 1]
+    work_counts = np.minimum(np.diff(boundaries), np.maximum(1, _WORK_BYTES // (8 * work_cells)))
+    scratch = cp.empty(int(np.max(work_counts * work_cells)), dtype=cp.float64)
 
     for group, (hb, wb) in enumerate(shapes):
         h, w = int(hb), int(wb)
         start, stop = boundaries[group:group + 2]
         n_top = min(top, h * w * factor * factor)
-        shared = _shared_bytes(h, w, n_top, factor)
+        shared = _shared_bytes(h, w, n_top)
         if shared + 3072 > 48 * 1024:
             execute.max_dynamic_shared_size_bytes = shared
-        chunk = max(1, _WORK_BYTES // (factor * factor * h * w * 8)) if factor > 1 else int(stop - start)
+        chunk = max(1, _WORK_BYTES // (factor * factor * h * w * 8))
         for begin in range(int(start), int(stop), chunk):
             end = min(begin + chunk, int(stop))
             execute((end - begin,), (128,), (

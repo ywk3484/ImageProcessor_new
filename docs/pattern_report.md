@@ -46,11 +46,11 @@ line gives its measured center or explicitly labels its seed when the fit is inv
 
 ![Zoomed report showing measured center crosshairs and the coordinate readout](images/pattern_pitch_zoom.png)
 
-The default includes all 17 methods in `cd_fast_report.py`: ten original methods,
-four raw-cell methods, and three native-pixel methods. To run a smaller set:
+The default includes all 14 methods in `cd_fast_report.py`: ten original methods
+and four interpolated raw-cell methods. To run a smaller set:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/pitch_report.py image.png --methods gaussian projection half_area local_projection pixel_half_area --layout staggered --reference 384 128 --average-rows 5 --average-columns 7
+.\.venv\Scripts\python.exe scripts/pitch_report.py image.png --methods gaussian projection half_area local_projection local_half_area --layout staggered --reference 384 128 --average-rows 5 --average-columns 7
 ```
 
 All other `measure_cds` methods are selectable too. The optional `disk` and
@@ -73,9 +73,9 @@ options such as `--methods`, `--backend`, and `--pixel-size` apply to image inpu
 
 Gaussian methods provide fit centers. Projection methods use the midpoint
 between the two steepest edges of each x/y projection. Area methods use the
-centroid of their thresholded region (interpolated or native pixels, according
-to the method). Radial methods use their existing measurement origin; they do
-not acquire a separate contour-centroid refinement in this pipeline. Centers
+centroid of their thresholded region on the 4x cubic grid. Radial methods use
+their existing measurement origin; they do not acquire a separate
+contour-centroid refinement in this pipeline. Centers
 are read directly from `CDMethodResult.centers_xy`. Invalid CD measurements
 and nonfinite centers are excluded, with no replacement by segmentation seeds.
 
@@ -241,8 +241,8 @@ checkout (older GPU isophote/radial/tiled detection tests and an auto-backend
 expectation). The skipped test exercises missing CuPy and skips because CUDA
 is available; no new GPU/report tests were skipped.
 
-The included 768 × 256 staggered sample was also processed with all 17 methods,
-five rows/seven columns averaged, and 21 nm/px calibration. The run measured
+The included 768 × 256 staggered sample was also processed with all then-available
+methods, five rows/seven columns averaged, and 21 nm/px calibration. The run measured
 2,805 holes and generated its report in 2.58 s, excluding interpreter startup.
 The largest selected mean-pitch deviation from the sample's nominal 8 px was
 0.00191 px across the methods and axes. This is an end-to-end sample check,

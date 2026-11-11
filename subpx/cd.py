@@ -32,12 +32,8 @@ METHOD_LABELS = {
     "local_half_area": "Raw-cell area above half height",
     "local_half_area_min_avg": "Raw-cell half area (minimum level, averaged peak)",
     "local_tail_area": "Raw-cell area above a low local threshold",
-    "pixel_half_area": "Pixel-count area above half height",
-    "pixel_half_area_min_avg": "Pixel-count half area (minimum level, averaged peak)",
-    "pixel_tail_area": "Pixel-count area above a low local threshold",
 }
-PIXEL_METHODS = ("pixel_half_area", "pixel_half_area_min_avg", "pixel_tail_area")
-LOCAL_METHODS = ("local_projection", "local_half_area", "local_half_area_min_avg", "local_tail_area", *PIXEL_METHODS)
+LOCAL_METHODS = ("local_projection", "local_half_area", "local_half_area_min_avg", "local_tail_area")
 # Opt-in methods insensitive to a per-hole source-pulse scale (subpx/_cpu/invariant_cd.py).
 INVARIANT_METHODS = ("disk", "flux_ratio", "projection", "half_area", "half_area_min", "half_area_min_avg",
                      "tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
@@ -140,11 +136,6 @@ def measure_cds(
         not a wider model-shared window. Neighbour overlap is uncorrected.
         A local-only call skips deblending entirely; mixed calls use the
         final deblended seed list for all methods and still pay its cost.
-        ``pixel_half_area``, ``pixel_half_area_min_avg`` and ``pixel_tail_area``
-        use the corresponding local level/peak rules on original pixels,
-        without cubic enlargement. They count the peak-connected native-pixel
-        region; area increments are one pixel squared. These are separate,
-        cheaper estimators, not aliases for the 4x local methods.
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
         map, then measures every cell with the background and all neighbouring

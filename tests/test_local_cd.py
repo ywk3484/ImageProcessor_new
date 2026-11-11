@@ -155,27 +155,26 @@ def test_gpu_oversized_cell_keeps_ordinary_cells_on_fused_path(monkeypatch):
         image[y:y + size, x:x + size] = 20 + 90 * np.exp(-((xx - 4.2) ** 2 + (yy - 4.4) ** 2) / 4)
         labels[y:y + size, x:x + size] = i
         rows.append([x, y, size, size, x + 4.2, y + 4.4])
-    # Too large for shared memory even at factor 1, but only one such cell.
+    # Only one cell exceeds the fused path's shared-memory limit.
     size, x, y = 60, 5, 45
     yy, xx = np.mgrid[:size, :size]
     image[y:y + size, x:x + size] = 30 + 120 * np.exp(-((xx - 29.3) ** 2 + (yy - 30.2) ** 2) / 180)
     labels[y:y + size, x:x + size] = 20
     rows.append([x, y, size, size, x + 29.3, y + 30.2])
     report = np.random.default_rng(12).permutation(len(rows))
-    cubic = tuple(name for name in LOCAL_METHODS if name.startswith("local_") and name != "local_projection")
-    methods = cubic + tuple(name.replace("local_", "pixel_") for name in cubic)
+    methods = tuple(name for name in LOCAL_METHODS if name != "local_projection")
     options = dict(methods=methods, pad=0, n_angles=16, metrics_only=True, outlines=False)
     expected, *_ = local_cd.measure_local(image, labels, rows, report, **options)
     fallback_calls, fused_calls = [], []
     original_half, original_fused = local_cd._half_areas, gpu_local.measure_local_areas
 
     def record_fallback(cells, masks, *args, **kwargs):
-        fallback_calls.append((cells.shape, kwargs["factor"]))
+        fallback_calls.append(cells.shape)
         return original_half(cells, masks, *args, **kwargs)
 
     def record_fused(*args, **kwargs):
         result = original_fused(*args, **kwargs)
-        fused_calls.append((len(args[4]), kwargs["factor"], result is not None))
+        fused_calls.append((len(args[4]), result is not None))
         return result
 
     monkeypatch.setattr(local_cd, "_half_areas", record_fallback)
@@ -183,11 +182,8 @@ def test_gpu_oversized_cell_keeps_ordinary_cells_on_fused_path(monkeypatch):
     found, _, rois, masks, info = local_cd.measure_local(image, labels, rows, report, xp=xp, **options)
     for name in methods:
         _compare(expected[name], found[name], tolerance=1e-8)
-    assert (20, 4, True) in fused_calls
-    assert (20, 1, True) in fused_calls
-    assert len(fallback_calls) == 2
-    assert all(shape == (1, 60, 60) for shape, factor in fallback_calls)
-    assert {factor for shape, factor in fallback_calls} == {1, 4}
+    assert (20, True) in fused_calls
+    assert fallback_calls == [(1, 60, 60)]
     assert rois.shape == masks.shape == (21, 0, 0)
     assert info["local_fallback_cells"] == 1
     assert info["cell_storage"] == "fused+bucketed"
@@ -261,3 +257,9 @@ def test_local_area_methods_follow_size_changes_in_nonround_shapes(shape):
         # Normalize both changes at the middle size, so differing edge definitions cannot hide a flat response.
         response = (measured[-1] - measured[0]) / measured[1] / (scales[-1] - scales[0])
         assert 0.75 < response < 1.25, (name, shape, response)
+
+
+@pytest.mark.parametrize("method", ["pixel_half_area", "pixel_half_area_min_avg", "pixel_tail_area"])
+def test_removed_pixel_methods_are_rejected(method):
+    with pytest.raises(ValueError, match="methods must be unique choices"):
+        measure_cds(np.zeros((20, 20)), methods=(method,), backend="cpu")

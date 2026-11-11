@@ -2,8 +2,8 @@
 
     python scripts/cd_fast_report.py FOLDER --pixel-size 21 --unit nm
 
-Includes the ten original report methods, four raw-cell methods and three
-native-pixel methods. Maps, measured outlines, hole details and statistics use
+Includes the ten original report methods and four interpolated raw-cell
+methods. Maps, measured outlines, hole details and statistics use
 the original report. Open the printed index.html path directly in a browser.
 """
 
@@ -65,8 +65,6 @@ def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("folder", type=Path)
     parser.add_argument("--output", type=Path, help="New or empty report folder")
-    # Keep the previously supplied command valid; native-pixel methods are now always included.
-    parser.add_argument("--include-pixel", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--recursive", action="store_true", help="Include PNGs in subfolders")
     parser.add_argument("--pixel-size", type=float, default=1.0)
     parser.add_argument("--unit", default="px")

@@ -122,7 +122,7 @@ def test_complete_cpu_trial_uses_real_batch_and_saves_end_to_end_timing(tmp_path
         assert all(int(row["deblend_iterations"]) == 0 for row in accepted)
         assert all(int(row["deblend_passes"]) == 0 for row in accepted)
         # Match the complete local calculation, including its subpixel grid.
-        # Fractional areas ensure this fixture would detect native-pixel routing.
+        # Fractional areas verify that interpolation is retained.
         expected = measure_cds(images[0], methods=methods, backend="cpu", pixel_size=21.0, unit="nm",
                                half_area_level=0.45, half_area_peak_pixels=3.0, tail_area_level=0.25,
                                summary_only=True)

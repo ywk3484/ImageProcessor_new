@@ -74,51 +74,36 @@ def measure_local(signal, labels, rows, report, *, methods, pad, n_angles,
         signal, labels = xp.asarray(signal), xp.asarray(labels)
         fallback_elapsed = 0.0
         fallback_cells = np.zeros(count, bool)
-        groups = None
-        for factor in (4, 1):
-            names = [name for name in methods if name.startswith("pixel_") == (factor == 1)]
-            if not names:
-                continue
-            canonical = [name.replace("pixel_", "local_", 1) if factor == 1 else name for name in names]
-            options = dict(methods=canonical, factor=factor, n_angles=n_angles, half_area_level=half_area_level,
-                           half_area_peak_pixels=half_area_peak_pixels, tail_area_level=tail_area_level)
-            parts = measure_local_areas(signal, labels, origins, sizes, report, **options)
-            if parts is None:
-                # A shared-memory outlier must not send every ordinary cell
-                # through the slower reference path. Retry homogeneous buckets;
-                # only a bucket the kernel declines uses bounded extraction.
-                if groups is None:
-                    buckets = (sizes + 3) // 4 * 4
-                    width_key = int(buckets[:, 1].max()) + 1
-                    _, groups = np.unique(buckets[:, 0] * width_key + buckets[:, 1], return_inverse=True)
-                for group in range(int(groups.max()) + 1):
-                    indices = np.flatnonzero(groups == group)
-                    parts = measure_local_areas(signal, labels, origins[indices], sizes[indices],
-                                                report[indices], **options)
-                    if parts is None:
-                        fallback_started = time.perf_counter()
-                        parts, _, _, _, info = measure_local(
-                            signal, labels, rows, report[indices], methods=names, pad=pad, n_angles=n_angles,
-                            half_area_level=half_area_level, half_area_peak_pixels=half_area_peak_pixels,
-                            tail_area_level=tail_area_level, outlines=False, metrics_only=True, store_cells=False,
-                            xp=xp, _fused=False,
-                        )
-                        fallback_elapsed += time.perf_counter() - fallback_started
-                        fallback_cells[indices] = True
-                        for key, value in info["seconds"].items():
-                            seconds[key] = seconds.get(key, 0.0) + value
-                        source_names = names
-                    else:
-                        source_names = canonical
-                    for name, source in zip(names, source_names):
-                        part = parts[source]
-                        part.method = name
-                        _scatter(found, name, part, indices, count)
-            else:
-                for name, source in zip(names, canonical):
-                    part = parts[source]
-                    part.method = name
-                    found[name] = part
+        options = dict(methods=methods, n_angles=n_angles, half_area_level=half_area_level,
+                       half_area_peak_pixels=half_area_peak_pixels, tail_area_level=tail_area_level)
+        parts = measure_local_areas(signal, labels, origins, sizes, report, **options)
+        if parts is None:
+            # A shared-memory outlier must not send every ordinary cell
+            # through the slower reference path. Retry homogeneous buckets;
+            # only a bucket the kernel declines uses bounded extraction.
+            buckets = (sizes + 3) // 4 * 4
+            width_key = int(buckets[:, 1].max()) + 1
+            _, groups = np.unique(buckets[:, 0] * width_key + buckets[:, 1], return_inverse=True)
+            for group in range(int(groups.max()) + 1):
+                indices = np.flatnonzero(groups == group)
+                parts = measure_local_areas(signal, labels, origins[indices], sizes[indices],
+                                            report[indices], **options)
+                if parts is None:
+                    fallback_started = time.perf_counter()
+                    parts, _, _, _, info = measure_local(
+                        signal, labels, rows, report[indices], methods=methods, pad=pad, n_angles=n_angles,
+                        half_area_level=half_area_level, half_area_peak_pixels=half_area_peak_pixels,
+                        tail_area_level=tail_area_level, outlines=False, metrics_only=True, store_cells=False,
+                        xp=xp, _fused=False,
+                    )
+                    fallback_elapsed += time.perf_counter() - fallback_started
+                    fallback_cells[indices] = True
+                    for key, value in info["seconds"].items():
+                        seconds[key] = seconds.get(key, 0.0) + value
+                for name, part in parts.items():
+                    _scatter(found, name, part, indices, count)
+        else:
+            found.update(parts)
         seconds["local_fused"] = time.perf_counter() - started - fallback_elapsed
         return {name: found[name] for name in methods}, origins, rois, masks, {
             "seconds": seconds, "cell_stack_shape": [int(max_h), int(max_w)],
@@ -131,12 +116,11 @@ def measure_local(signal, labels, rows, report, *, methods, pad, n_angles,
     # Four-pixel buckets avoid one tiny variation causing a separate GPU launch.
     bucket_sizes = ((sizes + 3) // 4) * 4
     shapes, groups = np.unique(bucket_sizes, axis=0, return_inverse=True)
-    specs_by_factor = {4: [], 1: []}
+    specs = []
     for name in methods:
         if name == "local_projection":
             continue
-        factor = 1 if name.startswith("pixel_") else 4
-        specs_by_factor[factor].append(dict(
+        specs.append(dict(
             name=name, level=tail_area_level if name.endswith("tail_area") else half_area_level,
             background="min" if name.endswith("half_area_min_avg") else "median",
             peak_pixels=None if name.endswith("half_area") else half_area_peak_pixels, cuts=None))
@@ -177,11 +161,9 @@ def measure_local(signal, labels, rows, report, *, methods, pad, n_angles,
                 part.metrics["background"][:] = _to_numpy(level)
                 _scatter(found, "local_projection", part, indices, count)
                 seconds["local_projection"] = seconds.get("local_projection", 0.0) + time.perf_counter() - started
-            for factor, specs in specs_by_factor.items():
-                if not specs:
-                    continue
-                parts = _half_areas(cells, mask_host, origins[indices], n_angles, specs, factor=factor,
-                                    outlines=outlines, metrics_only=metrics_only, xp=xp, seconds=seconds)
+            if specs:
+                parts = _half_areas(cells, mask_host, origins[indices], n_angles, specs,
+                                     outlines=outlines, metrics_only=metrics_only, xp=xp, seconds=seconds)
                 for name, part in parts.items():
                     part.metrics["background"][:] = part.metrics["local_level"]
                     _scatter(found, name, part, indices, count)

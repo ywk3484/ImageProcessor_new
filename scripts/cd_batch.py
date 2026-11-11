@@ -16,8 +16,8 @@ another size are compared on the centre part both share. --error-function FILE.p
 NAME(reference, image) -> error instead; --no-hole-check measures every page. The reference page is read once, at the
 start; it may be a page of one of the dataset's own TIFFs.
 
-The default ten methods use the same measurements as scripts/cd_report.py. The additional local_* and pixel_*
-methods bypass Gaussian deblending when requested alone; pixel_* also skips 4x enlargement. The batch keeps only
+The default ten methods use the same measurements as scripts/cd_report.py. The additional local_* methods
+bypass Gaussian deblending when requested alone and retain 4x cubic interpolation. The batch keeps only
 numerical summaries, omitting display data and full-cell intensity statistics.
 
 Outputs in --output:

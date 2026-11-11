@@ -11,10 +11,10 @@ import pytest
 from scripts import cd_report as report
 from scripts.benchmark_cd import lattice
 from subpx import measure_cds
-from subpx.cd import LOCAL_METHODS, PIXEL_METHODS
+from subpx.cd import LOCAL_METHODS
 
 
-METHODS = ("local_half_area", "local_half_area_min_avg", "local_tail_area", *PIXEL_METHODS)
+METHODS = ("local_half_area", "local_half_area_min_avg", "local_tail_area")
 
 
 def _array(encoded, dtype=np.float32):
@@ -54,11 +54,11 @@ def test_mixed_detail_keeps_raw_inputs_separate_and_preserves_original_brightnes
     for name in METHODS:
         panel = detail["half"][name]
         measured = result.measurements[name]
-        assert panel["input"] == "local" and panel["factor"] == (1 if name in PIXEL_METHODS else 4)
+        assert panel["input"] == "local"
         assert panel["level_fraction"] == (0.16 if name.endswith("tail_area") else 0.42)
         assert panel["background"].startswith("minimum" if name.endswith("min_avg") else "median")
         if name.endswith("min_avg") or name.endswith("tail_area"):
-            assert ("original pixels" in panel["peak_rule"]) == (name in PIXEL_METHODS)
+            assert "enlarged cell" in panel["peak_rule"]
         for key, metric in (("level", "local_level"), ("peak", "peak_signal"), ("threshold", "threshold"),
                             ("mean", "mean_signal")):
             np.testing.assert_array_equal(_array(panel[key]), measured.metrics[metric].astype(np.float32))
@@ -129,15 +129,14 @@ def test_intensity_selects_an_available_tail_method_and_keeps_its_validity(numer
     tail = result.measurements["local_tail_area"]
     expected = np.where(tail.valid, tail.metrics["mean_signal"], np.nan)
     np.testing.assert_array_equal(report.cell_intensity(result), expected)
-    del result.measurements["local_tail_area"]
-    assert report.intensity_source(result.measurements) == "pixel_tail_area"
-    data = report.hole_data(result, report.layer_values(result), image=image)
-    assert data["methods"]["cell_intensity"]["base"] == "pixel_tail_area"
     result.measurements["tail_area"] = tail
     assert report.intensity_source(result.measurements) == "tail_area"
     data = report.hole_data(result, report.layer_values(result), image=image)
     assert "background and neighbours removed" in data["methods"]["cell_intensity"]["label"]
-    del result.measurements["tail_area"], result.measurements["pixel_tail_area"]
+    del result.measurements["tail_area"]
+    assert report.intensity_source(result.measurements) == "local_tail_area"
+    del result.measurements["local_tail_area"]
+    assert report.intensity_source(result.measurements) is None
     assert report.cell_intensity(result) is None
 
 
@@ -181,8 +180,8 @@ const arcs=[], detail={innerHTML:''}, ctx=new Proxy({}, {get:(_,key)=>key==='arc
 const $=id=>id==='method'?{value:'cell_intensity'}:id==='show'?{checked:true}:detail;
 const base={x:[10],y:[10],cd:[4],valid:[1],status:[0],status_names:['ok'],
     rays:new Uint8Array(),ray_n:0,ray_unit:1,outline_kind:'equivalent_circle'};
-const light={...base,base:'pixel_tail_area',cd:[123],unit:'counts',scale:1};
-let cur={n:1,scale:21,unit:'nm',methods:{pixel_tail_area:base,cell_intensity:light}},
+const light={...base,base:'local_tail_area',cd:[123],unit:'counts',scale:1};
+let cur={n:1,scale:21,unit:'nm',methods:{local_tail_area:base,cell_intensity:light}},
     curId='one', img={}, view={k:2,tx:0,ty:0}, bins=[[0]], sel=0;
 const canvas={width:100,height:100}, RAY_ANG={}, COLORS={}, ENTRIES={one:{detail:null}},
     window={CD_DETAIL:{}}, fin=Number.isFinite, viridis=()=>'', loadRays=()=>{};
@@ -240,10 +239,7 @@ for(const [j,key,size] of [[0,'prof_x',L.w],[1,'prof_y',L.h]])
 for(const name of p.methods){
   method=name;drawn=[];profiles=[];renderDetail();checkCell(raw);
   if(drawn[0].G!==L||!panel.innerHTML.includes('fitted background and neighbours have not been removed'))throw Error('wrong area source');
-  const native=name.startsWith('pixel_');
-  if(native&&!panel.innerHTML.includes('original pixels, without enlargement'))throw Error('native grid not explained');
-  if(native&&panel.innerHTML.includes('enlarged 4x'))throw Error('native pixels described as enlarged');
-  if(!native&&!panel.innerHTML.includes('enlarged 4x'))throw Error('local interpolation not explained');
+  if(!panel.innerHTML.includes('enlarged 4x'))throw Error('local interpolation not explained');
 }
 method='projection';drawn=[];profiles=[];renderDetail();checkCell(model);
 if(drawn[0].G!==p.detail||!panel.innerHTML.includes('background and neighbours removed'))throw Error('original projection changed');

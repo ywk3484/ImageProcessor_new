@@ -198,7 +198,7 @@ def gaussian_image(layout="square"):
 @pytest.mark.parametrize("layout", ["square", "staggered"])
 def test_cd_centers_on_synthetic_images_have_accurate_pitch(layout):
     image, centers = gaussian_image(layout)
-    source = measure_cds(image, methods=("gaussian", "projection", "half_area", "local_projection", "pixel_half_area"),
+    source = measure_cds(image, methods=("gaussian", "projection", "half_area", "local_projection", "local_half_area"),
                          area_max=100, outlines=False, metrics_only=True)
     assert len(source.seeds_xy) == len(centers)
     for m in analyze_pitch(source).values():
@@ -212,7 +212,7 @@ def test_gpu_cd_center_pitch_parity():
     if not is_gpu_available():
         pytest.skip("CuPy/CUDA unavailable")
     image, _ = gaussian_image("staggered")
-    options = dict(methods=("gaussian", "local_projection", "local_half_area", "pixel_half_area"), area_max=100,
+    options = dict(methods=("gaussian", "local_projection", "local_half_area", "local_tail_area"), area_max=100,
                    outlines=False, metrics_only=True)
     cpu = analyze_pitch(measure_cds(image, backend="cpu", **options))
     gpu = analyze_pitch(measure_cds(image, backend="gpu", **options))
