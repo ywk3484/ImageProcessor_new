@@ -3,7 +3,8 @@
     python scripts/cd_fast_report.py FOLDER --pixel-size 21 --unit nm
 
 Includes the ten original report methods and four interpolated raw-cell
-methods. Maps, measured outlines, hole details and statistics use
+methods; --outline-fit adds outline_fit (minutes per image on the GPU,
+docs/outline_fit.md). Maps, measured outlines, hole details and statistics use
 the original report. Open the printed index.html path directly in a browser.
 """
 
@@ -84,6 +85,12 @@ def argument_parser():
     parser.add_argument("--deblend-tolerance", type=float, default=1e-3)
     parser.add_argument("--no-hole-details", action="store_true", help="Skip the click panel's cell images and profiles")
     parser.add_argument("--save-results", action="store_true", help="Also save full per-hole results (compact NPZ + CSVs)")
+    parser.add_argument("--outline-fit", action="store_true",
+                        help="Also measure outline_fit (minutes per image on the GPU; see docs/outline_fit.md)")
+    parser.add_argument("--outline-blur", choices=("gauss2", "lens"), default="gauss2",
+                        help="outline_fit: the blur's family (two Gaussians, or a Gaussian times a circular pupil)")
+    parser.add_argument("--outline-rounds", type=int, default=14,
+                        help="outline_fit: most rounds of its fit (it stops earlier once the outline settles)")
     return parser
 
 
@@ -93,7 +100,8 @@ def _settings(args, backend):
                 pixel_size=args.pixel_size, unit=args.unit, backend=backend, device=args.device,
                 half_area_level=args.half_level, half_area_peak_pixels=args.peak_pixels,
                 tail_area_level=args.tail_level, tail_window=args.tail_window,
-                deblend_iterations=args.deblend_iterations, deblend_tolerance=args.deblend_tolerance)
+                deblend_iterations=args.deblend_iterations, deblend_tolerance=args.deblend_tolerance,
+                outline_blur=args.outline_blur, outline_rounds=args.outline_rounds)
 
 
 def _write_data(path, namespace, key, value):
@@ -101,7 +109,8 @@ def _write_data(path, namespace, key, value):
                     + json.dumps(value, allow_nan=False) + ";\n", encoding="utf-8")
 
 
-def _process_image(path, name, ident, output, options, rng, *, hole_details=True, save_results=False):
+def _process_image(path, name, ident, output, options, rng, *, hole_details=True, save_results=False,
+                   methods=ALL_METHODS):
     from PIL import Image
 
     started = time.perf_counter()
@@ -112,7 +121,7 @@ def _process_image(path, name, ident, output, options, rng, *, hole_details=True
     started = time.perf_counter()
     # The original viewer aligns methods by hole ID. A mixed call retains that
     # common seed/cell list; each fast method still measures its raw-cell input.
-    result = measure_cds(image, methods=ALL_METHODS, **options)
+    result = measure_cds(image, methods=methods, **options)
     measure_s = time.perf_counter() - started
     started = time.perf_counter()
     statistics = report.cd_statistics(result)
@@ -152,7 +161,8 @@ def _process_image(path, name, ident, output, options, rng, *, hole_details=True
     entry = dict(id=ident, name=name, holes=len(result.seeds_xy), stats=statistics, width=image.shape[1],
                  height=image.shape[0], seconds=measure_s, image=f"images/{ident}.png", data=f"data/{ident}.js",
                  detail=detail, tail=tail, agreement=report.agreement(result), intensity=intensity,
-                 image_mean=image_mean, intensity_source="tail_area")
+                 image_mean=image_mean, intensity_source="tail_area",
+                 outline=report.outline_summary(result, result.unit))
     source.update(id=ident, status="ok", meta=result.meta)
     return entry, rows, timing, source, samples
 
@@ -172,15 +182,20 @@ def main(argv=None):
         parser.error(f"No PNG images in {args.folder}")
     backend, _ = _resolve_backends(args.backend, None, "model")
     options = _settings(args, backend)
+    methods = ALL_METHODS + (report.OPTIONAL_METHODS if args.outline_fit else ())
     # Validate numerical options before creating output folders.
     try:
-        measure_cds(np.zeros((8, 8), np.uint8), methods=ALL_METHODS, **{**options, "backend": "cpu"})
+        measure_cds(np.zeros((8, 8), np.uint8), methods=methods, **{**options, "backend": "cpu"})
     except ValueError as error:
         parser.error(str(error))
     for folder in ("images", "data", "arrays"):
         (output / folder).mkdir(parents=True, exist_ok=True)
-    print(f"CD report: {len(images)} PNGs; {len(ORIGINAL_METHODS)} original + {len(FAST_METHODS)} fast methods; "
-          f"{backend.upper()} device {args.device}.", flush=True)
+    print(f"CD report: {len(images)} PNGs; {len(ORIGINAL_METHODS)} original + {len(FAST_METHODS)} fast methods"
+          f"{' + outline_fit' if args.outline_fit else ''}; {backend.upper()} device {args.device}.", flush=True)
+    if args.outline_fit:
+        print("outline_fit: about 2.5-4.5 min per 2048 x 1378 image of 30-50k holes on the GPU, 25-70 min on the CPU",
+              flush=True)
+    notes = []
     started = time.perf_counter()
     entries, rows, timings, sources = [], [], [], []
     samples, used = {}, set()
@@ -195,7 +210,7 @@ def main(argv=None):
             try:
                 entry, values, timing, source, values_by_layer = _process_image(
                     path, name, ident, output, options, rng,
-                    hole_details=not args.no_hole_details, save_results=args.save_results)
+                    hole_details=not args.no_hole_details, save_results=args.save_results, methods=methods)
             except Exception as error:
                 message = str(error).replace(str(path), name) or type(error).__name__
                 entries.append(dict(id=ident, name=name, error=message))
@@ -211,11 +226,16 @@ def main(argv=None):
             for layer, values in values_by_layer.items():
                 samples.setdefault(layer, []).append(values)
             print(f"[{number}/{len(images)}] {name}: {entry['holes']:,} holes; {timing['measure_s']:.2f} s", flush=True)
+            if entry["outline"]:
+                print(f"  outline fit: {report.outline_line(entry['outline'], ascii_only=True)}", flush=True)
+                note = report.outline_note(name, entry["outline"])
+                if note:
+                    notes.append(note)
     fields = (["image", "status", "method", "holes", "cells"]
               + [key + suffix for suffix, _, _ in report.AXES
                  for key in ("valid", "mean", "std", "three_sigma_pct")] + ["unit", "error"])
     write_csv(output / "summary.csv", rows, fields)
-    between = report.between_image_statistics(entries, ALL_METHODS)
+    between = report.between_image_statistics(entries, methods)
     brightness = report.brightness_between(entries)
     fields = ["method"] + [key + suffix for suffix, _, _ in report.AXES
                            for key in ("images", "mean_of_means", "std_of_means", "three_sigma", "three_sigma_pct")] + ["unit"]
@@ -227,12 +247,12 @@ def main(argv=None):
         values = np.concatenate(parts)
         if len(values):
             ranges[layer] = np.quantile(values, [0.02, 0.98]).tolist()
-    page = report.write_report(output, entries, ALL_METHODS, [], args.unit, ranges)
+    page = report.write_report(output, entries, methods, notes, args.unit, ranges)
     elapsed = time.perf_counter() - started
     failures = [e for e in entries if e.get("error")]
     manifest = dict(schema_version=2, source_folder=str(args.folder.resolve()),
                     measurement_fingerprint=measurement_fingerprint(), settings=options,
-                    methods=ALL_METHODS, original_methods=ORIGINAL_METHODS, fast_methods=FAST_METHODS,
+                    methods=methods, original_methods=ORIGINAL_METHODS, fast_methods=FAST_METHODS,
                     elapsed_s=elapsed, images=sources,
                     successful_images=len(entries) - len(failures), failed_images=len(failures),
                     note="All methods share the original model pipeline's seed/cell list. Fast methods measure "

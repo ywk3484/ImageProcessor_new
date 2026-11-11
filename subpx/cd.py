@@ -32,6 +32,7 @@ METHOD_LABELS = {
     "local_half_area": "Raw-cell area above half height",
     "local_half_area_min_avg": "Raw-cell half area (minimum level, averaged peak)",
     "local_tail_area": "Raw-cell area above a low local threshold",
+    "outline_fit": "Outline fit: one sharp outline and blur per page, each hole's own edge offset",
 }
 LOCAL_METHODS = ("local_projection", "local_half_area", "local_half_area_min_avg", "local_tail_area")
 # Opt-in methods insensitive to a per-hole source-pulse scale (subpx/_cpu/invariant_cd.py).
@@ -72,6 +73,8 @@ def measure_cds(
     half_area_peak_pixels: float = 4.0,
     tail_area_level: float = 0.2,
     tail_window: float = 1.2,
+    outline_blur: str = "gauss2",
+    outline_rounds: int = 14,
     outlines: bool = True,
     metrics_only: bool = False,
     summary_only: bool = False,
@@ -136,6 +139,17 @@ def measure_cds(
         not a wider model-shared window. Neighbour overlap is uncorrected.
         A local-only call skips deblending entirely; mixed calls use the
         final deblended seed list for all methods and still pay its cost.
+        Opt-in ``outline_fit`` (``background='model'``, ``subpx.fit_outline``)
+        fits the whole page with one sharp outline (any star-convex shape)
+        blurred by one blur, both fitted per page, every hole at its own
+        position, brightness, local level and edge offset; CD = the area-
+        equivalent diameter of the outline moved by the hole's edge offset,
+        so a focus change moves the fitted blur, not the CD. It runs on the
+        final seed list (every modelled hole, frame-cut ones included) and
+        reports the same holes as the other methods; ``meta['outline_fit']``
+        holds the page fit (outline, blur, rounds, ``converged``,
+        ``per_hole_size``). Minutes per 2048 x 1378 page on the GPU, tens of
+        minutes on the CPU; see docs/outline_fit.md.
     background : {'model', 'border'}
         ``model`` jointly fits one Gaussian per hole and a smooth background
         map, then measures every cell with the background and all neighbouring
@@ -226,6 +240,12 @@ def measure_cds(
     tail_window : float
         ``tail_area`` / ``tail_area_norm``: half-width of the window around each hole, in pitches
         (0.5 to 2).
+    outline_blur : {'gauss2', 'lens'}
+        ``outline_fit``: the blur's family, two centred anisotropic Gaussians
+        or an anisotropic Gaussian times a circular pupil's transfer function.
+    outline_rounds : int
+        ``outline_fit``: most alternations of its hole and shape stages (it
+        stops earlier when the outline settles).
     outlines : bool
         False skips the display outlines of the ``half_area`` family (their
         ``contours_xy``, ``geometry['edge_px']`` and ``perimeter_px`` stay NaN),
@@ -278,6 +298,14 @@ def measure_cds(
         raise ValueError("local methods require background='model' (they bypass that model when used alone)")
     if background != "model" and set(methods) & set(INVARIANT_METHODS):
         raise ValueError("methods " + ", ".join(INVARIANT_METHODS) + " require background='model'")
+    if "outline_fit" in methods:
+        from .outline import BLUR_FAMILIES
+        if background != "model":
+            raise ValueError("method 'outline_fit' requires background='model'")
+        if outline_blur not in BLUR_FAMILIES:
+            raise ValueError("outline_blur must be one of " + ", ".join(BLUR_FAMILIES))
+        if not np.isfinite(outline_rounds) or int(outline_rounds) != outline_rounds or outline_rounds < 1:
+            raise ValueError("outline_rounds must be a positive integer")
     for name, value in (("nominal_cd", nominal_cd), ("psf_fwhm", psf_fwhm), ("flux_ratio_scale", flux_ratio_scale)):
         if value is not None and not (np.isfinite(value) and value > 0):
             raise ValueError(f"{name} must be positive")
@@ -333,7 +361,7 @@ def measure_cds(
             half_area_level=float(half_area_level), half_area_peak_pixels=float(half_area_peak_pixels),
             tail_area_level=float(tail_area_level), tail_window=float(tail_window), outlines=bool(outlines),
             metrics_only=bool(metrics_only), deblend_tolerance=float(deblend_tolerance),
-            summary_only=bool(summary_only),
+            summary_only=bool(summary_only), outline_blur=str(outline_blur), outline_rounds=int(outline_rounds),
         )
 
 
@@ -384,6 +412,7 @@ def _measure_cds(
     pixel_size, unit, backend, cell_backend, device, nominal_cd=None, psf_fwhm=None, dark_level=0.0,
     flux_ratio_scale=None, half_area_level=0.5, half_area_peak_pixels=4.0, tail_area_level=0.2,
     tail_window=1.2, outlines=True, metrics_only=False, deblend_tolerance=1e-3, summary_only=False,
+    outline_blur="gauss2", outline_rounds=14,
 ) -> CDResult | CDSummary:
     from ._cpu.centers import _segment_binary
     from ._cpu.components import connected_components_stats_cpu
@@ -611,7 +640,8 @@ def _measure_cds(
         report = np.flatnonzero(interior)
         cleaned = state.cleaned[report]
         seconds["deblend"], start = time.perf_counter() - start, time.perf_counter()
-        measured = [m for m in methods if m != "gaussian" and m not in INVARIANT_METHODS and m not in LOCAL_METHODS]
+        measured = [m for m in methods if m not in ("gaussian", "outline_fit") and m not in INVARIANT_METHODS
+                    and m not in LOCAL_METHODS]
         found = measure_cells(
             cleaned, masks[report], origins[report], all_seeds[report], methods=tuple(measured),
             n_angles=int(n_angles), radial_step=radial_step, smooth_sigma=smooth_sigma,
@@ -654,6 +684,15 @@ def _measure_cds(
             found.update(extra)
             seconds.update(info["seconds"])
             start = time.perf_counter()
+        if "outline_fit" in methods:
+            from .outline import measure_outline
+            # Every modelled hole is fitted (the frame-cut ones' light belongs to the page model); the measured ones
+            # are reported, as for the other methods.
+            found["outline_fit"], meta["outline_fit"] = measure_outline(
+                img, all_seeds, report, origins[report], pixel_size=float(pixel_size), unit=unit,
+                blur=outline_blur, rounds=int(outline_rounds), invert=bool(invert), n_rays=int(n_angles),
+                backend=backend, device=int(device))
+            seconds["outline_fit"], start = time.perf_counter() - start, time.perf_counter()
         release_memory()
         local_background = sign * map_coordinates(
             state.background_map, all_seeds[report].T[::-1], order=1, mode="nearest",
@@ -662,7 +701,7 @@ def _measure_cds(
         for name in methods:
             if name in LOCAL_METHODS:
                 found[name].metrics["background"] *= sign
-            else:
+            elif name != "outline_fit":  # its own fitted level per hole, in the image's grey levels
                 found[name].metrics["background"][:] = local_background
             measurements[name] = found[name]
         rois = cleaned

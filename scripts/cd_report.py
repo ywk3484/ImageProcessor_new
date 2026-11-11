@@ -19,6 +19,13 @@ subpx methods (logquad, gradient, halfmax, disk, flux_ratio) are left out: they 
 outline, or need the blur, and disk/flux_ratio dominated the run time. --backend auto (default) uses the GPU when
 CuPy finds a CUDA device; the backend actually used, and why the GPU is not, is printed at the start.
 
+--outline-fit adds outline_fit (docs/outline_fit.md) to the chosen methods: one sharp outline and one blur fitted to
+the whole image, every hole at its own position, brightness, level and edge offset; CD = the outline moved by the
+hole's edge offset, so a blur (focus) change moves the fitted blur, not the CD. It takes minutes per 2048 x 1378 image
+on the GPU (tens of minutes on the CPU). Its page readings (outline CD, blur, rounds, whether it converged, whether
+the holes were large enough for a size each) are printed and shown on each image tab; where the per-hole size was
+switched off, every hole reads the image's CD and its within-image sigma is shown as not measured.
+
 Open REPORT/index.html in a browser (works from the folder, no server). It has a summary tab and one tab per image.
 
 The summary tab first answers whether the images show the same CD on average. Per method, with m_i the mean CD
@@ -111,7 +118,13 @@ DESCRIPTIONS.update({
                                "pixels as the peak.",
     "local_tail_area": "Area connected to the peak above the low local threshold in the raw Voronoi cell, "
                        "enlarged 4x; median edge level and averaged peak; neighbour light remains in the cell.",
+    "outline_fit": "The whole image fitted with one sharp outline (any star-convex shape) blurred by one blur, both "
+                   "fitted to this image, every hole at its own position, brightness, local level and edge offset "
+                   "(neighbours' light modelled). CD = area-equivalent diameter of the outline moved by the hole's "
+                   "edge offset: the blur is fitted, so a focus change moves the blur, not the CD; brightness is free "
+                   "per hole. x / y: the diameters of the ellipse with the outline's area and x / y spread.",
 })
+OPTIONAL_METHODS = ("outline_fit",)  # opt-in (--outline-fit): minutes per image on the GPU
 # The CD and the x / y widths: statistics key suffix, metric, label.
 AXES = (("", "cd_equivalent_px", "CD"), ("_x", "cd_x_px", "x"), ("_y", "cd_y_px", "y"))
 
@@ -133,7 +146,45 @@ def cd_statistics(result) -> dict[str, dict]:
         for suffix, metric, _ in AXES:
             spread = _spread(measured.metrics[metric][measured.valid] * result.pixel_size)
             stats[name].update({key + suffix: value for key, value in spread.items()})
+    fit = result.meta.get("outline_fit") or {}
+    if "outline_fit" in stats and fit.get("fitted") and not fit.get("per_hole_size"):
+        # every hole was given the image's outline (too small for a size each at this noise): the mean is a reading,
+        # the spread is not one
+        for suffix, _, _ in AXES:
+            stats["outline_fit"]["std" + suffix] = stats["outline_fit"]["three_sigma_pct" + suffix] = float("nan")
     return stats
+
+
+def outline_summary(result, unit: str) -> dict | None:
+    """The outline fit's page readings in ``unit`` (None without the method), for the console and the image tab."""
+    fit = result.meta.get("outline_fit")
+    if not fit:
+        return None
+    if not fit.get("fitted"):
+        return {"fitted": False, "reason": fit.get("reason", "")}
+    scale = float(result.pixel_size)
+    return {"fitted": True, "outline_cd": fit["outline_cd_px"] * scale,
+            "blur_fwhm": [v * scale for v in fit["blur_fwhm_px"]], "p": fit["superellipse_p"],
+            "rounds": fit["rounds_run"], "rounds_max": fit["rounds_max"], "converged": fit["converged"],
+            "per_hole_size": fit["per_hole_size"], "blur_family": fit["blur_family"], "seconds": fit["seconds"],
+            "holes_fitted": fit["holes_fitted"], "at_clip": fit["at_clip"], "unit": unit}
+
+
+def outline_line(summary: dict | None, ascii_only: bool = False) -> str:
+    """One line on the outline fit of an image (``ascii_only`` for the console)."""
+    if not summary:
+        return ""
+    if not summary["fitted"]:
+        return f"not fitted ({summary['reason']})"
+    u, x = summary["unit"], "x" if ascii_only else "×"
+    state = (f"converged after {summary['rounds']} rounds" if summary["converged"]
+             else f"NOT converged in {summary['rounds']} rounds (the outline was still moving)")
+    size = ("a size per hole" if summary["per_hole_size"]
+            else "per-hole size off: holes too small for a size each at this noise, every hole reads the image's CD")
+    return (f"outline CD {summary['outline_cd']:.2f} {u}, blur FWHM {summary['blur_fwhm'][0]:.1f} {x} "
+            f"{summary['blur_fwhm'][1]:.1f} {u} ({summary['blur_family']}), exponent p {summary['p']:.2f}; {state}; "
+            f"{size}; {summary['holes_fitted']:,} holes fitted, {summary['at_clip']} at the edge-offset bound; "
+            f"{summary['seconds']:.0f} s")
 
 
 def layer_values(result) -> dict[str, np.ndarray]:
@@ -403,6 +454,17 @@ def detail_data(result) -> dict:
         if name == "edge_area":
             out["half"][name]["threshold_rule"] = ("mean brightness of the window, each pixel weighted by its steepness "
                                                    "(where the light falls fastest)")
+    if "outline_fit" in result.measurements:
+        measured = result.measurements["outline_fit"]
+        m, edge = measured.metrics, measured.geometry["edge_px"]
+        rays = edge[:, ::max(1, edge.shape[1] // 32)][:, :32]
+        out["outline"] = {"cx": _b64(measured.geometry["center_local"][:, 0], "<f4"),
+                          "cy": _b64(measured.geometry["center_local"][:, 1], "<f4"),
+                          "rays": _b64(np.clip(np.rint(np.nan_to_num(rays) * 16), 0, 255), "u1"),
+                          "n_rays": int(rays.shape[1]),
+                          **{key: _b64(m[key], "<f4") for key in ("cd_se_px", "edge_offset_px", "brightness",
+                                                                   "background", "leftover_rms")},
+                          "page": outline_line(outline_summary(result, result.unit))}
     return out
 
 
@@ -461,7 +523,7 @@ COLORS = {"gaussian": "#5bbf2a", "projection": "#7a7a7a", "projection_x": "#2b8c
           "tail_area_norm": "#2e86c1", "edge_area": "#c0392b",
           "foot_area": "#16a085", "foot_area_ratio": "#7d3c98"}
 COLORS.update({"local_projection": "#64748b", "local_half_area": "#b83280",
-               "local_half_area_min_avg": "#b7791f", "local_tail_area": "#0d9488"})
+               "local_half_area_min_avg": "#b7791f", "local_tail_area": "#0d9488", "outline_fit": "#e11d48"})
 # x / y width layers: the method's colour, lighter for x and darker for y (projection keeps its own two).
 COLORS["cell_intensity"] = "#b8860b"
 for _name, _color in list(COLORS.items()):
@@ -570,7 +632,9 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
     panels = "".join(
         f"<section class='panel' id='panel-{e['id']}' hidden><h2>{html.escape(e['name'])}: statistics</h2>"
         f"<p class='meta'>{e['holes']:,} holes · {e['width']} × {e['height']} px · image intensity (mean of all "
-        f"pixels) {_fmt(e['image_mean'])} counts · {e['seconds']:.1f} s</p>{_stats_table(e['stats'], unit)}"
+        f"pixels) {_fmt(e['image_mean'])} counts · {e['seconds']:.1f} s</p>"
+        + (f"<p class='meta'><b>Outline fit:</b> {html.escape(outline_line(e['outline']))}</p>" if e.get("outline") else "")
+        + f"{_stats_table(e['stats'], unit)}"
         f"{_intensity_table(e['intensity'], e.get('intensity_source') or intensity_source(e['stats']) or 'tail_area') if e.get('intensity') else ''}"
         f"{_agreement_table(*e['agreement'])}"
         "<h3>CD histograms</h3><div class='hists'></div></section>"
@@ -586,6 +650,20 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
     path = output / "index.html"
     path.write_text(page, encoding="utf-8")
     return path
+
+
+def outline_note(name: str, summary: dict) -> str:
+    """A report note for an image whose outline fit is not a full reading ('' when it is)."""
+    if not summary["fitted"]:
+        return f"{name}: outline_fit not fitted ({summary['reason']})."
+    parts = []
+    if not summary["converged"]:
+        parts.append(f"did not converge in {summary['rounds']} rounds (its outline was still moving; on dense small "
+                     "holes the size and the blur trade against each other)")
+    if not summary["per_hole_size"]:
+        parts.append("gave every hole the image's size (holes too small for a size each at this noise): its "
+                     "within-image sigma is not measured")
+    return f"{name}: outline_fit " + "; ".join(parts) + "." if parts else ""
 
 
 def describe_backend(requested: str) -> str:
@@ -619,6 +697,12 @@ def main(argv=None) -> None:
     parser.add_argument("folder", type=Path, help="Folder holding the .png images")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/cd_report")
     parser.add_argument("--methods", nargs="+", choices=ALL_METHODS, default=list(ALL_METHODS))
+    parser.add_argument("--outline-fit", action="store_true",
+                        help="Also measure outline_fit (minutes per image on the GPU; see docs/outline_fit.md)")
+    parser.add_argument("--outline-blur", choices=("gauss2", "lens"), default="gauss2",
+                        help="outline_fit: the blur's family (two Gaussians, or a Gaussian times a circular pupil)")
+    parser.add_argument("--outline-rounds", type=int, default=14,
+                        help="outline_fit: most rounds of its fit (it stops earlier once the outline settles)")
     parser.add_argument("--half-level", type=float, default=0.5,
                         help="half_area: fraction of the peak height above the local level that bounds the region")
     parser.add_argument("--peak-pixels", type=float, default=4.0,
@@ -647,10 +731,15 @@ def main(argv=None) -> None:
     if not images:
         raise SystemExit(f"No .png images in {args.folder}")
     methods, notes = tuple(m for m in ALL_METHODS if m in args.methods), []
+    if args.outline_fit:
+        methods += OPTIONAL_METHODS
     output = args.output
     for sub in ("images", "data"):
         (output / sub).mkdir(parents=True, exist_ok=True)
     print(f"Backend: {describe_backend(args.backend)}", flush=True)
+    if args.outline_fit:
+        print("outline_fit: about 2.5-4.5 min per 2048 x 1378 image of 30-50k holes on the GPU, 25-70 min on the CPU",
+              flush=True)
     entries, rows, used = [], [], set()
     samples = {}  # per map layer: a sample of every image's CDs, for the shared colour range
     rng = np.random.default_rng(0)
@@ -669,6 +758,7 @@ def main(argv=None) -> None:
                 area_max=args.area_max, pixel_size=args.pixel_size, unit=args.unit, backend=args.backend,
                 half_area_level=args.half_level, half_area_peak_pixels=args.peak_pixels,
                 tail_area_level=args.tail_level, tail_window=args.tail_window,
+                outline_blur=args.outline_blur, outline_rounds=args.outline_rounds,
             )
         except Exception as error:  # one bad image must not stop the batch
             message = str(error).replace(str(path), path.name) or type(error).__name__
@@ -706,10 +796,17 @@ def main(argv=None) -> None:
                                            encoding="utf-8")
         if args.save_results:
             save_cd_results(result, output / "results" / ident, compact=True)
+        outline = outline_summary(result, args.unit)
         entries.append({"id": ident, "name": path.name, "holes": len(result.seeds_xy), "stats": stats,
                         "width": image.shape[1], "height": image.shape[0], "seconds": seconds,
                         "image": f"images/{ident}.png", "data": f"data/{ident}.js", "detail": detail, "tail": tail,
-                        "agreement": agreement(result), "intensity": intensity, "image_mean": image_mean})
+                        "agreement": agreement(result), "intensity": intensity, "image_mean": image_mean,
+                        "outline": outline})
+        if outline:
+            print(f"  outline fit: {outline_line(outline, ascii_only=True)}", flush=True)
+            note = outline_note(path.name, outline)
+            if note:
+                notes.append(note)
         for method, s in stats.items():
             rows.append({"image": path.name, "status": "ok", "method": method, "holes": len(result.seeds_xy), **s,
                          "unit": args.unit})
@@ -994,7 +1091,8 @@ function prepareDetail(D){if(D.ready)return;D.ox=unpack(D.ox,Int32Array);D.oy=un
   if(D.prof_x){D.prof_x=unpack(D.prof_x,Float32Array);D.prof_y=unpack(D.prof_y,Float32Array);}
   if(D.projection_level)D.projection_level=unpack(D.projection_level,Float32Array);
   if(D.local)prepareDetail(D.local);
-  for(const F of Object.values(D.half||{})){for(const k of ["level","peak","threshold","mean","cx","cy"])F[k]=unpack(F[k],Float32Array);F.rays=unpack(F.rays,Uint8Array);}D.ready=true;}
+  for(const F of Object.values(D.half||{})){for(const k of ["level","peak","threshold","mean","cx","cy"])F[k]=unpack(F[k],Float32Array);F.rays=unpack(F.rays,Uint8Array);}
+  if(D.outline){const O=D.outline;for(const k of ["cx","cy","cd_se_px","edge_offset_px","brightness","background","leftover_rms"])O[k]=unpack(O[k],Float32Array);O.rays=unpack(O.rays,Uint8Array);}D.ready=true;}
 function cellValues(D,part,i){const n=D.h*D.w,out=new Float32Array(n);for(let p=0;p<n;p++){const c=part.codes[i*n+p];out[p]=c===255?NaN:part.lo[i]+c*part.step[i];}return out;}
 function drawCell(id,D,vals,overlay,diverging){const cv=$(id),s=Math.max(6,Math.floor(170/Math.max(D.h,D.w)));cv.width=D.w*s;cv.height=D.h*s;
   const g=cv.getContext("2d");let [lo,hi]=extent(vals);const a=Math.max(Math.abs(lo),Math.abs(hi))||1;
@@ -1053,6 +1151,20 @@ function renderDetail(){const i=sel;if(i<0||!cur)return;const k=$("method").valu
       <tr><td>CD = 2 √(area / π)</td><td>${fin(cdv)?cdv.toFixed(3)+" px = "+(cdv*cur.scale).toFixed(2)+" "+cur.unit:"–"}</td></tr></table>
       <p class="meta">The outline is drawn from 32 directions around the region's centre, so it is approximate for very irregular shapes; the area itself is counted pixel by pixel on the enlarged cell.</p>`;
     $("detail").innerHTML=out;drawCell("dc-a",G,vals,poly);drawCell("dc-b",G,above,poly,true);return;}
+  if(base==="outline_fit"&&D.outline){const O=D.outline,vals=cellValues(D,D.clean,i),nr=O.n_rays,pts=[],hx=O.cx[i],hy=O.cy[i],sc=cur.scale,u=cur.unit;
+    for(let r=0;r<nr;r++){const a=2*Math.PI*r/nr,q=O.rays[i*nr+r]/16;pts.push([hx+q*Math.cos(a),hy+q*Math.sin(a)]);}
+    const poly=(g,s)=>{if(!fin(hx))return;g.strokeStyle=COLORS.outline_fit;g.beginPath();pts.forEach(([x,y],j)=>j?g.lineTo((x+.5)*s,(y+.5)*s):g.moveTo((x+.5)*s,(y+.5)*s));g.closePath();g.stroke();};
+    const f=(v,d,s=1,t="")=>fin(v)?(v*s).toFixed(d)+t:"–";
+    out+=`<h3>outline_fit</h3><p class="explain">The outline fit models the whole image: one sharp outline and one blur for the image, every hole at its own position, brightness, local level and edge offset, its neighbours' light included. This hole's outline is the image's outline moved by its edge offset along the normal (drawn from 32 directions around its centre); CD = diameter of a circle with that outline's area. Shown for orientation: the hole's cell with the background and the neighbours' Gaussian models removed (the outline fit itself was made on the original image).</p>
+      <div class="cells"><figure><canvas id="dc-a"></canvas>cell and the fitted outline</figure></div>
+      <table><tr><td>CD</td><td>${fin(cdv)?cdv.toFixed(3)+" px = "+(cdv*sc).toFixed(2)+" "+u:"–"}</td></tr>
+      <tr><td>its standard error (from the fit)</td><td>${f(O.cd_se_px[i],3,1," px")} = ${f(O.cd_se_px[i],2,sc," "+u)}</td></tr>
+      <tr><td>edge offset from the image's mean outline</td><td>${f(O.edge_offset_px[i],3,1," px")} = ${f(O.edge_offset_px[i],2,sc," "+u)}</td></tr>
+      <tr><td>brightness (clear-area light above the level)</td><td>${f(O.brightness[i],2)}</td></tr>
+      <tr><td>local level</td><td>${f(O.background[i],2)}</td></tr>
+      <tr><td>leftover rms in its window (data − model)</td><td>${f(O.leftover_rms[i],2)}</td></tr></table>
+      <p class="meta">This image: ${O.page}</p>`;
+    $("detail").innerHTML=out;drawCell("dc-a",D,vals,poly);return;}
   const vals=cellValues(D,D.clean,i);
   out+=`<h3>${k}</h3><p class="explain">The cell this method measured (background and neighbours removed; dark pixels are outside the cell), with its outline at the CD.</p><div class="cells"><figure><canvas id="dc-a"></canvas>cell and outline</figure></div>`;
   $("detail").innerHTML=out;drawCell("dc-a",D,vals,outline(cx,cy,cdv/2,cdv/2,COLORS[k]||"#e03b3b"));}

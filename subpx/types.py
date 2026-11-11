@@ -153,6 +153,54 @@ class CDMethodResult:
 
 
 @dataclass
+class OutlineFitResult:
+    """Outline fit of one page (``subpx.fit_outline``): one sharp outline and one blur for the page, every hole at
+    its own position, brightness, local level and edge offset (size).
+
+    Per hole, in the order of the seeds: ``centers_xy``; ``cd_px``, the area-equivalent diameter of the hole's own
+    outline (the page's outline moved ``edge_offset_px`` along its normal); ``cd_x_px`` / ``cd_y_px``, the x / y
+    diameters of the ellipse with that outline's area and x / y spread (as the area methods report theirs);
+    ``cd_se_px``, the CD's standard error from the fit; ``brightness`` (clear-area light above the level) and
+    ``level`` (the hole's local level, in the image's grey levels); ``rays_px`` (N, n), the outline's distance from
+    the centre at angles 2 pi j / n (x right, y down); ``at_clip`` (edge offset at the fit's bound: no reading),
+    ``good`` (the holes the outline and blur were fitted on) and ``rms`` (each hole's leftover).
+
+    Per page: ``outline_cd_px``; ``blur_fwhm_px`` (x, y); ``per_hole_size`` (False: the holes are too small for
+    their own size at the page's noise, and every hole was given the page's size); ``converged`` (the stopping rule
+    was met within ``rounds``); ``summary`` (outline, blur and fit readings, JSON-ready); ``theta`` (the model's
+    parameters) and ``blur`` (its family); ``template`` and ``stack`` (the fitted hole and the neighbour-cleaned
+    average hole on the fine grid, ``upsample`` bins per pixel). Lengths are in pixels; ``pixel_size`` converts
+    them to ``unit``.
+    """
+
+    centers_xy: np.ndarray
+    cd_px: np.ndarray
+    cd_x_px: np.ndarray
+    cd_y_px: np.ndarray
+    cd_se_px: np.ndarray
+    edge_offset_px: np.ndarray
+    brightness: np.ndarray
+    level: np.ndarray
+    rays_px: np.ndarray
+    at_clip: np.ndarray
+    good: np.ndarray
+    rms: np.ndarray
+    outline_cd_px: float
+    blur_fwhm_px: tuple[float, float]
+    per_hole_size: bool
+    converged: bool
+    rounds: int
+    blur: str
+    theta: np.ndarray
+    template: np.ndarray
+    stack: np.ndarray
+    upsample: int
+    summary: dict[str, Any] = field(default_factory=dict)
+    pixel_size: float = 1.0
+    unit: str = "px"
+
+
+@dataclass
 class CDSummary:
     """Numerical per-hole measurements without image, label maps or cell statistics.
 
