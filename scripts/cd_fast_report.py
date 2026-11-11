@@ -193,7 +193,7 @@ def main(argv=None):
     print(f"CD report: {len(images)} PNGs; {len(ORIGINAL_METHODS)} original + {len(FAST_METHODS)} fast methods"
           f"{' + outline_fit' if args.outline_fit else ''}; {backend.upper()} device {args.device}.", flush=True)
     if args.outline_fit:
-        print("outline_fit: about 2.5-4.5 min per 2048 x 1378 image of 30-50k holes on the GPU, 25-70 min on the CPU",
+        print("outline_fit: about 1.5-4.5 min per 2048 x 1378 image of 30-50k holes on the GPU, 25-70 min on the CPU",
               flush=True)
     notes = []
     started = time.perf_counter()

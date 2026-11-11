@@ -402,6 +402,7 @@ radial methods still measure the real profile.
 | `logquad` | Half-height ellipse of a fitted 2D Gaussian above local background | Principal-axis sigma and FWHM, orientation, fit residual, ellipse area |
 | `gradient` | Connected subpixel maxima of the outward radial intensity decrease | Measured edge polygon, area, horizontal/vertical extent, ray coverage |
 | `halfmax` | First outward crossing of half the interpolated central signal above background along each ray | Measured half-height polygon, area, horizontal/vertical extent, ray coverage |
+| `outline_fit` | One sharp outline and one blur fitted to the whole page; each hole's outline is the page's moved by its own edge offset ([outline_fit.md](outline_fit.md); `--outline-fit` in both folder reports) | Outline polygon, area-equivalent CD, x/y widths, CD standard error, edge offset, brightness, level, leftover RMS; page outline, blur and convergence in `meta["outline_fit"]` |
 
 For `logquad`, fit `log(I - background)` to a quadratic with an `xy` term.
 Only pixels above `fit_fraction=0.2` of the measured peak enter the fit, and

@@ -281,6 +281,19 @@ The hole inspector's crops and profile:
 - **Area methods:** compare the saved outline with the input and the reported
   threshold/local level. Wide-window methods store only the center of their
   measurement window for display; this is labelled.
+- **Outline fit:** the hole's raw pixels (the fit models the whole page, not a
+  cleaned cell) with the fitted outline over them; *Metrics* adds the CD's
+  standard error, the edge offset, the hole's brightness and level, and the
+  leftover RMS.
+
+**Outline fit** (group *Page fit*) fits one sharp outline and one blur to the
+whole page, every hole at its own position, brightness, level and edge offset
+([outline_fit.md](outline_fit.md)). Its settings, **Blur** (two Gaussians or a
+Gaussian times a circular pupil) and **Most rounds**, are under *Parameters of
+the ticked methods*. It needs the neighbour-model background. A full page takes
+minutes on the GPU: try a region first (220 holes: about 30 s on the CPU). The
+log gets its page line (outline CD, blur, rounds, converged, per-hole size) and
+a warning when it did not converge or gave every hole the page's size.
 
 Method definitions differ. A Gaussian FWHM, a gradient edge, a thresholded area
 and a calibrated hole diameter should not be expected to have identical CDs.

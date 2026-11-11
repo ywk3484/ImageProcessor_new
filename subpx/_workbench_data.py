@@ -294,6 +294,8 @@ def cd_options(parameters):
     """The ``measure_cds`` keyword arguments of the workbench's settings (Measure CD and Measure all pages)."""
     options = {key: parameters[key] for key in CD_KEYS if key != "deblend_tolerance"}
     options["deblend_tolerance"] = parameters.get("deblend_tolerance", 1e-3)  # measure_cds's default
+    options.update(outline_blur=parameters.get("outline_blur", "gauss2"),
+                   outline_rounds=parameters.get("outline_rounds", 14))  # measure_cds's defaults
     return options
 
 
@@ -334,6 +336,18 @@ def analyze_image(image, parameters, *, operation="cd", bounds=None):
         review.cd = measure_cds(image, **cd_options(parameters))
         if review.cd.meta.get("deblend_converged") is False:
             review.warnings.append("Gaussian deblending reached its iteration limit. Inspect fit residuals and statuses.")
+        fit = review.cd.meta.get("outline_fit")
+        if fit:
+            from .outline import fit_line, fit_summary
+
+            review.notes.append("Outline fit: " + fit_line(fit_summary(fit, parameters["pixel_size"],
+                                                                        parameters["unit"])))
+            if fit.get("fitted") and not fit["converged"]:
+                review.warnings.append(f"Outline fit did not converge in {fit['rounds_run']} rounds: its CDs are "
+                                       "not final. Raise Most rounds.")
+            if fit.get("fitted") and not fit["per_hole_size"]:
+                review.warnings.append("Outline fit: holes too small for a size each at this noise; every hole reads "
+                                       "the page CD (status 'page_size').")
         for name, measured in review.cd.measurements.items():
             statuses, counts = np.unique(measured.status[~measured.valid], return_counts=True)
             if len(statuses):
@@ -510,14 +524,16 @@ def feature_input(result, method, index):
         elif method in ("tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio"):
             description = "Stored model-shared window center (display crop of the full measurement input)"
         return data, mask, description
-    if method.startswith("local_"):
+    if method.startswith("local_") or method == "outline_fit":
         ox, oy = result.origins_xy[index]
         yy, xx = np.indices(mask.shape)
         data = result.image[np.clip(yy + oy, 0, result.image.shape[0] - 1),
                             np.clip(xx + ox, 0, result.image.shape[1] - 1)].astype(float)
         if result.meta.get("invert"):
             data *= -1
-        return np.where(mask, data, 0), mask, "Raw Voronoi cell (polarity normalized)"
+        description = ("Raw page in the hole's cell (polarity normalized); the outline fit models the whole page"
+                       if method == "outline_fit" else "Raw Voronoi cell (polarity normalized)")
+        return np.where(mask, data, 0), mask, description
     context_methods = ("tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
     description = "Cleaned cell" if result.meta.get("background") == "model" else "Border-filled cell"
     if method in context_methods:

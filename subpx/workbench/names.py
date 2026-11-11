@@ -29,7 +29,7 @@ METHOD_NAMES = {
     "local_projection": "Raw-cell projection", "local_half_area": "Raw-cell half area",
     "local_half_area_min_avg": "Raw-cell half area, min level, avg peak", "local_tail_area": "Raw-cell tail area",
     "pixel_half_area": "Pixel half area", "pixel_half_area_min_avg": "Pixel half area, min level, avg peak",
-    "pixel_tail_area": "Pixel tail area", "detection": "Previewed holes",
+    "pixel_tail_area": "Pixel tail area", "outline_fit": "Outline fit", "detection": "Previewed holes",
     # Pitch only: centers of the same holes found by the GPU center finders
     **{f"gpu_{key}": f"GPU {word} centers" for key, word in GPU_CENTER_FINDERS.items()},
 }
@@ -41,6 +41,7 @@ METHOD_GROUPS = (
     ("Area methods", ("half_area", "half_area_min", "half_area_min_avg", "tail_area", "tail_area_norm",
                       "edge_area", "foot_area", "foot_area_ratio")),
     ("Raw-cell methods", ("local_projection", "local_half_area", "local_half_area_min_avg", "local_tail_area")),
+    ("Page fit (minutes per full page on the GPU)", ("outline_fit",)),
     ("Calibrated (need a nominal CD or PSF)", ("disk", "flux_ratio")),
 )
 METHOD_HELP = {
@@ -51,6 +52,7 @@ METHOD_HELP = {
     "projection": "Summed x/y profiles of the cleaned cell. Width is the distance between the steepest rising and falling slopes of a zero-padded cubic spline.",
     "local_projection": "Summed x/y profiles of the raw Voronoi cell after subtracting its median edge level. Width is the distance between the steepest rise and fall. Neighbours are not subtracted.",
     "disk": "A round hole convolved with an imaging blur, fitted with free brightness and background. Requires a known PSF FWHM or nominal CD. Its diameter has a different definition from spot FWHM.",
+    "outline_fit": "The whole page is fitted with one sharp outline (any star-convex shape) convolved with one blur, both shared by every hole; each hole has its own position, brightness, level and edge offset. CD = equivalent diameter of the outline moved by the hole's edge offset, so focus moves the blur, not the CD. Inspect the page line in the log (converged, per-hole size, blur), the standard error and the leftover RMS. The crop is raw page pixels: the fit models the page, not this cell. See docs/outline_fit.md.",
     "flux_ratio": "Hole light divided by its own fitted background minus detector dark level. Requires a nominal CD or PSF calibration. A calibration derived per image should not be used to compare image means.",
 }
 AREA_HELP = ("The peak-connected region above the method's threshold is measured on a 4x cubic enlargement. "
@@ -75,11 +77,16 @@ STATUS_TEXT = {
     "fit_failed": "Fit failed",
     "fit_diverged": "Fit diverged",
     "center_outside_cell": "Center outside its cell",
+    "edge_offset_at_clip": "Edge offset at the fit's bound",
+    "page_size": "Page CD (per-hole size off at this noise)",
+    "too_few_holes": "Too few holes for a page fit",
+    "not_finite": "Fit gave no finite value",
 }
 METRIC_TEXT = {
     "cd_equivalent": "Equivalent CD", "cd_x": "CD x", "cd_y": "CD y", "area": "Area", "perimeter": "Perimeter",
     "peak_signal": "Peak signal", "fit_rmse": "Fit RMSE", "log_fit_rmse": "Log fit RMSE", "threshold": "Threshold",
     "cell_area": "Cell area", "mean_original_intensity": "Mean intensity (original pixels)",
+    "cd_se": "CD standard error", "edge_offset": "Edge offset", "leftover_rms": "Leftover RMS",
 }
 
 

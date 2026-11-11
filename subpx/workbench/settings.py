@@ -16,7 +16,7 @@ STEP_KEYS = {
     "holes": ("seeds", "threshold", "area_min", "area_max", "pad", "refine", "bounds"),
     "cd": ("methods", "background", "n_angles", "radial_step", "smooth_sigma", "fit_fraction", "half_area_level",
            "half_area_peak_pixels", "tail_area_level", "tail_window", "deblend_iterations", "deblend_tolerance",
-           "nominal_cd", "psf_fwhm", "dark_level"),
+           "nominal_cd", "psf_fwhm", "dark_level", "outline_blur", "outline_rounds"),
     "pitch": ("pitch_source", "reference_selected", "pitch_options", "pitch_finders"),
 }
 # The settings each kind of result was made with (pitch also depends on the result it was made from).
@@ -42,13 +42,15 @@ LABELS = {
     "reference_selected": "reference at selected hole", "layout": "lattice", "stagger_axis": "stagger direction",
     "average_rows": "average rows", "average_columns": "average columns", "nominal_pitch_xy": "design pitch",
     "pitch_hint_xy": "pitch hints", "preprocess": "preprocessing", "pitch_finders": "GPU centers",
+    "outline_blur": "outline blur", "outline_rounds": "outline rounds",
 }
 VALUE_TEXT = {"otsu": "Otsu", "triangle": "Triangle", "threshold": "separate", "peaks": "touching", "auto": "Auto",
               "gpu": "GPU", "cpu": "CPU", "model": "neighbour model", "border": "cell border", "cd": "CD",
               "detection": "previewed holes", "square": "square", "staggered": "staggered", "row": "rows",
               "column": "columns", "logquad": "log fit", "weighted": "weighted", "edge_gradmoment": "edge gradient",
               "none": "none", "edge_erf": "edge erf", "radial_symmetry": "radial symmetry",
-              "isophote_curvature": "isophote curvature"}
+              "isophote_curvature": "isophote curvature", "gauss2": "two Gaussians",
+              "lens": "Gaussian x pupil"}
 
 
 def _text(value):
@@ -171,6 +173,9 @@ def run_problems(parameters, *, loaded=None, results=None, moving=None):
     elif not cd and selected & CALIBRATED_METHODS and not (parameters.get("nominal_cd") or parameters.get("psf_fwhm")):
         cd = ", ".join(method_name(m) for m in sorted(selected & CALIBRATED_METHODS)) + " needs a nominal CD or PSF FWHM."
         invalid |= {"nominal_cd", "psf_fwhm"}
+    elif not cd and "outline_fit" in selected and parameters.get("background", "model") != "model":
+        cd = "Outline fit needs the Gaussian neighbour model background."
+        invalid |= {"background"}
     pitch = ""
     source = parameters.get("pitch_source", "cd")
     if source == "cd" and (results is None or results.cd is None):

@@ -106,6 +106,19 @@ def test_every_page_measured_as_measure_cd_and_cd_batch(pages, tmp_path):
     assert manifest["counts"] == {"ok": 3, "no_holes": 1, "failed": 0} and manifest["compute"]["backend"] == "cpu"
 
 
+def test_outline_fit_pages_equal_measure_cd(pages, tmp_path):
+    path, images = pages
+    settings = parameters(methods=("half_area", "outline_fit"), outline_rounds=2)
+    run = run_pages(path, [0], settings, tmp_path / "out", reference=None, reference_page=0)
+    assert run.state == "done" and run.counts["ok"] == 1
+    review, _ = direct(images[0], settings)
+    measured = review.cd.measurements["outline_fit"]
+    assert review.cd.meta["outline_fit"]["fitted"] and measured.valid.any()
+    cds = measured.metrics["cd_equivalent_px"][measured.valid] * 2.5
+    assert run.rows[0]["outline_fit_valid"] == len(cds)
+    assert run.rows[0]["outline_fit_cd"] == pytest.approx(np.mean(cds), rel=1e-12)
+
+
 def test_region_preprocessing_and_failed_pages(pages, tmp_path):
     path, images = pages
     # a region that fits the large pages only: the small page fails, the others are measured in the region

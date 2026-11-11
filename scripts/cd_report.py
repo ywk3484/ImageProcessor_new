@@ -72,6 +72,7 @@ if str(ROOT) not in sys.path:
 
 from subpx import measure_cds, save_cd_results
 from subpx.cd import METHOD_LABELS
+from subpx.outline import fit_line, fit_summary
 
 ALL_METHODS = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area",
                "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
@@ -146,8 +147,8 @@ def cd_statistics(result) -> dict[str, dict]:
         for suffix, metric, _ in AXES:
             spread = _spread(measured.metrics[metric][measured.valid] * result.pixel_size)
             stats[name].update({key + suffix: value for key, value in spread.items()})
-    fit = result.meta.get("outline_fit") or {}
-    if "outline_fit" in stats and fit.get("fitted") and not fit.get("per_hole_size"):
+    fit = (result.meta.get("outline_fit") or {}) if "outline_fit" in stats else {}  # only results with the method
+    if fit.get("fitted") and not fit.get("per_hole_size"):
         # every hole was given the image's outline (too small for a size each at this noise): the mean is a reading,
         # the spread is not one
         for suffix, _, _ in AXES:
@@ -157,34 +158,10 @@ def cd_statistics(result) -> dict[str, dict]:
 
 def outline_summary(result, unit: str) -> dict | None:
     """The outline fit's page readings in ``unit`` (None without the method), for the console and the image tab."""
-    fit = result.meta.get("outline_fit")
-    if not fit:
-        return None
-    if not fit.get("fitted"):
-        return {"fitted": False, "reason": fit.get("reason", "")}
-    scale = float(result.pixel_size)
-    return {"fitted": True, "outline_cd": fit["outline_cd_px"] * scale,
-            "blur_fwhm": [v * scale for v in fit["blur_fwhm_px"]], "p": fit["superellipse_p"],
-            "rounds": fit["rounds_run"], "rounds_max": fit["rounds_max"], "converged": fit["converged"],
-            "per_hole_size": fit["per_hole_size"], "blur_family": fit["blur_family"], "seconds": fit["seconds"],
-            "holes_fitted": fit["holes_fitted"], "at_clip": fit["at_clip"], "unit": unit}
+    return fit_summary(result.meta.get("outline_fit"), float(result.pixel_size), unit)
 
 
-def outline_line(summary: dict | None, ascii_only: bool = False) -> str:
-    """One line on the outline fit of an image (``ascii_only`` for the console)."""
-    if not summary:
-        return ""
-    if not summary["fitted"]:
-        return f"not fitted ({summary['reason']})"
-    u, x = summary["unit"], "x" if ascii_only else "×"
-    state = (f"converged after {summary['rounds']} rounds" if summary["converged"]
-             else f"NOT converged in {summary['rounds']} rounds (the outline was still moving)")
-    size = ("a size per hole" if summary["per_hole_size"]
-            else "per-hole size off: holes too small for a size each at this noise, every hole reads the image's CD")
-    return (f"outline CD {summary['outline_cd']:.2f} {u}, blur FWHM {summary['blur_fwhm'][0]:.1f} {x} "
-            f"{summary['blur_fwhm'][1]:.1f} {u} ({summary['blur_family']}), exponent p {summary['p']:.2f}; {state}; "
-            f"{size}; {summary['holes_fitted']:,} holes fitted, {summary['at_clip']} at the edge-offset bound; "
-            f"{summary['seconds']:.0f} s")
+outline_line = fit_line  # one line on the outline fit of an image (``ascii_only`` for the console)
 
 
 def layer_values(result) -> dict[str, np.ndarray]:
@@ -738,7 +715,7 @@ def main(argv=None) -> None:
         (output / sub).mkdir(parents=True, exist_ok=True)
     print(f"Backend: {describe_backend(args.backend)}", flush=True)
     if args.outline_fit:
-        print("outline_fit: about 2.5-4.5 min per 2048 x 1378 image of 30-50k holes on the GPU, 25-70 min on the CPU",
+        print("outline_fit: about 1.5-4.5 min per 2048 x 1378 image of 30-50k holes on the GPU, 25-70 min on the CPU",
               flush=True)
     entries, rows, used = [], [], set()
     samples = {}  # per map layer: a sample of every image's CDs, for the shared colour range

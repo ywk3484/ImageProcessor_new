@@ -39,6 +39,7 @@ PARAMETER_CONTROLS = dict(
     smooth_sigma="smooth_sigma", fit_fraction="fit_fraction", half_area_level="half_level",
     half_area_peak_pixels="peak_pixels", tail_area_level="tail_level", tail_window="tail_window",
     deblend_iterations="iterations", deblend_tolerance="tolerance", dark_level="dark_level",
+    outline_blur="outline_blur", outline_rounds="outline_rounds",
     pixel_size="pixel_size", unit="unit", backend="backend", nominal_cd="nominal_cd", psf_fwhm="psf_fwhm",
     pitch_source="pitch_source", reference_selected="reference_selected",
 )
@@ -326,6 +327,13 @@ class SetupPanel(QtWidgets.QWidget):
         self.tolerance.setToolTip("Deblending stops when the fit changes less than this per round "
                                   "(or at the iteration limit); the batch's --deblend-tolerance")
         self.dark_level = self._number("dark_level", 0, -1e9, 1e9, decimals=3)
+        self.outline_blur = self._combo("outline_blur", [("Two Gaussians", "gauss2"),
+                                                         ("Gaussian x circular pupil", "lens")])
+        self.outline_blur.setToolTip("The blur's family, fitted per page (the batch's --outline-blur)")
+        self.outline_rounds = self._number("outline_rounds", 14, 1, 100)
+        self.outline_rounds.setToolTip("Most rounds of the page fit; it stops earlier once the outline settles "
+                                       "(the batch's --outline-rounds). A full 2048 x 1378 page takes 1.5-4.5 min "
+                                       "on the GPU, 15-20 x longer on the CPU: try a region first.")
         self.nominal_cd = self._number("nominal_cd", 0, 0, 1e9, decimals=4, special="Not specified")
         self.psf_fwhm = self._number("psf_fwhm", 0, 0, 1e9, decimals=4, special="Not specified")
         self.calibration = QtWidgets.QGroupBox("Calibration (length unit)")
@@ -346,6 +354,7 @@ class SetupPanel(QtWidgets.QWidget):
             ("Wide measurement window", [("Window (pitch)", self.tail_window)],
              {"tail_area", "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio"}),
             ("Detector calibration", [("Dark level", self.dark_level)], {"flux_ratio"}),
+            ("Outline fit", [("Blur", self.outline_blur), ("Most rounds", self.outline_rounds)], {"outline_fit"}),
         ]
         parameters = QtWidgets.QWidget()
         parameter_layout = QtWidgets.QVBoxLayout(parameters)
@@ -597,6 +606,7 @@ class SetupPanel(QtWidgets.QWidget):
             half_area_peak_pixels=self.peak_pixels.value(), tail_area_level=self.tail_level.value(),
             tail_window=self.tail_window.value(), deblend_iterations=self.iterations.value(),
             deblend_tolerance=self.tolerance.value(),
+            outline_blur=self.outline_blur.currentData(), outline_rounds=self.outline_rounds.value(),
             nominal_cd=self.nominal_cd.value() or None, psf_fwhm=self.psf_fwhm.value() or None,
             dark_level=self.dark_level.value(), pitch_source=self.pitch_source.currentData(),
             reference_selected=self.reference_selected.isChecked(),

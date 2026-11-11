@@ -297,6 +297,37 @@ def test_local_and_wide_method_visuals_use_their_own_inputs(window):
     assert widget.inspector.input_canvas.image_item.image.size
 
 
+def test_outline_fit_is_ticked_set_and_run_from_setup(window):
+    from subpx.workbench.settings import run_problems
+
+    widget, app = window
+    setup = widget.setup
+    box = next(box for box, names in setup.method_groups if names == {"outline_fit"})
+    setup.method_checks["outline_fit"].setChecked(True)
+    app.processEvents()
+    assert not box.isHidden()  # its settings appear with the tick
+    setup.outline_rounds.setValue(2)
+    parameters = widget.session.current_parameters()
+    assert parameters["outline_rounds"] == 2 and parameters["outline_blur"] == "gauss2"
+    problems, invalid = run_problems(dict(parameters, background="border"), loaded=widget.loaded)
+    assert "Outline fit needs" in problems["cd"] and invalid == {"background"}
+    logs = []
+    widget.session.log.connect(logs.append)
+    run(widget, app, "cd")
+    review = widget.session.review
+    measured = review.measurements["outline_fit"]
+    assert review.parameters["outline_rounds"] == 2 and measured.valid.any()
+    assert any(text.startswith("Outline fit: outline CD") for text in logs)
+    assert any("did not converge in 2 rounds" in text for text in logs)
+    widget.measure.method.setCurrentIndex(widget.measure.method.findData("outline_fit"))
+    widget.select_feature(int(np.flatnonzero(measured.valid)[0]))
+    app.processEvents()
+    assert "outline fit models the whole page" in widget.inspector.crop_title.text()
+    assert "outline_fit" in widget.inspector.input_canvas.overlays  # its fitted outline over the raw pixels
+    setup.outline_blur.setCurrentIndex(setup.outline_blur.findData("lens"))
+    assert "outline blur two Gaussians -> Gaussian x pupil" in widget.stale_label.text()
+
+
 def test_tiff_page_navigation_moving_page_and_export(window, tmp_path, monkeypatch):
     widget, app = window
     image = widget.loaded.image
@@ -583,7 +614,7 @@ def test_defaults_are_the_batch_defaults(window, tmp_path):
                 "half_area_peak_pixels", "tail_area_level", "tail_window", "deblend_iterations", "deblend_tolerance"):
         assert parameters[key] == batch[key], key
     library = inspect.signature(measure_cds).parameters  # the batch leaves these at measure_cds's defaults
-    for key in ("threshold", "pad", "background"):
+    for key in ("threshold", "pad", "background", "outline_blur", "outline_rounds"):
         assert parameters[key] == library[key].default, key
     assert parameters["backend"] == "auto"
     assert widget.setup.recipe.findData("hole") < 0  # no calibrated preset: disk and flux_ratio need a nominal CD

@@ -147,10 +147,12 @@ def test_gpu_fit_matches_the_cpu_fit(page):
     cpu = fit_outline(page.image, seeds, rounds=4, backend="cpu")
     gpu = fit_outline(page.image, seeds, rounds=4, backend="gpu")
     assert isinstance(gpu.cd_px, np.ndarray)
-    # The GPU's sums use atomic adds (their order varies from run to run): after 4 rounds the fits differ by up to
-    # 2e-5 px (seen), after 13 by 2e-4 px in CD (0.004 nm at 21 nm pixels). The limit is ten times the 4-round spread.
-    assert gpu.outline_cd_px == pytest.approx(cpu.outline_cd_px, abs=2e-4)
-    np.testing.assert_allclose(gpu.cd_px, cpu.cd_px, atol=2e-4)
+    # The GPU's sums use atomic adds (their order varies from run to run; CPU runs repeat exactly). Over 6 GPU runs
+    # of 4 rounds the hole CDs fell in two groups, about 1e-5 px and about 3e-4 px from the CPU's (at most 3.7e-4 px
+    # apart, 0.008 nm at 21 nm pixels), the centres within 7e-5 px, the outline CD within 2e-5 px. The limits are
+    # about three times that.
+    assert gpu.outline_cd_px == pytest.approx(cpu.outline_cd_px, abs=1e-4)
+    np.testing.assert_allclose(gpu.cd_px, cpu.cd_px, atol=1e-3)
     np.testing.assert_allclose(gpu.centers_xy, cpu.centers_xy, atol=2e-4)
 
 

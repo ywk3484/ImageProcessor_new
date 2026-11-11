@@ -55,7 +55,7 @@ def fit_outline(
     n_rays : int
         Directions of the outline returned per hole (``rays_px``), at least 16.
     backend : {'auto', 'cpu', 'gpu'}
-        The GPU (CuPy) runs the same code 10-15 times faster: about 2.5-4.5 min for a 2048 x 1378 page of 30-50k holes
+        The GPU (CuPy) runs the same code 10-15 times faster: about 1.5-4.5 min for a 2048 x 1378 page of 30-50k holes
         on an RTX 4060 Ti, against 25-70 min on the CPU.
     log : callable, optional
         Called with one line of text per round.
@@ -293,3 +293,35 @@ def measure_outline(image, seeds_xy, rows, origins_xy, *, pixel_size, unit, blur
     fit = fit_outline(image, seeds_xy, pixel_size=pixel_size, unit=unit, blur=blur, rounds=rounds, invert=invert,
                       n_rays=n_rays, backend=backend, device=device)
     return outline_measurement(fit, rows, origins_xy), {"fitted": True, **fit.summary}
+
+
+def fit_summary(fit_meta: dict | None, pixel_size: float = 1.0, unit: str = "px") -> dict | None:
+    """The page readings of ``measure_cds``' ``meta["outline_fit"]`` in ``unit`` (None without the method)."""
+    if not fit_meta:
+        return None
+    if not fit_meta.get("fitted"):
+        return {"fitted": False, "reason": fit_meta.get("reason", "")}
+    scale = float(pixel_size)
+    return {"fitted": True, "outline_cd": fit_meta["outline_cd_px"] * scale,
+            "blur_fwhm": [v * scale for v in fit_meta["blur_fwhm_px"]], "p": fit_meta["superellipse_p"],
+            "rounds": fit_meta["rounds_run"], "rounds_max": fit_meta["rounds_max"], "converged": fit_meta["converged"],
+            "per_hole_size": fit_meta["per_hole_size"], "blur_family": fit_meta["blur_family"],
+            "seconds": fit_meta["seconds"], "holes_fitted": fit_meta["holes_fitted"], "at_clip": fit_meta["at_clip"],
+            "unit": unit}
+
+
+def fit_line(summary: dict | None, ascii_only: bool = False) -> str:
+    """One line on a page's outline fit from ``fit_summary`` (``ascii_only`` for a console)."""
+    if not summary:
+        return ""
+    if not summary["fitted"]:
+        return f"not fitted ({summary['reason']})"
+    u, x = summary["unit"], "x" if ascii_only else "×"
+    state = (f"converged after {summary['rounds']} rounds" if summary["converged"]
+             else f"NOT converged in {summary['rounds']} rounds (the outline was still moving)")
+    size = ("a size per hole" if summary["per_hole_size"]
+            else "per-hole size off: holes too small for a size each at this noise, every hole reads the image's CD")
+    return (f"outline CD {summary['outline_cd']:.2f} {u}, blur FWHM {summary['blur_fwhm'][0]:.1f} {x} "
+            f"{summary['blur_fwhm'][1]:.1f} {u} ({summary['blur_family']}), exponent p {summary['p']:.2f}; {state}; "
+            f"{size}; {summary['holes_fitted']:,} holes fitted, {summary['at_clip']} at the edge-offset bound; "
+            f"{summary['seconds']:.0f} s")
