@@ -163,8 +163,34 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       the post-lecture "never computes a spectrum", part 8 down to four lines). Animations: play / pause, step,
       scrub, autoplay in view, off under prefers-reduced-motion. Page 1.7 MB
 
-# Context cleanup (2026-11-04, done)
+# Outline fit in the library, the folder report and the workbench (2026-11-11)
 
-- [x] lessons.md cut from 268 lines of incident stories to ~70 lines of general rules; CLAUDE.md now limits new
-      lessons to short, general rules
-- [x] Dropped learned-template plan moved to the archive; Claude's memory trimmed, and stale or wrong notes fixed
+User: "Add the outline fit method in the calculation pipeline: the report pipeline (all images in a folder, the 3
+sigma values) and the workbench (test it manually on my images)."
+
+Design: `outline_fit` becomes a `measure_cds` method beside the others (nothing removed or renamed), so the report,
+the fast report, the workbench's method ticks, its Measure-all-pages run (and cd_batch, untouched) all accept it and
+read it like any other method. It runs after the deblend on the final seed list (every modelled hole, frame-cut ones
+included, so their light is in the page model) and reports the same interior holes as the other methods.
+
+- [ ] Port the prototype (artifacts/outline_fit/model.py, fit.py; git-ignored) into `subpx/_outline/` unchanged in
+      its numerics: one NumPy/CuPy code path (`xp`); the stopping thresholds 0.08 / 0.3 nm become 0.08 / 0.3 nm at
+      21 nm pixels expressed in px, so `pixel_size=1, unit=px` stops where the prototype does. Per-hole CD from the
+      model's own outline: area(delta) = A0 + perimeter x delta + Q delta^2, exact for the radial offset model
+      (the prototype used it only for < 2000 holes and pi in place of Q above that)
+- [ ] `subpx.fit_outline(image, seeds_xy, ...)` (public, dataclass result) and the `CDMethodResult` adapter: centre,
+      CD, x / y width through the centre, per-hole CD standard error, brightness, level; the per-hole outline as
+      rays (map / workbench contours); page fit (outline CD, blur FWHM, exponent, rounds, converged, seconds) in
+      `meta["outline_fit"]`. Valid = reported hole, edge offset below the clip, finite. When the per-hole size is
+      switched off (holes too small for their own size at the page's noise), every hole reads the page CD and the
+      within-image sigma is reported as not measured (never 0)
+- [ ] measure_cds: `outline_fit` in METHOD_LABELS, options `outline_blur` ("gauss2" | "lens"), `outline_rounds`
+- [ ] Reports: `--outline-fit` in scripts/cd_report.py and scripts/cd_fast_report.py (adds the method to the chosen
+      ones; within- and between-image 3 sigma, CSVs, map layer, outlines, hole panel with the fit's numbers); time per
+      image printed (GPU about 2.5-4.5 min per 2048 x 1378 page, CPU about 25-70 min)
+- [ ] Workbench: "Outline fit" tick (own group, help text, the two options, stale-result keys); inspector branch
+      (raw window, fitted outline, per-hole and page-fit numbers)
+- [ ] Checks: port parity with the prototype on one page (same seeds, CPU); synthetic accuracy (page CD vs truth,
+      per-hole slope); report end-to-end on a folder of synthetic PNGs (3 sigma rows, page in the browser);
+      workbench offscreen; one full-size page on the GPU for the time per image; full test suite
+- [ ] Docs: docs/outline_fit.md, docs/workbench.md; commit and push
