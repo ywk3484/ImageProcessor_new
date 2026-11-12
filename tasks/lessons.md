@@ -10,9 +10,11 @@ General rules from past corrections, one or two lines each. Incident details are
   been tried; never re-propose, in a new form, a method the user found failing on real data.
 - Before building a method, list what its core premise needs from the data (what varies together, over what
   distance, how the instrument forms the image) and check each against what is known about the equipment; where
-  that is silent, research or ask. A synthetic test with the premise built in cannot show it false.
-- Do not assume shapes, layouts, noise levels or other properties the user has not stated. Label each assumed value,
-  and pick it so it does not hide the differences the user asked about.
+  that is silent, research or ask. A test with the premise built in (a synthetic page, or the one real file at
+  hand) cannot show it false.
+- Do not assume shapes, layouts, noise levels, what the pages or images of a dataset have in common, or other
+  properties the user has not stated. Label each assumed value, and pick it so it does not hide the differences
+  the user asked about.
 - Before replacing what the user suspects is the error source, measure that it is (oracle test: give the method the
   true value of the suspect and see how much error goes away).
 - When the user proposes a test that is cheap to run, run it and report the numbers; keep counter-theory to a line.

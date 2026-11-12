@@ -227,14 +227,22 @@ unless said; numbers and logs in `artifacts/outline_fit/speed/README.txt`, part 
   pages in two runs differ by up to 0.016 nm (from scratch 0.04-0.06)
 - K pages inside one GPU problem: hole stage 36 ms per page and sweep (60 for a page alone in chunks of 2000);
   float32 template arithmetic 22 ms; template renders as a GPU batch 0.03 ms each (1.6 ms on the CPU)
-Proposal, after steps 1-3:
+CORRECTION (user, 2026-11-12, after my answer): the pages of an image do NOT show the same pattern: "I never said
+that my 1500 pages took the same area. They all have different patterns for each page." I had assumed they did,
+from the one real file here, whose hole pages all carry round holes of about 100 nm (39,042 or 37,842 per page): a
+test with the premise built in. The reference start is withdrawn for the user's data, with every estimate built on
+it (0.3-0.5 s and 0.1 s per page on the remote); its measurements above stand only for pages of one pattern.
+Proposal, after steps 1-3 (every page fitted on its own, from scratch; nothing shared between pages):
 - [ ] 5. `outline_fit` as a cd_batch method: one job per GPU fitting several pages at once, shape fits on a pool of
-      CPU processes, seeds from the threshold pass (no deblend), reference start per image (reference = the image's
-      first hole page fitted from scratch, or a saved fit given on the command line so that datasets share it).
-      This PC: 1.9 s per page (104 today). Remote, 4 GPUs: 0.3-0.5 s per page estimated, not measured there: a
-      1,500-page image in 8-12 min, a stripe of 4 in 30-50 min
+      CPU processes, seeds from the threshold pass (no deblend). This PC: 5.4 s per page with 10 pages at once
+      (104 today). Remote, 4 GPUs: 1-1.5 s per page estimated, not measured there: a 1,500-page image in 25-40 min,
+      a stripe of 4 in 1.7-2.7 h
 - [ ] 6. if more is needed: the pages inside the GPU routines (one launch for a chunk of every page of the batch,
-      templates and noise lines per page). From the measured parts about 1 s per page here and 0.1 s on the remote
-      if it has ~20 free CPU cores: an image in 2.5 min, a stripe in 10 min, 900 stripes in about 6 days
-Unknown: the remote's CPU cores, its GPUs' speed against the 4060 Ti (3 x assumed), the share of hole pages.
-For the user to decide: the reference start (it ties every page of an image to the reference's level).
+      templates and noise lines per page). From the measured parts 2.3 s of GPU work per page here; on the remote
+      0.2-0.3 s per page if ~25 CPU cores are free for the shape fits (5.1 core-seconds per page) or the shape fit
+      runs on the GPU as well: an image in 5-8 min, a stripe in 20-30 min, 900 stripes in 12-19 days
+Unknown: the remote's CPU cores, its GPUs' speed against the 4060 Ti (3 x assumed), the share of hole pages, and
+what the user's other patterns cost: every timing here is for pages of ~39,000 round holes of ~100 nm.
+Asked: what differs from page to page (size, shape, pitch), a TIFF with that variety to test on, the remote's CPU
+threads. Whether anything is common to the pages of an image (the tool's blur, say) is not to be assumed: to be
+checked on such a file.
