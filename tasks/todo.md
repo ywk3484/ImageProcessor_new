@@ -163,86 +163,27 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       the post-lecture "never computes a spectrum", part 8 down to four lines). Animations: play / pause, step,
       scrub, autoplay in view, off under prefers-reduced-motion. Page 1.7 MB
 
-# Outline fit: speed (2026-11-12; proposal only, nothing built)
+# Outline fit: speed and batch (2026-11-12; proposal only, nothing built, waiting for the user)
 
-User: the outline fit "seems to work pretty well and I would like to test this on my real data. However, its
-extremely slow. Diagnose why this method takes so long ... Do not change any code at the moment and just make a
-proposal."
+Everything is in `docs/outline_fit_speed.md`: where the time goes, each proposed change with its prototype code and
+measured result, what was rejected or withdrawn, the limits of the evidence, the open questions. Scratch scripts
+and logs: `artifacts/outline_fit/speed/` (local, git-ignored). The first versions of this section, with the
+measurements written out, are in commits 860c98b, dc40ea8 and 35bdad6.
 
-Measured with the unchanged library on real pages of stripe1_board1.tif (2048 x 1378, 39,042 holes), RTX 4060 Ti
-idle, float64, gauss2 (scripts, logs and every number: `artifacts/outline_fit/speed/README.txt`): 104 s for page 0
-(10 rounds, 43 hole sweeps), 133-154 s for page 24 (13-14 rounds), 255 s with the lens family, 330 s for a
-raw-image-sized picture (5408 x 2048, 117k holes), 30 s for a 285-hole region on the CPU. Where the 104 s go:
-- hole stage 68 s: 58 s of it is `cubic_sample` (reading the templates at every window pixel), run as 17,000
-  separate GPU operations per sweep that create 82 GB of temporary arrays per sweep for a 22 MB page: the GPU is
-  96 % busy moving memory. The 5 x 5 solves take 0.3 s, the far-field FFT 1.0 s
-- shape stage 27 s on one CPU core: 4,000 template renders at 6.6 ms, 5.1 ms of each recomputing the outline's
-  coverage on all 768 x 768 sub-samples although only the ring on the edge (under 1 % of the pixels) is not 0 or 1
-- the same sampler in the stack, start and size check 5 s; far kernels' FFT on the CPU 2.4 s; noise line 1.1 s
-
-Proposal (same model, procedure and stop rule; each step prototyped and run end to end on page 0):
-- [ ] 1. Hole stage on the GPU as two fused kernels (per hole: sample the templates and sum the normal equations;
-      per pixel: old light out, new light in), the sampler as one kernel for its other callers; the NumPy path stays
-      as it is (the reference). One sweep 1.29 -> 0.062 s, every parameter equal to 1e-12; page 104 -> 42 s
-- [ ] 2. Template render with the same values bit for bit: coverage sub-sampled only in the ring the edge can
-      reach, outline spectrum / blur transfer function remembered between renders. Render 6.6 -> 1.6 ms, shape
-      stage 27.8 -> 5.4 s with identical fitted parameters; page -> 15 s; the CPU region 30 -> 9 s, same result
-- [ ] 3. Far kernels' FFT and the noise line on the device (GPU only). Page -> 10 s
-- [ ] Tests (one sweep kernel against NumPy, render new against old, GPU against CPU fit), the times in
-      docs/outline_fit.md, cd.py and the report scripts' hint, pages 0 / 24 and two stress pages rerun for the numbers
-Result of 1-3 in the prototype: page 0 104 -> 10.3 s, page 24 133 -> 14 s, lens 255 -> 36 s, the 117k-hole picture
-330 -> 27 s. Outline CD within 0.005 nm, per-hole CD 0.004-0.008 nm rms: what two runs of today's code differ by on
-page 0 (0.009 nm rms). 400 pages: 12-17 h -> 1.1-1.6 h on this GPU, plus the other methods' 8-11 s per image.
-- [ ] 4. (optional) half-spectrum FFT in the render: page 0 10.3 -> 7.9 s, lens 36 -> 17 s. Values equal to 1e-15,
-      but on page 24 the fit then lands on blur 63.3 / 62.3 instead of 62.6 / 63.2 nm (page CD -0.015 nm, per-hole
-      0.09 nm rms; the lens family did not move): for the lens family only, or not at all
-Rejected after measuring: the outline fit continued from the current template without its grid of starts (no time
-gained, page CD -0.05 nm); threads for the renders (5.4 -> 4.0 s); float32 (no gain once fused); one chunk per
-colour (another sweep order). Not in the proposal: the CPU backend's hole stage (a full page stays tens of minutes;
-a kernel there needs a compiled dependency); fewer rounds by starting from the previous page's outline and blur
-(ties pages together, not measured).
-Found on the way, not a speed matter and not caused by the proposal (cause not isolated): two runs of today's code
-on page 24 give page CD 100.72 (converged in 13 rounds) and 100.83 nm (round limit reached, flagged NOT converged);
-on the 285-hole CPU region a change in the 13th decimal moves the outline CD by 0.26 nm (both runs converged).
-
-## Batch (2026-11-12, the user's reply; proposal only)
-
-User: 10 s per page "may not be enough": an image is one TIFF of up to 1,500 pages, a stripe at least 4 images,
-~900 stripes per dataset (not that many for now). "Is there a way to batch process this method?" Remote: 4 x RTX
-6000 Ada 48 GB. Measured on this PC (RTX 4060 Ti, 6 cores) on real pages with the prototype of steps 1-3 (gauss2
-unless said; numbers and logs in `artifacts/outline_fit/speed/README.txt`, part "Batch"):
-- several worker processes per GPU (what cd_batch does today): 1 / 2 / 3 / 4 / 6 workers -> 10.8 / 7.3 / 6.1 / 5.4 /
-  5.1 s per page. Twice the throughput at best: not the way
-- reference start (a page started from another page's fitted outline and blur, every stage released, same stop
-  rule): 2.2 rounds and 14 hole sweeps instead of 10.6 and 42, 3.7 s per page instead of 11.1 (8 pages). Page CD
-  against the from-scratch fit: sd 0.024, largest 0.037 nm (two from-scratch runs: sd 0.016, largest 0.046 nm).
-  Taking page 24 instead of page 0 as the reference moves all 8 pages together by +0.029 nm (sd 0.012), and a stop
-  tolerance of 0.02 nm does not change that. Lens family: from-scratch fits repeat exactly, the two references are
-  0.130 nm apart (sd 0.002 over the pages); pages 0 and 24 are 0.20 nm apart from scratch, 0.07 with either reference
-- why: left running, a fit keeps drifting after the stop rule has ended it. Lens, page 24 from page 0's fit:
-  +0.004 nm per round through round 16 with a flat chi2. gauss2, page 0 from page 24's fit: 100.64-100.67 from
-  round 2 to 16; from scratch it stopped at 100.59 with proposals still at +0.03 to +0.06 nm
-- one GPU job with the pages on threads (one CUDA context) and the shape fits in 5 CPU processes: from scratch
-  5.4 s per page with 10 pages at once, reference start 1.9 s per page (10 GB of GPU memory for 10 pages); the same
-  pages in two runs differ by up to 0.016 nm (from scratch 0.04-0.06)
-- K pages inside one GPU problem: hole stage 36 ms per page and sweep (60 for a page alone in chunks of 2000);
-  float32 template arithmetic 22 ms; template renders as a GPU batch 0.03 ms each (1.6 ms on the CPU)
-CORRECTION (user, 2026-11-12, after my answer): the pages of an image do NOT show the same pattern: "I never said
-that my 1500 pages took the same area. They all have different patterns for each page." I had assumed they did,
-from the one real file here, whose hole pages all carry round holes of about 100 nm (39,042 or 37,842 per page): a
-test with the premise built in. The reference start is withdrawn for the user's data, with every estimate built on
-it (0.3-0.5 s and 0.1 s per page on the remote); its measurements above stand only for pages of one pattern.
-Proposal, after steps 1-3 (every page fitted on its own, from scratch; nothing shared between pages):
-- [ ] 5. `outline_fit` as a cd_batch method: one job per GPU fitting several pages at once, shape fits on a pool of
-      CPU processes, seeds from the threshold pass (no deblend). This PC: 5.4 s per page with 10 pages at once
-      (104 today). Remote, 4 GPUs: 1-1.5 s per page estimated, not measured there: a 1,500-page image in 25-40 min,
-      a stripe of 4 in 1.7-2.7 h
-- [ ] 6. if more is needed: the pages inside the GPU routines (one launch for a chunk of every page of the batch,
-      templates and noise lines per page). From the measured parts 2.3 s of GPU work per page here; on the remote
-      0.2-0.3 s per page if ~25 CPU cores are free for the shape fits (5.1 core-seconds per page) or the shape fit
-      runs on the GPU as well: an image in 5-8 min, a stripe in 20-30 min, 900 stripes in 12-19 days
-Unknown: the remote's CPU cores, its GPUs' speed against the 4060 Ti (3 x assumed), the share of hole pages, and
-what the user's other patterns cost: every timing here is for pages of ~39,000 round holes of ~100 nm.
-Asked: what differs from page to page (size, shape, pitch), a TIFF with that variety to test on, the remote's CPU
-threads. Whether anything is common to the pages of an image (the tool's blur, say) is not to be assumed: to be
-checked on such a file.
+Today: 104-150 s per page on the RTX 4060 Ti = 2-2.5 days per 1,500-page image (one TIFF = one image; every page a
+different pattern; a stripe = 4+ images; ~900 stripes per dataset; remote 4 x RTX 6000 Ada).
+- [ ] 1. hole stage as fused GPU kernels (the sampler kernel first): page 0 104 -> 42 s, numbers equal to 1e-12
+      per sweep
+- [ ] 2. template render with the same values bit for bit: -> 15 s; a 285-hole region on the CPU 30 -> 9 s
+- [ ] 3. far kernels' FFT and the noise line on the device (GPU only): -> 10 s
+- [ ] 4. (optional) half-spectrum FFT render: -> 8 s, lens 36 -> 17 s; it moved one gauss2 page by 0.015 nm
+- [ ] tests, the texts that state times, the numbers rechecked (the doc's part 10)
+- [ ] 5. batch: `outline_fit` as a cd_batch method, one job per GPU fitting several pages at once, every page
+      from scratch: 5.4 s per page here with 10 at once; remote estimated 1-1.5 s per page with 4 GPUs
+- [ ] 6. batch, if more is needed: the pages inside the GPU routines; remote estimated 0.2-0.3 s per page
+Withdrawn: the reference start (a page started from another page's fit). It assumed that the pages of an image
+share a pattern; the user: "They all have different patterns for each page." Not to be proposed again.
+Asked, not answered: build 1-3?; what differs from page to page and whether a page holds one pattern; a TIFF
+with that variety to test on; the remote's CPU threads (`$env:NUMBER_OF_PROCESSORS`).
+Found on the way (the doc's part 6): the fit keeps drifting after the stop rule has ended it; gauss2 runs differ
+on the GPU by up to 0.05-0.1 nm in a page's CD on some pages; lens repeats exactly.
