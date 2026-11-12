@@ -43,8 +43,8 @@ General rules from past corrections, one or two lines each. Incident details are
 - Profile before naming a bottleneck or its cause: time each stage; for a library call, time a plain read, then
   each step of the call, and read its source. "The GPU is busy" is not "the GPU is used well": compare bytes moved
   with the data size, float64 use, idle share and number of launches.
-- Give the whole-dataset time first (pages x seconds per page / GPUs), as a range that names the deciding unknown,
-  and explain every outlier before reporting.
+- Give the time for the user's own units of work first (their image, stripe and dataset, not a page: pages x
+  seconds per page / GPUs), as a range that names the deciding unknown, and explain every outlier before reporting.
 
 ## Reporting
 - A method page's physics section is written as lecture notes: say first which data object every quantity refers
