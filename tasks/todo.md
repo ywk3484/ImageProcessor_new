@@ -99,32 +99,10 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       build. Real page 0: outline CD 100.6 (gauss2) / 100.5 (lens), blur 63 / 63, p 2.00 / 2.05, per-hole robust
       sd 2.6 nm, leftover 7.32 against noise sd 7.7, stack chi2 0.96; the two families agree to 0.1 nm; Gaussian
       fit 96.1, edge area 122.0, half area 92.6 on the same holes (corr with outline 0.83 / 0.81 / 0.41)
-- [x] Outline fit in the learned-hole report's format (user, Nov 5 afternoon: "add the results for the new method
-      in the report.html format so that I can visually diagnose what is going on"). Plan: (1) run the outline fit
-      on the report's seven remaining pages and the three two-exposure pages on the GPU (runs/driver.py gpu=1
-      only=centers_,two_ resume=1 status=driver7; run_synth.py gained read_noise=); (2) make_report3.py in
-      artifacts/learned_hole_prototype on top of make_report2: "Outline fit" as a method (group new) on every page it
-      ran on, scored by the report's evaluate() from the saved centers, in the explorer, matrix, best table (own
-      column) and floor chart (own marker); a section on top with, per page, the page piece, the fit's model rebuilt
-      from the saved fit, the leftover at 4 sigma, the fitted outline over the true one and the fitted hole profile
-      over the true hole's, plus the pitch table (existing -> learned -> outline) and a CD table on the four stress
-      pages; (3) report.html rewritten (v2 kept as report_v2.html), layout checked in the browser.
-      DONE 2026-11-05 ~17:40. Queue driver7: 10 pages on the GPU in 1559 s (60-312 s each). Report: outline fit on
-      18 of 18 pages (13 report pages, 2 stress, 3 two-exposure), 18 picture rows, pitch and CD tables, floor chart
-      mark, best-table column, explorer default. Found by the pictures: (a) 300 nm squares at the 24 px template
-      box read blur 89 nm for 65, centres 1.5 x the bound with a 0.22 nm pixel-position error (the hole's light
-      reaches 11 px, the box rendered 10): fit.py now doubles the template box when the hole's light reaches past
-      it; rerun reads blur 65.1, centres 0.18 nm against the 0.17 bound, CD -0.2 nm, 2 columns (was 4), at 2.7 x
-      the time (runs/centers_square300_square_t24.* kept); the 250 nm circles grow too and are unchanged. (b) The
-      60 nm dense page was never a reading: the fit walks the size-blur valley round after round (CD 72 -> 62 nm,
-      blur 46 -> 61 over 14 rounds, still moving 5 nm a round when the rounds ran out); with two exposures the walk
-      goes further and the last shape proposal jumps to CD 31 nm with 74 % of the holes at the edge-offset clip.
-      Both said on the page (status per page: read right 9, size-blur 3, walking or ran away 2, boxy 4). Columns
-      needed against the best existing method: fewer on 0 pages, as many on 14, more on 4 (the dense ones); step
-      0.99-1.03 on the 9 pages read right. Method page (outline_fit.html): centers table extended to the 13 pages,
-      template-growth finding in the open item. Still open: the dense and elongated degeneracies (blur prior from a
-      round-hole page), the alternation's stopping rule on a degenerate page (it should stop and say so, not walk)
-- [ ] Real page 0 (and several pages): residual vs noise, fitted blur, CD distribution; page-mean CD across the hole
+- [x] Outline fit in the learned-hole report's format (18 of 18 pages; the findings and numbers are in
+      `tasks/archive/todo-2026-11.md`, moved 2026-11-12)
+- [ ] Page 0 of the test file (and several pages; `stripe1_board1.tif` is a generated file, not a real page:
+      found 2026-11-12): residual vs noise, fitted blur, CD distribution; page-mean CD across the hole
       pages against the Gaussian fit's
 - [ ] HTML page (problem, idea, flow, each step with why, payoff, is it general, checks on own images); review here;
       proposal for the library (new methods beside the existing ones)
@@ -163,27 +141,42 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       the post-lecture "never computes a spectrum", part 8 down to four lines). Animations: play / pause, step,
       scrub, autoplay in view, off under prefers-reduced-motion. Page 1.7 MB
 
-# Outline fit: speed and batch (2026-11-12; proposal only, nothing built, waiting for the user)
+# Outline fit: speed and batch, first proposal (2026-11-12; superseded for the batch by the section below)
 
-Everything is in `docs/outline_fit_speed.md`: where the time goes, each proposed change with its prototype code and
-measured result, what was rejected or withdrawn, the limits of the evidence, the open questions. Scratch scripts
-and logs: `artifacts/outline_fit/speed/` (local, git-ignored). The first versions of this section, with the
-measurements written out, are in commits 860c98b, dc40ea8 and 35bdad6.
+`docs/outline_fit_speed.md`: the existing fit's time split and steps that make its passes cheaper while keeping its
+10-14 rounds (104 -> 10 s per page measured; prototype in `artifacts/outline_fit/speed/`). Not built. Steps 1-3 are
+still what would make the existing `outline_fit` itself faster (workbench, small regions, CPU); the batch needs the
+one-pass method below. Its "reference start" stays withdrawn. Its "real pages" are pages of the generated test file.
 
-Today: 104-150 s per page on the RTX 4060 Ti = 2-2.5 days per 1,500-page image (one TIFF = one image; every page a
-different pattern; a stripe = 4+ images; ~900 stripes per dataset; remote 4 x RTX 6000 Ada).
-- [ ] 1. hole stage as fused GPU kernels (the sampler kernel first): page 0 104 -> 42 s, numbers equal to 1e-12
-      per sweep
-- [ ] 2. template render with the same values bit for bit: -> 15 s; a 285-hole region on the CPU 30 -> 9 s
-- [ ] 3. far kernels' FFT and the noise line on the device (GPU only): -> 10 s
-- [ ] 4. (optional) half-spectrum FFT render: -> 8 s, lens 36 -> 17 s; it moved one gauss2 page by 0.015 nm
-- [ ] tests, the texts that state times, the numbers rechecked (the doc's part 10)
-- [ ] 5. batch: `outline_fit` as a cd_batch method, one job per GPU fitting several pages at once, every page
-      from scratch: 5.4 s per page here with 10 at once; remote estimated 1-1.5 s per page with 4 GPUs
-- [ ] 6. batch, if more is needed: the pages inside the GPU routines; remote estimated 0.2-0.3 s per page
-Withdrawn: the reference start (a page started from another page's fit). It assumed that the pages of an image
-share a pattern; the user: "They all have different patterns for each page." Not to be proposed again.
-Asked, not answered: build 1-3?; what differs from page to page and whether a page holds one pattern; a TIFF
-with that variety to test on; the remote's CPU threads (`$env:NUMBER_OF_PROCESSORS`).
-Found on the way (the doc's part 6): the fit keeps drifting after the stop rule has ended it; gauss2 runs differ
-on the GPU by up to 0.05-0.1 nm in a page's CD on some pages; lens repeats exactly.
+# Outline fit in one pass: the batch at reading speed (2026-11-12; proposal with a measured prototype, nothing built)
+
+User (2026-11-12): one TIFF = up to 1,500 pages, 2-4 GB, thousands of them; the pattern areas are picked by PCC against
+a reference page cut into tiles (partial pages count); reading a TIFF takes about 1 minute and the fit must take less;
+one page at a time only at hundreds of ms per page; some accuracy may be given up if it cannot be avoided.
+
+Page for the user: `docs/outline_fit_one_pass.html`. Builder's notes (method, settings, findings, build order):
+`docs/outline_fit_one_pass.md`. Prototype and every run: `artifacts/outline_fit/fast/` (local; `README.txt`).
+
+- [x] Method: the page's average hole with the neighbours' light left in and modelled (one map of "who stands where"
+      per sub-pixel class), outline + blur by one direct least-squares fit; two centring passes of the hole stage;
+      average + fit again; optionally three size passes. No rounds. Same model, parameters and CD definition.
+- [x] Time (prototype, this PC's RTX 4060 Ti, 40 hole pages of the test file, 20 pages per call): 80 ms per page for
+      the page values, 137 ms with a size per hole = 2.0 / 3.4 min per 1,500-page image on one GPU; / 4 = 30 / 51 s
+      on four such GPUs (not measured; the remote's are faster). Existing fit: 104-150 s per page.
+- [x] Accuracy on 20 generated pages with known sizes, both fits: page mean closer to the truth than the existing
+      fit on 15 of the 17 pages of 80 nm and up, equal within 0.01 nm on 2 (lens: +0.01 / -0.23 / +0.09 / +0.12 /
+      +0.14 / -0.13 / 0.00 nm; existing -0.20 / -0.23 / +0.79 / +0.19 / +0.14 / -2.01 / -0.11); per-hole response
+      0.99-1.03; dense small holes wrong in both. Test file: +0.105 +- 0.018 nm from the existing fit, per hole
+      0.05 nm rms apart; repeats to 0.0002 nm.
+- [x] Proposal page, notes, checks (pages without the pattern, part of a page, repeats, load).
+- [ ] The user's answers: (1) page values only or a size per hole; (2) what the hole check hands over per page
+      (kept tiles?) and whether a kept tile always holds the reference's pattern; (3) where the minute of reading is
+      measured, and the remote's CPU threads; (4) build it?
+- [ ] Build (notes section 8): `outline_fit_fast` beside `outline_fit` (library, tests with the truth pages), the
+      batch (area per page, one process per GPU, 20 pages per call), one command for the remote that fits real
+      pages with both methods and prints five numbers.
+
+Review (2026-11-12): the target is met on this PC's numbers with four GPUs no faster than this one. Not shown: any
+real page (`stripe1_board1.tif` is generated: exact 8.5 px lattice, +-0.3 px uniform shifts; none is on this PC),
+the remote, four GPUs at once. Not in the prototype: area input, dark holes, the per-hole-size switch-off, x / y
+widths per hole. The fit does not recognise pages without the pattern (the hole check stays in front).

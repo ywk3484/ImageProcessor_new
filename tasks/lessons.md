@@ -37,6 +37,8 @@ General rules from past corrections, one or two lines each. Incident details are
 - A test limit met only by buggy code encodes the bug: after a fix, recompute the quantity with the old code at
   another size before changing the limit, and report the change rather than just relaxing it.
 - Keep stored or displayed data at the precision the method used wherever the method is sensitive to it.
+- Check where a test file comes from (the script that made it, an exact lattice, its metadata) before calling a
+  result real-data; name generated data as generated wherever its numbers are quoted.
 
 ## Speed and I/O
 - Measure under the user's conditions: real file size, real disk, cold cache, pages that behave like real data
@@ -47,6 +49,8 @@ General rules from past corrections, one or two lines each. Incident details are
   with the data size, float64 use, idle share and number of launches.
 - Give the time for the user's own units of work first (their image, stripe and dataset, not a page: pages x
   seconds per page / GPUs), as a range that names the deciding unknown, and explain every outlier before reporting.
+- Turn the user's target into a budget per unit of work first and hold the approach's best case against it. When an
+  iteration cannot meet it, find what makes it iterate and put that into the model; cheaper passes are not enough.
 
 ## Reporting
 - A method page's physics section is written as lecture notes: say first which data object every quantity refers

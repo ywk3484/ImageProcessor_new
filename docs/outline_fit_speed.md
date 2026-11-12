@@ -1,5 +1,13 @@
 # Outline fit: speed-up proposal (not built)
 
+> **Superseded for the batch, 2026-11-12 (later the same day).** The user's target is a 1,500-page image fitted in
+> less than the minute it takes to read it. Cheaper passes of the same 10-14 rounds (this file) do not reach that;
+> the plan for the batch is now `docs/outline_fit_one_pass.html` (page for the user) and
+> `docs/outline_fit_one_pass.md` (builder's notes). This file's measurements of the existing fit still stand, and
+> steps 1 to 3 remain the way to make the existing `outline_fit` itself faster.
+> **Correction:** the test file used here, `stripe1_board1.tif`, is generated (an exact 8.5 px lattice with a
+> uniform +-0.3 px shift per hole), not a real ACTIS page. Wherever this file says "real", read "the test file".
+
 **Status, 2026-11-12.** Nothing in `subpx/` has been changed. This is a proposal with measurements; the user
 has not decided. Everything was measured with scratch prototypes patched into the unchanged library at run
 time. The prototypes live in `artifacts/outline_fit/speed/` (git-ignored, on the development PC only; its
