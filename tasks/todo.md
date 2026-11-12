@@ -204,3 +204,37 @@ a kernel there needs a compiled dependency); fewer rounds by starting from the p
 Found on the way, not a speed matter and not caused by the proposal (cause not isolated): two runs of today's code
 on page 24 give page CD 100.72 (converged in 13 rounds) and 100.83 nm (round limit reached, flagged NOT converged);
 on the 285-hole CPU region a change in the 13th decimal moves the outline CD by 0.26 nm (both runs converged).
+
+## Batch (2026-11-12, the user's reply; proposal only)
+
+User: 10 s per page "may not be enough": an image is one TIFF of up to 1,500 pages, a stripe at least 4 images,
+~900 stripes per dataset (not that many for now). "Is there a way to batch process this method?" Remote: 4 x RTX
+6000 Ada 48 GB. Measured on this PC (RTX 4060 Ti, 6 cores) on real pages with the prototype of steps 1-3 (gauss2
+unless said; numbers and logs in `artifacts/outline_fit/speed/README.txt`, part "Batch"):
+- several worker processes per GPU (what cd_batch does today): 1 / 2 / 3 / 4 / 6 workers -> 10.8 / 7.3 / 6.1 / 5.4 /
+  5.1 s per page. Twice the throughput at best: not the way
+- reference start (a page started from another page's fitted outline and blur, every stage released, same stop
+  rule): 2.2 rounds and 14 hole sweeps instead of 10.6 and 42, 3.7 s per page instead of 11.1 (8 pages). Page CD
+  against the from-scratch fit: sd 0.024, largest 0.037 nm (two from-scratch runs: sd 0.016, largest 0.046 nm).
+  Taking page 24 instead of page 0 as the reference moves all 8 pages together by +0.029 nm (sd 0.012), and a stop
+  tolerance of 0.02 nm does not change that. Lens family: from-scratch fits repeat exactly, the two references are
+  0.130 nm apart (sd 0.002 over the pages); pages 0 and 24 are 0.20 nm apart from scratch, 0.07 with either reference
+- why: left running, a fit keeps drifting after the stop rule has ended it. Lens, page 24 from page 0's fit:
+  +0.004 nm per round through round 16 with a flat chi2. gauss2, page 0 from page 24's fit: 100.64-100.67 from
+  round 2 to 16; from scratch it stopped at 100.59 with proposals still at +0.03 to +0.06 nm
+- one GPU job with the pages on threads (one CUDA context) and the shape fits in 5 CPU processes: from scratch
+  5.4 s per page with 10 pages at once, reference start 1.9 s per page (10 GB of GPU memory for 10 pages); the same
+  pages in two runs differ by up to 0.016 nm (from scratch 0.04-0.06)
+- K pages inside one GPU problem: hole stage 36 ms per page and sweep (60 for a page alone in chunks of 2000);
+  float32 template arithmetic 22 ms; template renders as a GPU batch 0.03 ms each (1.6 ms on the CPU)
+Proposal, after steps 1-3:
+- [ ] 5. `outline_fit` as a cd_batch method: one job per GPU fitting several pages at once, shape fits on a pool of
+      CPU processes, seeds from the threshold pass (no deblend), reference start per image (reference = the image's
+      first hole page fitted from scratch, or a saved fit given on the command line so that datasets share it).
+      This PC: 1.9 s per page (104 today). Remote, 4 GPUs: 0.3-0.5 s per page estimated, not measured there: a
+      1,500-page image in 8-12 min, a stripe of 4 in 30-50 min
+- [ ] 6. if more is needed: the pages inside the GPU routines (one launch for a chunk of every page of the batch,
+      templates and noise lines per page). From the measured parts about 1 s per page here and 0.1 s on the remote
+      if it has ~20 free CPU cores: an image in 2.5 min, a stripe in 10 min, 900 stripes in about 6 days
+Unknown: the remote's CPU cores, its GPUs' speed against the 4060 Ti (3 x assumed), the share of hole pages.
+For the user to decide: the reference start (it ties every page of an image to the reference's level).
