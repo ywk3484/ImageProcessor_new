@@ -180,3 +180,18 @@ Review (2026-11-12): the target is met on this PC's numbers with four GPUs no fa
 real page (`stripe1_board1.tif` is generated: exact 8.5 px lattice, +-0.3 px uniform shifts; none is on this PC),
 the remote, four GPUs at once. Not in the prototype: area input, dark holes, the per-hole-size switch-off, x / y
 widths per hole. The fit does not recognise pages without the pattern (the hole check stays in front).
+
+Decision (user, 2026-11-12, later): build it beside `outline_fit`, in the folder reports first, page mean only, in a
+fresh session. Answers: page mean for now (a size per hole only once the method is proven); the minute of reading is
+measured on the remote; the remote has 64 CPU threads; the remote picks pattern areas by PCC of page tiles against
+reference tiles, (N, m) valid indices. **Handoff: `docs/outline_fit_fast_handoff.md`** (scope, port table, exact
+wiring points, tests with the prototype's numbers, pitfalls). Prototype code is tracked under
+`artifacts/outline_fit/fast/`.
+- [ ] Phase 1 (handoff section 5): library `fit_outline_fast` + `measure_cds` method `outline_fit_fast` (GPU, page
+      values), `--outline-fit-fast` in `cd_report.py` and `cd_fast_report.py` with one comparison line, tests, docs
+- [ ] Give the user the one remote command; they type back the comparison line (real images, both methods)
+- [ ] Phase 2 after the user's verdict: TIFF batch, areas (tiles or per-hole selection: handoff section 8)
+- [ ] Ask: are the real test images PNGs in a folder; does a kept tile always hold only the reference's pattern
+Found late: a pitch of a whole number of pixels broke the first fit (fixed in the prototype); gauss2 depends on the
+start at 0.1 nm on some pages, lens does not (notes 6.12-6.14).
+

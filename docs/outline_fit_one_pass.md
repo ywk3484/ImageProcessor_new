@@ -1,13 +1,15 @@
 # Outline fit in one pass: builder's notes
 
-**Status, 2026-11-12.** Proposal with a measured scratch prototype. Nothing in `subpx/` has been changed and the user
-has not decided. The page for the user is `docs/outline_fit_one_pass.html` (what it is, the numbers, the limits, the
-four open questions). This file holds what a session needs to build it: the exact method, the settings, what was
-tried and dropped, the build order and the checks. It replaces `docs/outline_fit_speed.md` as the plan for the batch;
-that file's measurements of the existing fit still stand.
+**Status, 2026-11-12.** A measured scratch prototype; nothing in `subpx/` has been changed. The user approved
+building it as a new method beside `outline_fit`, first in the folder reports and with page values only; **what to
+build and how to check it is in `docs/outline_fit_fast_handoff.md`**. This file is the reference behind that
+handoff: the exact method, the settings, every measurement, what was tried and dropped. The page the user read is
+`docs/outline_fit_one_pass.html`. It replaces `docs/outline_fit_speed.md` as the plan for the batch; that file's
+measurements of the existing fit still stand.
 
-The prototype is in `artifacts/outline_fit/fast/` (git-ignored, on the development PC only); its `README.txt` lists
-every script and command.
+The prototype is in `artifacts/outline_fit/fast/` (its method and measurement scripts are tracked in git although
+`artifacts/` is ignored; the run results are on the development PC only); its `README.txt` lists every script and
+command.
 
 ## 1. The task, in the user's words (2026-11-12)
 
@@ -83,9 +85,10 @@ class fills; the outermost bins are filled by part of a class and are left out).
   Gauss-Newton matrix per page in one download): gain-ratio damping; bounds as an active set (a parameter that the
   step would carry past a bound is put on it and the others are solved again; clipping a solved step broke the
   fit); weak Gaussian priors on what a page may leave undetermined (section 6.3).
-- Stages as in the library. First fit: grid of starts (15 sizes x 12 blur widths, compared on the bins of one
-  class), `round` (at most 10 iterations), `super` (12), `ftol 1e-6`. Final fit: `full` from the first fit's
-  result, at most 30 iterations, `ftol 1e-7`.
+- Stages as in the library. First fit: a first guess of the size from the stack's second moment, the grid of
+  starts round it (15 sizes x 12 blur widths, compared on the bins of the page's most populated class), `round`
+  (at most 10 iterations), `super` (12), `ftol 1e-6`. Final fit: `full` from the first fit's result, at most 30
+  iterations, `ftol 1e-7`.
 
 ### 3.3 The procedure
 
@@ -138,7 +141,7 @@ The 40 hole pages of the test file (39,042 or 37,842 holes each), 20 pages per c
 | Existing fit, library | 104,000 to 150,000 | 2 to 2.5 days | |
 | Existing fit, same-numbers prototype of the earlier proposal | 11,043 (9,400 to 14,700) | 4.6 h | |
 
-By phase, ms per page: A stack 11.7, A page fit 11.2, B hole pass + stack 42.0, C page fit 11.8, D hole pass 54.2.
+By phase, ms per page: A stack 11.2, A page fit 11.6, B hole pass + stack 42.6, C page fit 12.3, D hole pass 53.1.
 Inside them: upload 0.5, seeds 3.9, spacing 1.0, stacks 7.4, pair maps 6.2, both page fits 15.4 at 20 pages per call, templates 12.3, hole-pass set-up 11.9, five sweeps 60.3, noise line 1.3, results 2.4.
 One sweep (39,042 holes, window 15 x 15 px, render 23 x 23 px): `hole_normal` 6.3 ms, `render_scatter` 4.5 ms, `hole_update` 0.5 ms.
 Pages per call 4 / 10 / 20 / 40: 111 / 89 / 80 / 87 ms (page values), 164 / 144 / 136 / 134 ms (with sizes).
@@ -151,9 +154,9 @@ Remote estimate on the page (19 to 30 s and 30 to 51 s per image): lower end = G
 
 | Page | Blur form | One pass: error | response | scatter | light | Existing: error | response | scatter | light |
 |---|---|---|---|---|---|---|---|---|---|
-| 100 nm circles, square array | gauss2 | -0.135 | 1.036 | 1.22 | +0.141 | -0.476 | 1.055 | 1.21 | +0.192 |
+| 100 nm circles, square array | gauss2 | -0.137 | 1.037 | 1.22 | +0.142 | -0.476 | 1.055 | 1.21 | +0.192 |
 | 100 nm circles, square array | lens | +0.014 | 1.002 | 1.24 | -0.018 | -0.198 | 1.008 | 1.24 | +0.001 |
-| 80 nm circles, square array | gauss2 | -0.737 | 1.124 | 1.86 | +0.357 | -1.028 * | 1.083 | 1.92 | +0.198 |
+| 80 nm circles, square array | gauss2 | -0.820 | 1.029 | 2.00 | -0.029 | -1.028 * | 1.083 | 1.92 | +0.198 |
 | 80 nm circles, square array | lens | -0.231 | 1.023 | 1.98 | +0.018 | -0.228 | 1.024 | 1.97 | +0.068 |
 | 100 nm circles, staggered | lens | +0.087 | 1.003 | 1.30 | -0.015 | +0.789 * | 0.979 | 1.26 | +0.050 |
 | 150 nm squares, staggered | gauss2 | +0.112 | 1.015 | 0.60 | +0.106 | +0.207 * | 1.008 | 0.61 | +0.191 |
@@ -164,9 +167,9 @@ Remote estimate on the page (19 to 30 s and 30 to 51 s per image): lower end = G
 | 100 nm circles, square array (blur 58 nm) | lens | +0.033 | 1.003 | 1.02 | -0.001 | -0.075 | 1.001 | 1.01 | -0.005 |
 | 100 nm circles, square array (blur 72 nm) | lens | -0.115 | 1.025 | 1.49 | +0.080 | -0.327 | 1.029 | 1.48 | +0.087 |
 | 100 nm circles, square array (blur 58 nm) | gauss2 | +0.003 | 1.010 | 1.01 | +0.036 | | | | |
-| 100 nm circles, square array (blur 72 nm) | gauss2 | -0.294 | 1.062 | 1.45 | +0.238 | | | | |
-| 80 nm circles, square array (blur 58 nm) | lens | -0.064 | 1.002 | 1.55 | +0.023 | | | | |
-| 80 nm circles, square array (blur 72 nm) | lens | -0.085 | 1.026 | 2.54 | +0.067 | | | | |
+| 100 nm circles, square array (blur 72 nm) | gauss2 | -0.164 | 1.052 | 1.46 | +0.212 | | | | |
+| 80 nm circles, square array (blur 58 nm) | lens | -0.063 | 1.002 | 1.55 | +0.023 | | | | |
+| 80 nm circles, square array (blur 72 nm) | lens | -0.087 | 1.022 | 2.55 | +0.056 | | | | |
 | 100 nm circles, square array (grid turned 3 deg) | lens | +0.014 | 1.006 | 1.24 | -0.015 | -0.217 | 1.011 | 1.24 | +0.001 |
 | 100 nm circles, square array (holes on 40 % of the page) | lens | +0.006 | 1.003 | 1.24 | -0.022 | -0.231 | 1.011 | 1.23 | +0.004 |
 | 100 nm circles, square array (brightness wave +-10 %) | lens | +0.008 | 1.005 | 1.37 | -0.014 | -0.190 | 1.011 | 1.36 | +0.008 |
@@ -174,17 +177,17 @@ Remote estimate on the page (19 to 30 s and 30 to 51 s per image): lower end = G
 | 100 nm circles, square array (sizes spread 0.5 nm) | lens | -0.004 | 0.981 | 1.26 | +0.015 | | | | |
 | 100 nm circles, square array (sizes spread 5.0 nm) | lens | +0.125 | 1.005 | 1.26 | +0.016 | -0.298 | 1.006 | 1.25 | +0.010 |
 | 100 nm circles, square array (brightness spread 15 %) | lens | +0.046 | 0.999 | 1.27 | -0.009 | | | | |
-| 60 nm circles, dense | lens | +1.696 | 1.084 | 4.13 | +0.687 | +10.757 * | 1.062 | 2.68 | +1.238 |
-| 50 nm circles, dense | lens | +8.936 | 0.664 | 9.09 | +0.764 | +16.783 * | 1.108 | 2.91 | +1.935 |
-| 90 x 60 nm ellipses, dense | lens | -0.531 | 1.070 | 2.66 | +0.212 | +9.645 * | 0.718 | 2.27 | +2.148 |
+| 60 nm circles, dense | lens | +1.641 | 1.116 | 3.95 | +0.703 | +10.757 * | 1.062 | 2.68 | +1.238 |
+| 50 nm circles, dense | lens | +9.584 | 0.756 | 7.48 | +0.911 | +16.783 * | 1.108 | 2.91 | +1.935 |
+| 90 x 60 nm ellipses, dense | lens | -0.546 | 1.069 | 2.66 | +0.209 | +9.645 * | 0.718 | 2.27 | +2.148 |
 
 Copy of the test file (100 nm circles, pitch 8.5 px, placement 3.6 nm, Gaussian blur 63 nm, sizes spread 2.6 nm), gauss2: one pass +0.022 nm (first page fit +0.165, page fit with the true centres +0.044), response 1.002, scatter 1.06 nm; existing -0.036 nm, response 0.994, scatter 1.04 nm (14 rounds, not settled).
 
 ### 5.3 The test file (40 hole pages, gauss2)
 
-- Page CD: one pass 100.798 nm (sd over the pages 0.029), existing 100.693 (sd 0.033); difference +0.105 +- 0.018, largest 0.141 nm; correlation 0.84.
-- Per hole against the existing fit: CD difference 0.050 nm rms about the page's offset, response 0.9991, centres 0.009 nm apart.
-- Lens form with one pass: page CD -0.055 +- 0.005 nm from gauss2's. The existing fit's lens results on pages 0, 12, 24, 36 (earlier session): 100.488, 100.575, 100.691, 100.664; one pass: 100.661, 100.731, 100.774, 100.723.
+- Page CD: one pass 100.799 nm (sd over the pages 0.029), existing 100.693 (sd 0.033); difference +0.106 +- 0.018, largest 0.141 nm; correlation 0.84.
+- Per hole against the existing fit: CD difference 0.049 nm rms about the page's offset, response 0.9994, centres 0.009 nm apart.
+- Lens form with one pass: page CD -0.056 +- 0.006 nm from gauss2's. The existing fit's lens results on pages 0, 12, 24, 36 (earlier session): 100.488, 100.575, 100.691, 100.664; one pass: 100.661, 100.731, 100.774, 100.723.
 - Repeats (pages 0, 5, 24, 30, both forms): page CD equal to 0.0002 nm, hole CDs to 0.0006 nm rms (one hole 0.06 nm).
 
 ### 5.4 Other checks
@@ -234,6 +237,19 @@ Copy of the test file (100 nm circles, pitch 8.5 px, placement 3.6 nm, Gaussian 
     sums of a window row in single precision: no gain. `cupy` small-call overhead dominated the page fit until the
     solver moved to the host and the pages of a call were fitted together (213 ms per fit to about 8 ms per page
     and fit at 20 pages per call). The GPU is busy 67 to 72 % of the time; one CPU core is busy all the time.
+12. **A pitch of a whole number of pixels** (the library's test page: exactly 10 px) puts nearly all holes into two
+    to four of the 16 sub-pixel classes. Class (0, 0), on which the grid of starts was first compared, was empty,
+    and the walk along the stack's middle row that gave the first size guess found no data: the first fit landed on
+    a 300 nm outline (chi-square per bin 20) and stayed there. Fixed in the prototype: the grid is compared on
+    each page's most populated class, and the first guess is the stack's second moment over its filled bins.
+    Full pages did not change (lens: 0.000 nm on every page; gauss2: 0.013 nm at most on the test file).
+13. **gauss2 depends on the start at the 0.1 nm level on some pages.** The two start fixes moved the 80 nm circles
+    from -0.74 to -0.82 nm (response 1.12 to 1.03) and the 100 nm circles at blur 72 nm from -0.29 to -0.16 nm;
+    every lens result stayed within 0.002 nm. The generator's blur has no second Gaussian for gauss2 to find.
+14. **Small images, seeds from `measure_cds`** (pattern of the library's test page; error of the page CD, gauss2 /
+    lens): 135 stacked holes +0.02 / +0.31 nm; 999 holes -0.28 / +0.16; 4,941 holes (pitch 200 nm) +0.09 / -0.06;
+    21 holes +0.95 / +1.17. The library's `outline_fit` on the same images: +0.08, -0.16 (not settled), -0.52,
+    +0.35 nm. One image per call takes 0.23 s (gauss2) or 0.12 s (lens) for a full page.
 
 ## 7. Not done
 
@@ -248,20 +264,12 @@ Copy of the test file (100 nm circles, pitch 8.5 px, placement 3.6 nm, Gaussian 
 
 ## 8. Build order and checks
 
-1. `subpx/_outline/fast.py` (page fit: spectrum, stack, pair maps, solver) and the hole kernels beside
-   `subpx/_outline/page.py`; public `subpx.fit_outline_fast` and a `measure_cds` method name `outline_fit_fast`
-   beside `outline_fit` (nothing replaced). GPU only at first; a clear error without CuPy.
-2. Tests (`tests/test_outline_fit_fast.py`): the analytic template against `Template.render` (1.2e-4 of the peak:
-   the library's own discretisation); the Jacobian against central differences; a small generated page on the GPU
-   with its truth (page CD within 0.1 nm, response 0.98 to 1.03); the page fit under NumPy against CuPy on the same
-   stack (0.001 nm); repeat runs equal to 0.001 nm.
-3. Regression numbers: section 5's truth table (the script is `artifacts/outline_fit/fast/truth_matrix.py`).
-4. `scripts/cd_batch.py`: method `outline_fit_fast`, one process per GPU fitting 20 pages per call, the area per
-   page from the hole check, the per-page columns; `timings.csv` gets the phase times.
-5. Remote check, one command, about 150 characters back: seconds per page for both methods on the first hole pages
-   of one image, the two page CDs and their difference, chi-square per bin.
-6. Texts that state times or limits: `docs/outline_fit.md`, the docstrings of `fit_outline` and `measure_cds`.
+`docs/outline_fit_fast_handoff.md`. In short, as the user decided on 2026-11-12: phase 1 is the library method
+`outline_fit_fast` and both folder reports, GPU only, page values only, so that it can be compared with
+`outline_fit` on real images; the TIFF batch (areas from the hole check, one process per GPU) follows the user's
+verdict on that comparison; a size per hole only if the method proves itself.
 
-Questions to the user that decide parts of this: the four in the page's section 9 (size per hole or page values
-only; what the hole check hands over and whether a kept tile always holds the reference's pattern; where the minute
-of reading is measured and the remote's CPU threads; build it or not).
+The user's answers: page values for now; the minute of reading is measured on the remote, which has 64 CPU threads;
+the remote selects pattern areas by phase correlation of page tiles against the tiles of a reference page (the
+handoff's section 8 has the details and two options for the batch). Still open: whether a kept tile always holds
+only the reference's pattern, and whether the real test images are PNGs in a folder.

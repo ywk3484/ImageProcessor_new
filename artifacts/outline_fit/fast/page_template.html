@@ -1,0 +1,683 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outline fit in one pass</title>
+<link rel="icon" href="data:,">
+<meta name="description" content="Proposal: the outline fit without its 10 to 14 rounds, fast enough to keep up with reading a 1,500-page image. Measured with a scratch prototype, 2026-11-12.">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fafaf8;
+  --surface: #ffffff;
+  --surface-2: #f2f3f5;
+  --text: #1c1e22;
+  --text-2: #5b616c;
+  --muted: #898781;
+  --border: #e1e3e7;
+  --link: #1d5bcc;
+  --code-bg: #eef0f3;
+  --shade: rgba(0, 0, 0, 0.16);
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --series-1: #2a78d6;   /* one pass */
+  --series-2: #eb6834;   /* existing fit */
+  --note-bg: #fff8e6;
+  --note-border: #f0d48a;
+}
+@media screen and (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171b;
+    --surface: #1c1f24;
+    --surface-2: #23272e;
+    --text: #e6e8eb;
+    --text-2: #a3a9b4;
+    --muted: #898781;
+    --border: #30353d;
+    --link: #8ab4ff;
+    --code-bg: #272b32;
+    --shade: rgba(0, 0, 0, 0.5);
+    --grid: #2c2c2a;
+    --axis: #4a4f58;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --note-bg: #2b2616;
+    --note-border: #6b5a1e;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    "Noto Sans", "Malgun Gothic", sans-serif;
+}
+a { color: var(--link); text-underline-offset: 2px; }
+code {
+  font: 0.88em ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  background: var(--code-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "head" "toc" "body";
+  gap: 28px;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 40px 16px 96px;
+}
+.head { grid-area: head; }
+.toc { grid-area: toc; }
+article { grid-area: body; min-width: 0; }
+@media (min-width: 1100px) {
+  .layout {
+    grid-template-columns: 230px minmax(0, 800px);
+    grid-template-areas: ". head" "toc body";
+    justify-content: center;
+    column-gap: 56px;
+  }
+  .toc { position: sticky; top: 24px; align-self: start; max-height: calc(100vh - 48px); overflow-y: auto; }
+}
+.eyebrow { margin: 0 0 8px; font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-2); }
+h1 { margin: 0 0 12px; font-size: 2rem; line-height: 1.25; letter-spacing: -0.01em; }
+.meta { margin: 0; color: var(--text-2); font-size: 14px; }
+.toc { font-size: 14px; line-height: 1.4; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.toc h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-2); }
+.toc ol { list-style: none; margin: 0; padding: 0; }
+.toc li + li { margin-top: 2px; }
+.toc a { display: block; padding: 4px 8px; border-radius: 4px; color: var(--text-2); text-decoration: none; }
+.toc a:hover { color: var(--text); background: var(--surface-2); }
+article h2 { margin: 2.4em 0 0.6em; padding-top: 1.2em; border-top: 1px solid var(--border); font-size: 1.4rem; line-height: 1.3; scroll-margin-top: 16px; }
+article h2:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+article h3 { margin: 1.8em 0 0.5em; font-size: 1.08rem; }
+article p, article ul, article ol { margin: 0 0 1em; }
+article ul, article ol { padding-left: 1.4em; }
+article li { margin: 0.35em 0; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 0 0 1.4em; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.tile .label { font-size: 13px; color: var(--text-2); }
+.tile .value { font-size: 1.9rem; font-weight: 650; line-height: 1.2; margin: 2px 0 4px; }
+.tile .sub { font-size: 13px; color: var(--text-2); line-height: 1.45; }
+.note { background: var(--note-bg); border: 1px solid var(--note-border); border-radius: 10px; padding: 12px 14px; margin: 0 0 1.4em; font-size: 15px; }
+.note p:last-child { margin-bottom: 0; }
+.table-wrap {
+  overflow-x: auto; margin: 0 0 1.4em; border: 1px solid var(--border); border-radius: 10px;
+  background:
+    linear-gradient(to right, var(--surface) 40%, transparent) left / 28px 100% no-repeat local,
+    linear-gradient(to left, var(--surface) 40%, transparent) right / 28px 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, var(--shade), transparent) left / 12px 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, var(--shade), transparent) right / 12px 100% no-repeat scroll,
+    var(--surface);
+}
+table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.5; }
+table.wide { min-width: 640px; }
+th, td { padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: var(--surface-2); font-weight: 600; }
+tr + tr td, tbody tr:first-child td { border-top: 1px solid var(--border); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td:first-child { font-weight: 500; }
+tr.hl td { background: color-mix(in srgb, var(--series-1) 9%, transparent); }
+figure { margin: 0 0 1.4em; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+figure.picture { background: #ffffff; }
+figure.picture img { display: block; width: 100%; height: auto; }
+figure.picture figcaption { color: #5b616c; }
+.svg-wrap { overflow-x: auto; }
+figure svg { display: block; width: 100%; min-width: 600px; height: auto; font-family: inherit; }
+figcaption { margin-top: 8px; font-size: 13px; color: var(--text-2); }
+figcaption b { color: var(--text); font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--text-2); margin: 0 0 6px 4px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.legend i.line { width: 18px; height: 2px; border-radius: 1px; }
+details { margin: 8px 0 0; font-size: 13px; }
+details summary { cursor: pointer; color: var(--text-2); }
+details .table-wrap { margin-top: 8px; }
+#tip {
+  position: fixed; pointer-events: none; z-index: 10; display: none; min-width: 150px; max-width: 320px;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 16px var(--shade); padding: 8px 10px; font-size: 13px; line-height: 1.45;
+}
+#tip .t { color: var(--text-2); margin-bottom: 4px; }
+#tip .r { display: flex; align-items: center; gap: 8px; }
+#tip .r i { width: 14px; height: 2px; border-radius: 1px; flex: none; }
+#tip .r b { font-weight: 650; font-variant-numeric: tabular-nums; }
+#tip .r span { color: var(--text-2); }
+footer { margin-top: 3em; padding-top: 1.2em; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-2); }
+.s-text { fill: var(--text); } .s-text2 { fill: var(--text-2); } .s-muted { fill: var(--muted); }
+.s-box { fill: var(--surface-2); stroke: var(--border); }
+.s-box1 { fill: color-mix(in srgb, var(--series-1) 14%, var(--surface)); stroke: var(--series-1); }
+.s-box2 { fill: color-mix(in srgb, var(--series-2) 12%, var(--surface)); stroke: var(--series-2); }
+.s-line { stroke: var(--text-2); fill: none; }
+@media print {
+  body { background: #fff; font-size: 11pt; }
+  .layout { display: block; padding: 0; max-width: none; }
+  .toc { display: none; }
+  a { color: inherit; }
+  .table-wrap, .svg-wrap { overflow: visible; }
+  table.wide, figure svg { min-width: 0; }
+  figure, tr { break-inside: avoid; }
+  h2 { break-after: avoid; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+  <header class="head">
+    <p class="eyebrow">Proposal &middot; nothing built in the library</p>
+    <h1>Outline fit in one pass</h1>
+    <p class="meta">12 November 2026 &middot; measured on this PC (one RTX 4060 Ti) with a scratch prototype &middot; for the batch of 1,500-page images</p>
+  </header>
+
+  <nav class="toc" aria-label="Contents">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#summary">Summary</a></li>
+      <li><a href="#why">1. Why the current fit cannot reach a minute</a></li>
+      <li><a href="#idea">2. The idea: leave the neighbours in</a></li>
+      <li><a href="#steps">3. The procedure, step by step</a></li>
+      <li><a href="#time">4. Time, measured</a></li>
+      <li><a href="#accuracy">5. Accuracy, measured</a></li>
+      <li><a href="#changes">6. What changes in your numbers</a></li>
+      <li><a href="#limits">7. What these tests do not show</a></li>
+      <li><a href="#batch">8. In the batch</a></li>
+      <li><a href="#questions">9. Questions for you</a></li>
+      <li><a href="#build">10. If you say yes</a></li>
+    </ol>
+  </nav>
+
+  <article>
+    <h2 id="summary">Summary</h2>
+    <p>The goal: fit a 1,500-page image in less time than it takes to read it from the disk (about one minute). &ldquo;Page values&rdquo; below are a page&rsquo;s mean CD, its x and y widths and its blur.</p>
+    <div class="tiles">
+      <div class="tile"><div class="label">Outline fit today</div><div class="value">2&ndash;2.5 days</div><div class="sub">per 1,500-page image (104&ndash;150 s per page on this PC&rsquo;s GPU)</div></div>
+      <div class="tile"><div class="label">One pass, this PC, one GPU</div><div class="value">{{l1_image}}</div><div class="sub">per 1,500-page image for the page values ({{l1_ms}} ms per page); {{l2_image}} with a size for every hole ({{l2_ms}} ms per page)</div></div>
+      <div class="tile"><div class="label">One pass, four GPUs</div><div class="value">under 1 min</div><div class="sub">{{l1_four}} s / {{l2_four}} s per image even if each GPU were no faster than this PC&rsquo;s. The remote&rsquo;s are faster; not measured there.</div></div>
+    </div>
+    <ul>
+      <li><b>What changes.</b> The fit no longer goes back and forth 10 to 14 times between the holes and the page&rsquo;s outline. It builds the page&rsquo;s average hole once, fits the outline and the blur to it directly, and, if a size per hole is wanted, measures every hole in three short sweeps over the page. The model, its parameters and the outputs are the existing outline fit&rsquo;s.</li>
+      <li><b>Accuracy is not traded away.</b> On {{n_compared}} generated pages with known hole sizes, the page&rsquo;s mean CD is closer to the truth than the existing fit&rsquo;s on {{n_closer}} and equal to it within {{worst_other}} nm on the other {{n_other}} (Fig. 4). On the test file, whose true sizes are not known, the two differ by {{diff_abs}} nm on average; on a generated copy of it with known sizes, one pass is 0.02 nm above the truth and the existing fit 0.04 nm below.</li>
+      <li><b>What is not known.</b> Every page used here is generated. That includes the test TIFF in this repo (section 7). Real ACTIS pages have to be tried on the remote; that needs the method in the library first (section 10).</li>
+      <li><b>What I need from you:</b> four answers (section 9).</li>
+    </ul>
+
+    <h2 id="why">1. Why the current fit cannot reach a minute</h2>
+    <p>The outline fit measures two things that need each other:</p>
+    <ul>
+      <li>every <b>hole</b> (position, brightness, level, size) is fitted with the page&rsquo;s <b>hole shape</b> (the sharp outline blurred by the page&rsquo;s blur);</li>
+      <li>the page&rsquo;s hole shape is fitted to the <b>average of all holes</b>, after the neighbours&rsquo; light has been taken out of every hole&rsquo;s window, and taking it out needs the holes and the shape.</li>
+    </ul>
+    <p>So the fit alternates between the two until neither moves: 10 to 14 rounds on the test pages, 43 sweeps over all 39,000 holes (a sweep fits every hole of the page once) and about 4,000 renderings of the hole shape per page.</p>
+    <figure>
+      <div class="svg-wrap">
+      <svg viewBox="0 0 760 232" role="img" aria-label="The existing fit loops between the holes and the page's hole shape 10 to 14 times; the one-pass fit goes through once.">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker>
+        </defs>
+        <text x="20" y="22" class="s-text" font-size="14" font-weight="600">Existing fit: 10 to 14 rounds</text>
+        <rect x="20" y="40" width="150" height="56" rx="8" class="s-box2"/>
+        <text x="95" y="63" text-anchor="middle" class="s-text" font-size="13">fit every hole</text>
+        <text x="95" y="81" text-anchor="middle" class="s-text2" font-size="12">3 to 8 sweeps each round</text>
+        <rect x="230" y="40" width="150" height="56" rx="8" class="s-box2"/>
+        <text x="305" y="63" text-anchor="middle" class="s-text" font-size="13">average hole,</text>
+        <text x="305" y="81" text-anchor="middle" class="s-text2" font-size="12">neighbours taken out</text>
+        <rect x="440" y="40" width="150" height="56" rx="8" class="s-box2"/>
+        <text x="515" y="63" text-anchor="middle" class="s-text" font-size="13">fit outline + blur</text>
+        <text x="515" y="81" text-anchor="middle" class="s-text2" font-size="12">about 400 renderings</text>
+        <path d="M170 68H228" class="s-line" stroke-width="1.5" marker-end="url(#ah)"/>
+        <path d="M380 68H438" class="s-line" stroke-width="1.5" marker-end="url(#ah)"/>
+        <path d="M515 96V118H95V98" class="s-line" stroke-width="1.5" marker-end="url(#ah)"/>
+        <text x="305" y="113" text-anchor="middle" class="s-text2" font-size="12">half a step back, again, until nothing moves</text>
+        <text x="610" y="63" class="s-text" font-size="13" font-weight="600">104&ndash;150 s</text>
+        <text x="610" y="81" class="s-text2" font-size="12">per page</text>
+
+        <text x="20" y="152" class="s-text" font-size="14" font-weight="600">One pass</text>
+        <rect x="20" y="166" width="118" height="50" rx="8" class="s-box1"/>
+        <text x="79" y="187" text-anchor="middle" class="s-text" font-size="13">average hole,</text>
+        <text x="79" y="204" text-anchor="middle" class="s-text2" font-size="12">neighbours left in</text>
+        <rect x="160" y="166" width="118" height="50" rx="8" class="s-box1"/>
+        <text x="219" y="187" text-anchor="middle" class="s-text" font-size="13">fit outline + blur</text>
+        <text x="219" y="204" text-anchor="middle" class="s-text2" font-size="12">once</text>
+        <rect x="300" y="166" width="118" height="50" rx="8" class="s-box1"/>
+        <text x="359" y="187" text-anchor="middle" class="s-text" font-size="13">centre the holes</text>
+        <text x="359" y="204" text-anchor="middle" class="s-text2" font-size="12">2 sweeps</text>
+        <rect x="440" y="166" width="118" height="50" rx="8" class="s-box1"/>
+        <text x="499" y="187" text-anchor="middle" class="s-text" font-size="13">average + fit</text>
+        <text x="499" y="204" text-anchor="middle" class="s-text2" font-size="12">once more</text>
+        <rect x="580" y="166" width="118" height="50" rx="8" class="s-box" stroke-dasharray="4 3"/>
+        <text x="639" y="187" text-anchor="middle" class="s-text" font-size="13">a size per hole</text>
+        <text x="639" y="204" text-anchor="middle" class="s-text2" font-size="12">3 sweeps, optional</text>
+        <path d="M138 191H158" class="s-line" stroke-width="1.5" marker-end="url(#ah)"/>
+        <path d="M278 191H298" class="s-line" stroke-width="1.5" marker-end="url(#ah)"/>
+        <path d="M418 191H438" class="s-line" stroke-width="1.5" marker-end="url(#ah)"/>
+        <path d="M558 191H578" class="s-line" stroke-width="1.5" marker-end="url(#ah)"/>
+        <text x="706" y="187" class="s-text" font-size="13" font-weight="600">{{l1_s}} s</text>
+        <text x="706" y="204" class="s-text2" font-size="12">{{l2_s}} s</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 1.</b> Top: the existing fit, per page. Bottom: the proposed fit; {{l1_s}} s per page without the last box, {{l2_s}} s with it (this PC&rsquo;s GPU).</figcaption>
+    </figure>
+    <p>The earlier proposal (<code>docs/outline_fit_speed.md</code>) made every sweep and every rendering cheaper and kept the rounds: 104 s &rarr; 10 s per page measured, 0.2 to 0.3 s estimated with a lot more work. One minute per image is 0.04 s per page for the whole machine, 0.16 s per GPU with four. Cheaper rounds do not get there. The rounds have to go.</p>
+
+    <h2 id="idea">2. The idea: leave the neighbours in</h2>
+    <p>The rounds exist for one reason: the neighbours&rsquo; light is <em>removed</em> from the average hole, and removing it needs the hole shape that the fit is looking for. The proposal does not remove it.</p>
+    <figure class="picture">
+      <img alt="Four panels: a piece of a test page with one hole's window outlined; the average of 38,240 windows, with the neighbours' light at its sides; the fitted hole alone with its sharp outline; and the difference between the average and the model, which is noise." src="data:image/png;base64,{{png}}">
+      <figcaption><b>Fig. 2.</b> Page 0 of the test file. (a) A hole&rsquo;s window (orange, {{window}} &times; {{window}} px) also holds the light of the neighbours 8.5 px away. (b) The plain average of {{holes}} windows, every window placed at its hole&rsquo;s own sub-pixel position: the hole in the middle, the neighbours&rsquo; flanks round it. (c) The fitted hole alone: the sharp outline (orange) blurred by the fitted blur. (d) Average minus model, divided by the noise expected in each bin: nothing but noise is left ({{leftover}} grey levels rms against {{noise_alone}} from the pixel noise alone).</figcaption>
+    </figure>
+    <p>Fig. 2(b) is fitted as it is, with this model: <b>the hole shape at the centre, plus the same hole shape at every neighbour&rsquo;s place.</b> Where the neighbours stand relative to a hole is known from the hole positions alone. So the only unknown is still the one hole shape, and one least-squares fit finds it (c). No hole has to be fitted first, and nothing has to be repeated.</p>
+    <p>A small case shows what is at stake. Take three holes in a row, 8.5 px apart. The middle hole&rsquo;s window reaches 7 px each way, so its edge is 1.5 px from the next hole&rsquo;s centre: in (b) the average at that edge is still about 100 grey levels, against 190 at the centre and 40 between the holes. A fit that ignored the neighbours would read that light as a wide skirt of the hole itself. The existing fit subtracts it (and needs the shape to do so); the one-pass fit puts it into the model.</p>
+    <p><b>One detail makes this exact for any arrangement.</b> The average is built on a grid of quarter pixels. Holes are sorted by where their centre sits inside a pixel (16 classes), and each class gets its own map of where the neighbours stand. On the test file this matters: its grid is exactly 8.5 px with a random shift per hole, so a hole&rsquo;s position inside its pixel tells where its neighbours are. With one common map the fit left stripes of 2 grey levels at the neighbours (six times the noise); with the 16 maps it leaves noise (Fig. 2d). No lattice is assumed anywhere: the maps are counted from the positions found on the page.</p>
+
+    <h2 id="steps">3. The procedure, step by step</h2>
+    <figure>
+      <div class="svg-wrap">
+      <svg viewBox="0 0 760 196" role="img" aria-label="Flow of the one-pass fit with the time of each step per page.">
+        <g font-size="13">
+          <rect x="10" y="30" width="112" height="72" rx="8" class="s-box1"/>
+          <text x="66" y="52" text-anchor="middle" class="s-text" font-weight="600">1 Find holes</text>
+          <text x="66" y="70" text-anchor="middle" class="s-text2" font-size="12">bright spots,</text>
+          <text x="66" y="86" text-anchor="middle" class="s-text2" font-size="12">sub-pixel start</text>
+          <rect x="134" y="30" width="112" height="72" rx="8" class="s-box1"/>
+          <text x="190" y="52" text-anchor="middle" class="s-text" font-weight="600">2 Average hole</text>
+          <text x="190" y="70" text-anchor="middle" class="s-text2" font-size="12">+ where the</text>
+          <text x="190" y="86" text-anchor="middle" class="s-text2" font-size="12">neighbours stand</text>
+          <rect x="258" y="30" width="112" height="72" rx="8" class="s-box1"/>
+          <text x="314" y="52" text-anchor="middle" class="s-text" font-weight="600">3 Page fit</text>
+          <text x="314" y="70" text-anchor="middle" class="s-text2" font-size="12">outline + blur,</text>
+          <text x="314" y="86" text-anchor="middle" class="s-text2" font-size="12">first answer</text>
+          <rect x="382" y="30" width="112" height="72" rx="8" class="s-box1"/>
+          <text x="438" y="52" text-anchor="middle" class="s-text" font-weight="600">4 Centre holes</text>
+          <text x="438" y="70" text-anchor="middle" class="s-text2" font-size="12">position and</text>
+          <text x="438" y="86" text-anchor="middle" class="s-text2" font-size="12">brightness: 2 sweeps</text>
+          <rect x="506" y="30" width="112" height="72" rx="8" class="s-box1"/>
+          <text x="562" y="52" text-anchor="middle" class="s-text" font-weight="600">5 Again 2 + 3</text>
+          <text x="562" y="70" text-anchor="middle" class="s-text2" font-size="12">final outline,</text>
+          <text x="562" y="86" text-anchor="middle" class="s-text2" font-size="12">blur, page CD</text>
+          <rect x="630" y="30" width="120" height="72" rx="8" class="s-box" stroke-dasharray="4 3"/>
+          <text x="690" y="52" text-anchor="middle" class="s-text" font-weight="600">6 Size per hole</text>
+          <text x="690" y="70" text-anchor="middle" class="s-text2" font-size="12">every hole&rsquo;s edge</text>
+          <text x="690" y="86" text-anchor="middle" class="s-text2" font-size="12">offset: 3 sweeps</text>
+          <g class="s-line" stroke-width="1.5">
+            <path d="M122 66H132" marker-end="url(#ah)"/><path d="M246 66H256" marker-end="url(#ah)"/>
+            <path d="M370 66H380" marker-end="url(#ah)"/><path d="M494 66H504" marker-end="url(#ah)"/>
+            <path d="M618 66H628" marker-end="url(#ah)"/>
+          </g>
+          <g class="s-text" font-weight="600" text-anchor="middle">
+            <text x="128" y="124">{{t_a}} ms</text><text x="314" y="124">{{t_fit_a}} ms</text><text x="438" y="124">{{t_b}} ms</text>
+            <text x="562" y="124">{{t_fit_c}} ms</text><text x="690" y="124">{{t_d}} ms</text>
+          </g>
+          <path d="M12 108H244" class="s-line" stroke-width="1"/><path d="M260 108H368" class="s-line" stroke-width="1"/>
+          <path d="M384 108H492" class="s-line" stroke-width="1"/><path d="M508 108H616" class="s-line" stroke-width="1"/>
+          <path d="M632 108H748" class="s-line" stroke-width="1"/>
+          <text x="10" y="160" class="s-text2" font-size="12">Page values (mean CD, x / y widths, blur): steps 1 to 5, {{l1_ms}} ms per page.</text>
+          <text x="10" y="180" class="s-text2" font-size="12">With step 6: {{l2_ms}} ms per page. The page fits (3, 5) of 20 pages run together on the GPU; step 4&rsquo;s time includes averaging again.</text>
+        </g>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 3.</b> The steps and their measured time per page (test file, 39,000 holes per page, this PC&rsquo;s GPU).</figcaption>
+    </figure>
+    <div class="table-wrap"><table class="wide">
+      <thead><tr><th>Step</th><th>What it does</th><th>Why it is there (measured)</th></tr></thead>
+      <tbody>
+        <tr><td>1 Find holes</td><td>Local maxima of the lightly smoothed page above a level between its dark and bright ends; a parabola through three samples gives a sub-pixel start.</td><td>Found every hole on 10 of 13 generated patterns and missed 0.01 to 1.2 % on the other three (300 nm squares 1.2 %, 50 nm dense holes 0.3 %), in 2 to 6 ms. The finder used so far (<code>detect_centers</code> on the CPU) takes 2.6 s per page.</td></tr>
+        <tr><td>2 Average hole</td><td>Every window is added to a quarter-pixel grid at its hole&rsquo;s sub-pixel position: the plain mean, no weights, nothing estimated per hole. The neighbour maps are counted from the positions.</td><td>Dividing each window by its hole&rsquo;s own fitted brightness first (a bigger hole gets a bigger divisor) tilts the average towards small holes: &minus;0.09 nm on the page mean in the test.</td></tr>
+        <tr><td>3 Page fit</td><td>Outline and blur by least squares on the average, neighbours in the model. The existing fit&rsquo;s grid of starts and stages; the gradient is computed exactly instead of by trial renderings.</td><td>About 20 to 35 model evaluations per fit, where the existing fit renders the hole shape about 4,000 times per page. The same fit done the existing way (trial renderings on the CPU) took 113 s and 1,289 renderings, and landed 0.001 nm away.</td></tr>
+        <tr><td>4 Centre holes</td><td>Two sweeps of the existing hole stage with the size held: position, brightness and level of every hole against the complete page (all neighbours modelled at their own places).</td><td>The starts from step 1 are pulled towards near neighbours. Stacking with them reads the page +0.12 to +0.17 nm too big on the copy of the test file; after this step, +0.02 nm. One sweep leaves the page CD 0.02 nm short of where it settles, two sweeps 0.004 nm.</td></tr>
+        <tr><td>5 Average + fit again</td><td>Steps 2 and 3 with the centred holes, starting from step 3&rsquo;s answer, every parameter free.</td><td>This is the page&rsquo;s result. A further round of 4 and 5 moves the page CD by +0.003 nm, a third by +0.001 nm (two pages); one round is proposed.</td></tr>
+        <tr><td>6 Size per hole</td><td>Three sweeps of the existing hole stage with the size free (edge offset per hole), each step taken 1.3 times as far.</td><td>A 1 nm bigger hole reads 1.002 nm bigger after these three sweeps, 0.969 after two plain ones, 1.000 after eight plain ones.</td></tr>
+      </tbody>
+    </table></div>
+    <p>Everything is computed on the GPU in a few fused routines (one for averaging, one for the neighbour maps, one for the outline&rsquo;s integrals, two for the sweeps over the holes), in single precision where the result does not depend on it. The small matrix work of the page fit runs on the CPU.</p>
+
+    <h2 id="time">4. Time, measured</h2>
+    <div class="table-wrap"><table class="wide">
+      <thead><tr><th>Outline fit</th><th class="num">Per page</th><th class="num">1,500-page image</th><th class="num">Stripe of 4 images</th></tr></thead>
+      <tbody>
+        <tr><td>Today (library, this PC, one GPU)</td><td class="num">104&ndash;150 s</td><td class="num">2&ndash;2.5 days</td><td class="num">7&ndash;10 days</td></tr>
+        <tr><td>Earlier proposal, steps 1&ndash;3 (its prototype, measured again today)</td><td class="num">{{ref_s}} s</td><td class="num">{{ref_image}}</td><td class="num">{{ref_stripe}}</td></tr>
+        <tr class="hl"><td>One pass, page values &mdash; this PC, one GPU</td><td class="num">{{l1_s}} s</td><td class="num">{{l1_image}}</td><td class="num">{{l1_stripe}}</td></tr>
+        <tr class="hl"><td>One pass, with a size per hole &mdash; this PC, one GPU</td><td class="num">{{l2_s}} s</td><td class="num">{{l2_image}}</td><td class="num">{{l2_stripe}}</td></tr>
+        <tr><td>One pass on four GPUs like this PC&rsquo;s (the lines above &divide; 4; not measured)</td><td class="num">&nbsp;</td><td class="num">{{l1_four}} s / {{l2_four}} s</td><td class="num">{{l1_four_stripe}} / {{l2_four_stripe}}</td></tr>
+        <tr><td>Remote, 4 &times; RTX 6000 Ada (estimate; not measured)</td><td class="num">&nbsp;</td><td class="num">{{l1_remote}} s / {{l2_remote}} s</td><td class="num">&nbsp;</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li><b>How it was measured.</b> The 40 hole pages of the test file (39,042 or 37,842 holes each), already in memory, 20 pages per call, three repeats: {{l1_range}} ms per page for the page values, {{l2_range}} ms with a size per hole. Reading the file is not in these numbers.</li>
+      <li><b>What the remote line assumes.</b> Its lower figure: each remote GPU is 2.3 times this PC&rsquo;s for the GPU&rsquo;s share of the work (the ratio measured for the other CD methods: 3.5 s there, 7.9 s here per page) and its CPU is as fast as this PC&rsquo;s. Its upper figure: no faster than this PC at all. The deciding unknown is the remote&rsquo;s speed per CPU core: here the GPU is busy {{busy}} % of the time and one CPU core is busy all the time, driving it.</li>
+      <li><b>What sets the pace afterwards.</b> Reading. At one minute per image, a dataset of 900 stripes of 4 images is 60 hours of reading; the fit keeps up with it instead of adding to it.</li>
+      <li><b>Memory.</b> 3 to 5 GB of GPU memory with 20 pages per call.</li>
+      <li><b>If more speed is ever needed.</b> Two processes per GPU (the GPU idles a third of the time), or two size sweeps instead of three (a 1 nm bigger hole then reads 0.99 nm bigger). Neither is in the numbers above.</li>
+    </ul>
+
+    <h2 id="accuracy">5. Accuracy, measured</h2>
+    <h3>5.1 Pages with known sizes</h3>
+    <p>The repo&rsquo;s generator draws pages whose every hole size is known (21 nm pixels, blur 65 nm, hole sizes spread by 2.5 nm, photon noise, 5,000 to 50,000 holes per page). Both fits ran on the same {{n_compared}} pages. Fig. 4 shows how far each one&rsquo;s page mean is from the true mean.</p>
+    <figure>
+      <div class="legend"><span><i style="background:var(--series-1)"></i>One pass</span><span><i style="background:var(--series-2)"></i>Existing fit</span></div>
+      <div class="svg-wrap"><svg id="fig4" role="img" aria-label="Error of the page's mean CD on generated pages with known sizes: one pass against the existing fit."></svg></div>
+      <figcaption><b>Fig. 4.</b> Error of the page&rsquo;s mean CD (nm; 0 is the truth) on generated pages with known sizes. &ldquo;lens&rdquo; and &ldquo;gauss2&rdquo; are the two blur forms the fit offers; the generator&rsquo;s own blur is of the lens form. The three small dense patterns are in section 5.4.</figcaption>
+      <details><summary>The numbers of Fig. 4, with the per-hole readings</summary><div class="table-wrap"><table class="wide" id="tab4"></table></div></details>
+    </figure>
+    <ul>
+      <li><b>Page mean.</b> One pass is closer to the truth on {{n_closer}} of the {{n_compared}} pages; on the other {{n_other}} the two are equal within {{worst_other}} nm. The largest gains are on shapes the alternation does not settle on in 14 rounds: 160 &times; 80 nm ellipses ({{ell_op}} against {{ell_ex}} nm) and the staggered array ({{stag_op}} against {{stag_ex}} nm).</li>
+      <li><b>Per hole</b> (table under Fig. 4), with the lens form. A 1 nm bigger hole reads 0.99 to 1.03 nm bigger (existing: 0.98 to 1.05). The scatter per hole is the same within 3 %. A 10 % brighter hole reads at most 0.08 nm bigger (existing: up to 0.23 nm).</li>
+      <li><b>Repeats.</b> The same page fitted twice gives the same page CD to 0.0002 nm and the same hole CDs to 0.0006 nm rms. The existing fit on the GPU differs between runs by up to 0.05 to 0.1 nm on some pages.</li>
+    </ul>
+
+    <h3>5.2 The test file</h3>
+    <figure>
+      <div class="legend"><span><i class="line" style="background:var(--series-1)"></i>One pass</span><span><i class="line" style="background:var(--series-2)"></i>Existing fit</span></div>
+      <div class="svg-wrap"><svg id="fig5" role="img" aria-label="Page CD of the 40 hole pages of the test file: one pass against the existing fit."></svg></div>
+      <figcaption><b>Fig. 5.</b> The page&rsquo;s CD on the {{pages}} hole pages of the test file (<code>stripe1_board1.tif</code>), blur form gauss2. Its true sizes are not known.</figcaption>
+      <details><summary>The numbers of Fig. 5</summary><div class="table-wrap"><table id="tab5"></table></div></details>
+    </figure>
+    <ul>
+      <li>One pass reads {{diff_mean}} &plusmn; {{diff_sd}} nm above the existing fit (largest difference {{diff_max}} nm). The file&rsquo;s true sizes are not known. On a generated copy of it (same 8.5 px grid, same blur and size spread, sizes known) one pass is +0.02 nm from the truth and the existing fit &minus;0.04 nm, which accounts for 0.06 nm of the gap; the copy is not an exact replica.</li>
+      <li>From page to page the one-pass CD spreads by {{one_pass_sd}} nm, the existing fit&rsquo;s by {{existing_sd}} nm.</li>
+      <li>Hole by hole the two agree: CDs {{hole_sd}} nm rms apart (a hole&rsquo;s own spread on these pages is 2.6 nm), response {{hole_slope}}, centres {{centre_sd}} nm apart.</li>
+      <li>The two blur forms give the same page CD to 0.07 nm on every page with one pass (lens &minus; gauss2 = {{lens_gauss}} nm).</li>
+    </ul>
+
+    <h3>5.3 When the blur changes</h3>
+    <p>The reason for the outline fit: a focus change should move the fitted blur, not the CD. 100 nm circles, the generator&rsquo;s blur at 58, 65 and 72 nm, blur form lens:</p>
+    <div class="table-wrap"><table id="tabblur"></table></div>
+
+    <h3>5.4 Where neither fit can be trusted</h3>
+    <p>Below about 70 nm at these pixels and this blur, size and blur cannot be told apart from the page (the existing fit&rsquo;s documented limit). One pass is less wrong there, but not right:</p>
+    <div class="table-wrap"><table id="tabdense"></table></div>
+
+    <h2 id="changes">6. What changes in your numbers</h2>
+    <ul>
+      <li><b>Page means move by a few hundredths to a few tenths of a nanometre</b> against the existing outline fit (section 5), towards the truth on the generated pages. Results of the two must not be mixed in one comparison.</li>
+      <li><b>The page CD is the size of the average hole.</b> When hole sizes spread widely, that is above the average of the sizes by (spread)&sup2; / (2 &times; CD): 0.03 nm at a 2.5 nm spread, 0.125 nm at 5 nm (measured: {{cd5}}). The existing fit has the same property.</li>
+      <li><b>The blur&rsquo;s second part is held near its default where a page does not determine it</b> (gauss2 form: a second, wider Gaussian that the page&rsquo;s blur may not have). Its width and weight are then arbitrary; the CD does not depend on them (&plusmn;0.002 nm over the whole range, measured). The existing fit lets them wander, which is why its blur readings jump from page to page.</li>
+      <li><b>Holes are found by the fit&rsquo;s own finder</b>, not by the report&rsquo;s segmentation. In the library, the holes that the other methods measure would be matched to it by position.</li>
+      <li><b>Nothing else is new:</b> same outline (superellipse with harmonics), same blur forms, same hole stage, same CD definition.</li>
+    </ul>
+
+    <h2 id="limits">7. What these tests do not show</h2>
+    <div class="note"><p><b>No real ACTIS page was used, because none is on this PC.</b> The test TIFF (<code>artifacts/cd_test/data/stripe1_board1.tif</code>) is generated as well: its holes sit on a grid of exactly 8.500 px with a random shift of up to &plusmn;0.3 px each, and the repo&rsquo;s own fixture script calls its pages synthetic. Earlier notes of mine called it real. It is not.</p></div>
+    <ul>
+      <li><b>Real pages.</b> A real blur&rsquo;s far tail, a real background, defects, and real hole shapes are untested. Generated pages obey the fit&rsquo;s model by construction, so they can show that the procedure is right, not that the model fits your images. That holds for the existing outline fit just as much.</li>
+      <li><b>The remote.</b> Nothing was timed there. Four GPUs at once were not tried (this PC has one).</li>
+      <li><b>Pages without the pattern.</b> The fit does not recognise them: on the test file&rsquo;s blank pages it finds 27,000 noise peaks and fits them. The hole check has to stay in front of it. On the file&rsquo;s page with another pattern the page fit&rsquo;s leftover is 15 times the noise, which is a usable alarm; on the blank pages nothing looks wrong except a fitted blur of 14 nm.</li>
+      <li><b>Small holes.</b> Section 5.4.</li>
+      <li><b>Not in the prototype yet:</b> measuring only a part of a page (your tiles), dark holes on a bright page, the switch that gives every hole the page&rsquo;s size when holes are too small for a size each, the x and y widths per hole, the workbench&rsquo;s outline drawing.</li>
+    </ul>
+
+    <h2 id="batch">8. In the batch</h2>
+    <ul>
+      <li><b>Flow.</b> One reader reads the image front to back, as today. Your hole check decides per page which area holds the pattern. The fit takes the page and that area: holes are found on the whole page (so that light from outside the area is modelled), and only holes inside the area, one window away from its border, are averaged and reported.</li>
+      <li><b>Part of a page.</b> Tested with the pattern ending inside the page (holes on the left 40 %): the page mean is {{part_op}} nm from the truth (existing: {{part_ex}} nm).</li>
+      <li><b>One process per GPU</b>, 20 pages per call. No worker pool per GPU (Windows gives several processes turns on one GPU; measured earlier).</li>
+      <li><b>Per page it would write:</b> holes found and used, mean CD, x and y widths, blur, the page fit&rsquo;s leftover against the noise, the change between the first and the final page fit, and with step 6 the holes measured and the share at the size bound. The per-hole values can be kept or dropped.</li>
+    </ul>
+
+    <h2 id="questions">9. Questions for you</h2>
+    <ol>
+      <li><b>Page values only, or a size for every hole?</b> The batch&rsquo;s <code>pages.csv</code> holds the mean per page today. Without the size per hole the fit takes {{l1_ms}} instead of {{l2_ms}} ms per page, and the page mean is the same number either way.</li>
+      <li><b>What can your hole check hand over per page?</b> I assume: the list of kept tiles (rectangles). And inside a kept tile, is the pattern always the reference page&rsquo;s pattern, or can a kept tile hold something else next to it?</li>
+      <li><b>Where does the one minute of reading come from?</b> I assume the remote, reading from its disk. And how many CPU threads does the remote have (<code>$env:NUMBER_OF_PROCESSORS</code>, one number)? One core per GPU is needed.</li>
+      <li><b>Shall I build it?</b> As a new method beside the existing one (section 10). Its first job on the remote is one command that fits a few of your real pages with both methods and prints five numbers.</li>
+    </ol>
+
+    <h2 id="build">10. If you say yes</h2>
+    <ol>
+      <li><b>Library:</b> a new method <code>outline_fit_fast</code> beside <code>outline_fit</code> (nothing replaced): <code>subpx.fit_outline_fast</code>, a method name for <code>measure_cds</code>, GPU only at first. Tests: the generated pages of section 5.1 as regression tests with their numbers.</li>
+      <li><b>Batch:</b> <code>scripts/cd_batch.py</code> gets the method, the area per page from the hole check, one process per GPU with 20 pages per call, the per-page columns of section 8.</li>
+      <li><b>Remote check, one command:</b> fits the first few hole pages of one of your images with both methods and prints: seconds per page, the two page CDs, their difference, the leftover against the noise. That is the first evidence on real pages.</li>
+      <li><b>Then decide</b> on the size per hole, on a second centring round, and on the items of section 7 in the order you need them.</li>
+    </ol>
+
+    <footer>
+      <p>Prototype and every measurement: <code>artifacts/outline_fit/fast/</code> (scratch, on this PC only; its <code>README.txt</code> lists the scripts and commands). Builder&rsquo;s notes: <code>docs/outline_fit_one_pass.md</code>. The earlier proposal: <code>docs/outline_fit_speed.md</code>. Nothing in <code>subpx/</code> was changed.</p>
+    </footer>
+  </article>
+</div>
+<div id="tip" role="status"></div>
+<script id="data" type="application/json">/*DATA*/</script>
+<script>
+(function () {
+  const DATA = JSON.parse(document.getElementById('data').textContent);
+  const NS = 'http://www.w3.org/2000/svg';
+  const tip = document.getElementById('tip');
+  function el(name, attrs, parent, text) {
+    const e = document.createElementNS(NS, name);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text !== undefined) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function h(name, parent, text, cls) {
+    const e = document.createElement(name);
+    if (text !== undefined) e.textContent = text;
+    if (cls) e.className = cls;
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function fmt(v, d, sign) {
+    if (v === null || v === undefined || !isFinite(v)) return '–';
+    const s = Math.abs(v).toFixed(d);
+    return (v < 0 ? '−' : (sign ? '+' : '')) + s;
+  }
+  function showTip(evt, title, rows) {
+    tip.textContent = '';
+    h('div', tip, title, 't');
+    rows.forEach(function (r) {
+      const row = h('div', tip, undefined, 'r');
+      const key = h('i', row);
+      key.style.background = r.color;
+      h('b', row, r.value);
+      h('span', row, r.name);
+    });
+    tip.style.display = 'block';
+    const w = tip.offsetWidth, hh = tip.offsetHeight;
+    let x = evt.clientX + 14, y = evt.clientY + 14;
+    if (x + w > window.innerWidth - 8) x = evt.clientX - w - 14;
+    if (y + hh > window.innerHeight - 8) y = evt.clientY - hh - 14;
+    tip.style.left = Math.max(8, x) + 'px';
+    tip.style.top = Math.max(8, y) + 'px';
+  }
+  function hideTip() { tip.style.display = 'none'; }
+
+  const SHORT = {
+    circle100_square: '100 nm circles', circle80_square: '80 nm circles', circle100_stagger: '100 nm circles, staggered',
+    square150_stagger: '150 nm squares', circle250_square: '250 nm circles',
+    ellipse160x80_square: '160 x 80 nm ellipses', ellipse100x200_stagger: '100 x 200 nm ellipses'
+  };
+  function rowLabel(r) {
+    const x = r.extra || {};
+    let s = SHORT[r.name] || r.label;
+    const parts = [r.family];
+    if (x.blur) parts.push('blur ' + Number(x.blur).toFixed(0) + ' nm');
+    if (x.rot) parts.push('grid turned ' + Number(x.rot).toFixed(0) + '°');
+    if (x.flicker) parts.push('brightness wave ±10 %');
+    if (x.part) parts.push('holes on 40 % of the page');
+    if (x.pitch) parts.push('the test file\'s grid (8.5 px)');
+    if (x.cd) parts.push('sizes spread ' + Number(x.cd).toFixed(1) + ' nm');
+    if (x.bright) parts.push('brightness spread 15 %');
+    return s + ' · ' + parts.join(', ');
+  }
+  const DENSE = { circle60_dense: 1, circle50_dense: 1, ellipse90x60_stagger: 1 };
+  const both = DATA.truth.filter(function (r) { return r.existing && !DENSE[r.name]; });
+
+  // ------------------------------------------------------------------ Fig. 4: one row per page, two dots
+  (function () {
+    const svg = document.getElementById('fig4');
+    const rowH = 26, top = 30, left = 318, right = 24, W = 760;
+    const H = top + rowH * both.length + 52;
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    const lo = -2.25, hi = 1.0;
+    const X = function (v) { return left + (v - lo) / (hi - lo) * (W - left - right); };
+    [-2, -1.5, -1, -0.5, 0, 0.5, 1].forEach(function (t) {
+      el('line', { x1: X(t), x2: X(t), y1: top - 6, y2: H - 48, stroke: t === 0 ? 'var(--axis)' : 'var(--grid)', 'stroke-width': t === 0 ? 1.5 : 1 }, svg);
+      el('text', { x: X(t), y: H - 32, 'text-anchor': 'middle', 'font-size': 12, class: 's-muted' }, svg, fmt(t, 1, t !== 0));
+    });
+    el('text', { x: X(0), y: 14, 'text-anchor': 'middle', 'font-size': 12, class: 's-text2' }, svg, 'truth');
+    el('text', { x: (left + W - right) / 2, y: H - 8, 'text-anchor': 'middle', 'font-size': 12, class: 's-text2' }, svg,'page mean CD − true mean (nm)');
+    both.forEach(function (r, i) {
+      const y = top + rowH * i + rowH / 2;
+      const g = el('g', { tabindex: 0 }, svg);
+      const hit = el('rect', { x: 0, y: y - rowH / 2, width: W, height: rowH, fill: 'transparent' }, g);
+      el('text', { x: left - 12, y: y + 4, 'text-anchor': 'end', 'font-size': 12.5, class: 's-text' }, g, rowLabel(r));
+      const a = X(Math.max(lo, r.existing.error)), b = X(r.one_pass.error);
+      el('line', { x1: a, x2: b, y1: y, y2: y, stroke: 'var(--axis)', 'stroke-width': 2 }, g);
+      el('circle', { cx: a, cy: y, r: 5, fill: 'var(--series-2)', stroke: 'var(--surface)', 'stroke-width': 2 }, g);
+      el('circle', { cx: b, cy: y, r: 5, fill: 'var(--series-1)', stroke: 'var(--surface)', 'stroke-width': 2 }, g);
+      function show(evt) {
+        hit.setAttribute('fill', 'var(--surface-2)');
+        hit.setAttribute('fill-opacity', '0.6');
+        showTip(evt, rowLabel(r), [
+          { color: 'var(--series-1)', value: fmt(r.one_pass.error, 3, true) + ' nm', name: 'One pass' },
+          { color: 'var(--series-2)', value: fmt(r.existing.error, 3, true) + ' nm', name: 'Existing fit' + (r.existing.converged ? '' : ' (not settled in 14 rounds)') }]);
+      }
+      function hide() { hit.setAttribute('fill', 'transparent'); hideTip(); }
+      g.addEventListener('pointermove', show);
+      g.addEventListener('pointerleave', hide);
+      g.addEventListener('focus', function () { const bb = g.getBoundingClientRect(); show({ clientX: bb.left + bb.width / 2, clientY: bb.top }); });
+      g.addEventListener('blur', hide);
+    });
+    // the one value far from the rest gets its number
+    const far = both.reduce(function (m, r) { return Math.abs(r.existing.error) > Math.abs(m.existing.error) ? r : m; }, both[0]);
+    const fi = both.indexOf(far);
+    el('text', { x: X(far.existing.error) + 10, y: top + rowH * fi + rowH / 2 - 8, 'font-size': 11.5, class: 's-text2' }, svg, fmt(far.existing.error, 2, true));
+
+    const tab = document.getElementById('tab4');
+    const head = h('tr', h('thead', tab));
+    ['Page', 'Fit', 'Page mean error (nm)', 'Response per true nm', 'Scatter per hole (nm)', '+10 % light (nm)', 'Centres (nm)', 'Fitted blur (nm)', 'Seconds per page'].forEach(function (t, i) {
+      h('th', head, t, i > 1 ? 'num' : '');
+    });
+    const body = h('tbody', tab);
+    DATA.truth.filter(function (r) { return !DENSE[r.name]; }).forEach(function (r) {
+      [['One pass', r.one_pass], ['Existing', r.existing]].forEach(function (pair) {
+        const d = pair[1];
+        if (!d) return;
+        const tr = h('tr', body);
+        h('td', tr, pair[0] === 'One pass' ? rowLabel(r) : '');
+        h('td', tr, pair[0] + (d.converged === false ? ' (not settled)' : ''));
+        h('td', tr, fmt(d.error, 3, true), 'num');
+        h('td', tr, fmt(d.slope, 3), 'num');
+        h('td', tr, fmt(d.scatter, 2), 'num');
+        h('td', tr, fmt(d.light10, 3, true), 'num');
+        h('td', tr, fmt(d.centres, 2), 'num');
+        h('td', tr, fmt(d.blur[0], 1) + ' / ' + fmt(d.blur[1], 1), 'num');
+        h('td', tr, fmt(d.seconds, d.seconds < 2 ? 2 : 0), 'num');
+      });
+    });
+  })();
+
+  // ------------------------------------------------------------------ Fig. 5: page CD by page, two lines
+  (function () {
+    const svg = document.getElementById('fig5');
+    const rows = DATA.file;
+    const W = 760, H = 316, left = 56, right = 92, top = 32, bottom = 40;
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    const all = rows.map(function (r) { return r.existing; }).concat(rows.map(function (r) { return r.one_pass; }));
+    const lo = Math.floor(Math.min.apply(null, all) * 20) / 20, hi = Math.ceil(Math.max.apply(null, all) * 20) / 20;
+    const X = function (i) { return left + i / (rows.length - 1) * (W - left - right); };
+    const Y = function (v) { return top + (hi - v) / (hi - lo) * (H - top - bottom); };
+    for (let t = lo; t <= hi + 1e-9; t += 0.05) {
+      el('line', { x1: left, x2: W - right, y1: Y(t), y2: Y(t), stroke: 'var(--grid)', 'stroke-width': 1 }, svg);
+      el('text', { x: left - 8, y: Y(t) + 4, 'text-anchor': 'end', 'font-size': 12, class: 's-muted' }, svg, t.toFixed(2));
+    }
+    rows.forEach(function (r, i) {
+      if (i % 5 === 0 || i === rows.length - 1) el('text', { x: X(i), y: H - 22, 'text-anchor': 'middle', 'font-size': 12, class: 's-muted' }, svg, String(r.page));
+    });
+    el('text', { x: (left + W - right) / 2, y: H - 4, 'text-anchor': 'middle', 'font-size': 12, class: 's-text2' }, svg, 'page of the test file');
+    el('text', { x: 6, y: 14, 'font-size': 12, class: 's-text2' }, svg, 'page CD (nm)');
+    function line(key, color) {
+      const pts = rows.map(function (r, i) { return X(i) + ',' + Y(r[key]); }).join(' ');
+      el('polyline', { points: pts, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
+      const last = rows[rows.length - 1];
+      el('circle', { cx: X(rows.length - 1), cy: Y(last[key]), r: 4, fill: color, stroke: 'var(--surface)', 'stroke-width': 2 }, svg);
+    }
+    line('existing', 'var(--series-2)');
+    line('one_pass', 'var(--series-1)');
+    const last = rows[rows.length - 1];
+    let y1 = Y(last.one_pass), y2 = Y(last.existing);
+    if (Math.abs(y1 - y2) < 14) { const mid = (y1 + y2) / 2; y1 = mid + (y1 < y2 ? -8 : 8); y2 = mid + (y1 < y2 ? 8 : -8); }
+    el('text', { x: W - right + 10, y: y1 + 4, 'font-size': 12.5, class: 's-text' }, svg, 'One pass');
+    el('text', { x: W - right + 10, y: y2 + 4, 'font-size': 12.5, class: 's-text' }, svg, 'Existing fit');
+    const cross = el('line', { y1: top, y2: H - bottom, stroke: 'var(--axis)', 'stroke-width': 1, visibility: 'hidden' }, svg);
+    const d1 = el('circle', { r: 4.5, fill: 'var(--series-1)', stroke: 'var(--surface)', 'stroke-width': 2, visibility: 'hidden' }, svg);
+    const d2 = el('circle', { r: 4.5, fill: 'var(--series-2)', stroke: 'var(--surface)', 'stroke-width': 2, visibility: 'hidden' }, svg);
+    const hit = el('rect', { x: left - 10, y: top, width: W - left - right + 20, height: H - top - bottom, fill: 'transparent' }, svg);
+    hit.addEventListener('pointermove', function (evt) {
+      const bb = svg.getBoundingClientRect();
+      const x = (evt.clientX - bb.left) / bb.width * W;
+      const i = Math.max(0, Math.min(rows.length - 1, Math.round((x - left) / (W - left - right) * (rows.length - 1))));
+      const r = rows[i];
+      [cross, d1, d2].forEach(function (e) { e.setAttribute('visibility', 'visible'); });
+      cross.setAttribute('x1', X(i)); cross.setAttribute('x2', X(i));
+      d1.setAttribute('cx', X(i)); d1.setAttribute('cy', Y(r.one_pass));
+      d2.setAttribute('cx', X(i)); d2.setAttribute('cy', Y(r.existing));
+      showTip(evt, 'Page ' + r.page, [
+        { color: 'var(--series-1)', value: r.one_pass.toFixed(3) + ' nm', name: 'One pass' },
+        { color: 'var(--series-2)', value: r.existing.toFixed(3) + ' nm', name: 'Existing fit, ' + r.existing_rounds + ' rounds' + (r.existing_converged ? '' : ', not settled') }]);
+    });
+    hit.addEventListener('pointerleave', function () {
+      [cross, d1, d2].forEach(function (e) { e.setAttribute('visibility', 'hidden'); });
+      hideTip();
+    });
+    const tab = document.getElementById('tab5');
+    const head = h('tr', h('thead', tab));
+    ['Page', 'One pass (nm)', 'Existing fit (nm)', 'Difference (nm)', 'Existing: rounds'].forEach(function (t, i) { h('th', head, t, i ? 'num' : ''); });
+    const body = h('tbody', tab);
+    rows.forEach(function (r) {
+      const tr = h('tr', body);
+      h('td', tr, String(r.page));
+      h('td', tr, r.one_pass.toFixed(3), 'num');
+      h('td', tr, r.existing.toFixed(3), 'num');
+      h('td', tr, fmt(r.one_pass - r.existing, 3, true), 'num');
+      h('td', tr, r.existing_rounds + (r.existing_converged ? '' : ' (not settled)'), 'num');
+    });
+  })();
+
+  // ------------------------------------------------------------------ small tables
+  (function () {
+    const tab = document.getElementById('tabblur');
+    const head = h('tr', h('thead', tab));
+    ['True blur', 'One pass: page mean error', 'fitted blur', 'Existing: page mean error', 'fitted blur'].forEach(function (t, i) { h('th', head, t, i ? 'num' : ''); });
+    const body = h('tbody', tab);
+    const pick = DATA.truth.filter(function (r) {
+      const x = r.extra || {};
+      return r.name === 'circle100_square' && r.family === 'lens' && r.existing && Object.keys(x).every(function (k) { return k === 'blur'; });
+    }).sort(function (a, b) { return Number((a.extra || {}).blur || 65) - Number((b.extra || {}).blur || 65); });
+    pick.forEach(function (r) {
+      const tr = h('tr', body);
+      h('td', tr, Number((r.extra || {}).blur || 65).toFixed(0) + ' nm');
+      h('td', tr, fmt(r.one_pass.error, 3, true) + ' nm', 'num');
+      h('td', tr, fmt(r.one_pass.blur[0], 1) + ' nm', 'num');
+      h('td', tr, fmt(r.existing.error, 3, true) + ' nm', 'num');
+      h('td', tr, fmt(r.existing.blur[0], 1) + ' nm', 'num');
+    });
+    const o = pick.map(function (r) { return r.one_pass.error; }), e = pick.map(function (r) { return r.existing.error; });
+    const tr = h('tr', body);
+    h('td', tr, 'CD moves by');
+    h('td', tr, (Math.max.apply(null, o) - Math.min.apply(null, o)).toFixed(2) + ' nm', 'num');
+    h('td', tr, '', 'num');
+    h('td', tr, (Math.max.apply(null, e) - Math.min.apply(null, e)).toFixed(2) + ' nm', 'num');
+    h('td', tr, '', 'num');
+
+    const td = document.getElementById('tabdense');
+    const hd = h('tr', h('thead', td));
+    ['Pattern (true blur 65 nm)', 'One pass: page mean error', 'fitted blur', 'Existing: page mean error', 'fitted blur'].forEach(function (t, i) { h('th', hd, t, i ? 'num' : ''); });
+    const bd = h('tbody', td);
+    DATA.truth.filter(function (r) { return DENSE[r.name] && r.existing; }).forEach(function (r) {
+      const tr2 = h('tr', bd);
+      h('td', tr2, r.label);
+      h('td', tr2, fmt(r.one_pass.error, 1, true) + ' nm', 'num');
+      h('td', tr2, fmt(r.one_pass.blur[0], 0) + ' nm', 'num');
+      h('td', tr2, fmt(r.existing.error, 1, true) + ' nm', 'num');
+      h('td', tr2, fmt(r.existing.blur[0], 0) + ' nm', 'num');
+    });
+  })();
+})();
+</script>
+</body>
+</html>
