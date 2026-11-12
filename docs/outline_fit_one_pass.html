@@ -168,7 +168,7 @@ footer { margin-top: 3em; padding-top: 1.2em; border-top: 1px solid var(--border
 <body>
 <div class="layout">
   <header class="head">
-    <p class="eyebrow">Proposal &middot; nothing built in the library</p>
+    <p class="eyebrow">Proposal &middot; approved 12 November 2026 &middot; not built yet</p>
     <h1>Outline fit in one pass</h1>
     <p class="meta">12 November 2026 &middot; measured on this PC (one RTX 4060 Ti) with a scratch prototype &middot; for the batch of 1,500-page images</p>
   </header>
@@ -182,11 +182,12 @@ footer { margin-top: 3em; padding-top: 1.2em; border-top: 1px solid var(--border
       <li><a href="#steps">3. The procedure, step by step</a></li>
       <li><a href="#time">4. Time, measured</a></li>
       <li><a href="#accuracy">5. Accuracy, measured</a></li>
+      <li><a href="#ends">5.5 Two possible answers</a></li>
       <li><a href="#changes">6. What changes in your numbers</a></li>
       <li><a href="#limits">7. What these tests do not show</a></li>
       <li><a href="#batch">8. In the batch</a></li>
-      <li><a href="#questions">9. Questions for you</a></li>
-      <li><a href="#build">10. If you say yes</a></li>
+      <li><a href="#questions">9. Questions and your answers</a></li>
+      <li><a href="#build">10. The build</a></li>
     </ol>
   </nav>
 
@@ -201,8 +202,9 @@ footer { margin-top: 3em; padding-top: 1.2em; border-top: 1px solid var(--border
     <ul>
       <li><b>What changes.</b> The fit no longer goes back and forth 10 to 14 times between the holes and the page&rsquo;s outline. It builds the page&rsquo;s average hole once, fits the outline and the blur to it directly, and, if a size per hole is wanted, measures every hole in three short sweeps over the page. The model, its parameters and the outputs are the existing outline fit&rsquo;s.</li>
       <li><b>Accuracy is not traded away.</b> On 17 generated pages with known hole sizes, the page&rsquo;s mean CD is closer to the truth than the existing fit&rsquo;s on 15 and equal to it within 0.01 nm on the other 2 (Fig. 4). On the test file, whose true sizes are not known, the two differ by 0.11 nm on average; on a generated copy of it with known sizes, one pass is 0.02 nm above the truth and the existing fit 0.04 nm below.</li>
+      <li><b>Found after the proposal: on some pages the fit has two possible answers</b>, 0.02 to 0.65 nm apart (0.19 nm at 100 nm holes), and where the fit starts decides which one it gives. It is a property of the outline model, not of the speed-up. It also means the lens numbers above are flattered by the generated pages (section 5.5).</li>
       <li><b>What is not known.</b> Every page used here is generated. That includes the test TIFF in this repo (section 7). Real ACTIS pages have to be tried on the remote; that needs the method in the library first (section 10).</li>
-      <li><b>What I need from you:</b> four answers (section 9).</li>
+      <li><b>Decided on 12 November 2026:</b> build it beside <code>outline_fit</code>, in the folder reports first, with the page mean only, so that the two can be compared on real images (sections 9 and 10).</li>
     </ul>
 
     <h2 id="why">1. Why the current fit cannot reach a minute</h2>
@@ -366,7 +368,7 @@ footer { margin-top: 3em; padding-top: 1.2em; border-top: 1px solid var(--border
     <ul>
       <li><b>Page mean.</b> One pass is closer to the truth on 15 of the 17 pages; on the other 2 the two are equal within 0.01 nm. The largest gains are on shapes the alternation does not settle on in 14 rounds: 160 &times; 80 nm ellipses (−0.13 against −2.01 nm) and the staggered array (+0.09 against +0.79 nm).</li>
       <li><b>Per hole</b> (table under Fig. 4), with the lens form. A 1 nm bigger hole reads 0.99 to 1.03 nm bigger (existing: 0.98 to 1.05). The scatter per hole is the same within 3 %. A 10 % brighter hole reads at most 0.08 nm bigger (existing: up to 0.23 nm).</li>
-      <li><b>Repeats.</b> The same page fitted twice gives the same page CD to 0.0002 nm and the same hole CDs to 0.0006 nm rms. The existing fit on the GPU differs between runs by up to 0.05 to 0.1 nm on some pages.</li>
+      <li><b>Repeats.</b> The same page fitted twice gives the same page CD to 0.0002 nm and the same hole CDs to 0.0006 nm rms (on the small dense patterns of section 5.4, where the answer is poorly determined: 0.02 to 0.07 nm). The existing fit on the GPU differs between runs by up to 0.05 to 0.1 nm on some pages.</li>
     </ul>
 
     <h3>5.2 The test file</h3>
@@ -391,11 +393,64 @@ footer { margin-top: 3em; padding-top: 1.2em; border-top: 1px solid var(--border
     <p>Below about 70 nm at these pixels and this blur, size and blur cannot be told apart from the page (the existing fit&rsquo;s documented limit). One pass is less wrong there, but not right:</p>
     <div class="table-wrap"><table id="tabdense"></table></div>
 
+    <h3 id="ends">5.5 Two possible answers (found after the proposal)</h3>
+    <figure>
+      <div class="svg-wrap">
+      <svg viewBox="0 0 760 236" role="img" aria-label="Sketch: the misfit of the model has two valleys; the fit ends in the valley it starts next to.">
+        <line x1="60" y1="196" x2="720" y2="196" class="s-line" stroke-width="1"/>
+        <text x="390" y="226" text-anchor="middle" class="s-text2" font-size="12.5">hole size and blur shape, changed together &rarr;</text>
+        <text x="22" y="110" text-anchor="middle" class="s-text2" font-size="12.5" transform="rotate(-90 22 110)">misfit to the average hole</text>
+        <path d="M70 60 C 140 76, 170 168, 240 168 C 300 168, 320 104, 390 100 C 455 96, 470 168, 540 168 C 600 168, 640 84, 710 62" fill="none" stroke="var(--series-1)" stroke-width="2"/>
+        <circle cx="240" cy="168" r="5" fill="var(--series-1)" stroke="var(--surface)" stroke-width="2"/>
+        <circle cx="540" cy="168" r="5" fill="var(--series-1)" stroke="var(--surface)" stroke-width="2"/>
+        <text x="240" y="188" text-anchor="middle" class="s-text" font-size="12.5" font-weight="600">answer A</text>
+        <text x="540" y="188" text-anchor="middle" class="s-text" font-size="12.5" font-weight="600">answer B</text>
+        <text x="240" y="22" text-anchor="middle" class="s-text2" font-size="12.5">blur with the lens&rsquo;s faint rings</text>
+        <text x="240" y="38" text-anchor="middle" class="s-text2" font-size="12.5">100 nm circles: +0.01 nm from the truth</text>
+        <text x="540" y="22" text-anchor="middle" class="s-text2" font-size="12.5">blur without them, wider</text>
+        <text x="540" y="38" text-anchor="middle" class="s-text2" font-size="12.5">the same page: −0.17 nm</text>
+        <circle cx="150" cy="111" r="4" fill="var(--text-2)"/>
+        <text x="166" y="104" text-anchor="start" class="s-text2" font-size="12.5">start</text>
+        <path d="M157 119 C 180 142, 200 158, 228 165" fill="none" class="s-line" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ah)"/>
+        <text x="390" y="88" text-anchor="middle" class="s-muted" font-size="12">a ridge the fit does not cross</text>
+      </svg>
+      </div>
+      <figcaption><b>Fig. 6.</b> A sketch, not a measured curve; the two end points and their page CDs are measured (100 nm circles on a square grid, lens form). The two valleys are almost equally deep: their misfits differ by 0.3 %. The fit walks downhill from its start and stops in the valley it reaches first.</figcaption>
+    </figure>
+    <ul>
+      <li><b>What happens.</b> The fit adjusts the hole&rsquo;s size and the blur&rsquo;s shape together. A slightly different blur shape with a slightly different hole fits a page&rsquo;s average hole almost as well, so on some pages there are two answers. Started from 81 different points on each page, the fit ends as the table shows.</li>
+      <li><b>It belongs to the outline model</b> (one sharp outline, one free blur shape), so the existing <code>outline_fit</code> has the same valleys: same model, same start. Whether it ends in the same one on a given page was not tested.</li>
+    </ul>
+    <figure>
+      <div class="table-wrap"><table class="wide">
+        <thead><tr><th>Page (full size)</th><th>lens form: where the fit can end</th><th class="num">apart</th><th>gauss2 form: where the fit can end</th><th class="num">apart</th></tr></thead>
+        <tbody>
+          <tr><td>100 nm circles, square array</td><td>−0.17, <b>+0.01</b></td><td class="num">0.19</td><td><b>−0.14</b></td><td class="num">one answer</td></tr>
+          <tr><td>100 nm circles, blur 72 nm</td><td><b>−0.11</b>, +0.09</td><td class="num">0.21</td><td><b>−0.16</b>, +0.09</td><td class="num">0.24</td></tr>
+          <tr><td>100 nm circles, staggered array</td><td>+0.06, <b>+0.09</b></td><td class="num">0.02</td><td><b>+0.06</b></td><td class="num">one answer</td></tr>
+          <tr><td>80 nm circles</td><td>−0.80, <b>−0.23</b></td><td class="num">0.57</td><td><b>−0.82</b>, −0.80, −0.74</td><td class="num">0.09</td></tr>
+          <tr><td>80 nm circles, blur 72 nm</td><td>−0.72, −0.70, <b>−0.08</b></td><td class="num">0.65</td><td>−0.73, <b>−0.68</b>, −0.56, −0.52</td><td class="num">0.21</td></tr>
+          <tr><td>150 nm squares, staggered array</td><td><b>+0.12</b></td><td class="num">one answer</td><td><b>+0.11</b></td><td class="num">one answer</td></tr>
+          <tr><td>160 × 80 nm ellipses</td><td><b>−0.13</b></td><td class="num">one answer</td><td><b>−0.26</b></td><td class="num">one answer</td></tr>
+          <tr><td>250 nm circles</td><td><b>+0.14</b></td><td class="num">one answer</td><td><b>+0.06</b></td><td class="num">one answer</td></tr>
+          <tr><td>Test file, page 0 (page CD)</td><td><b>100.66</b>, 100.70</td><td class="num">0.04</td><td><b>100.71</b></td><td class="num">one answer</td></tr>
+          <tr><td>Test file, page 22 (page CD)</td><td><b>100.75</b>, 100.80</td><td class="num">0.04</td><td><b>100.82</b></td><td class="num">one answer</td></tr>
+        </tbody>
+      </table></div>
+      <figcaption>Error of the page&rsquo;s mean CD in nm on generated pages; for the test file the page CD itself (its truth is not known). <b>Bold</b>: where the fit as built ends. An end is listed when at least 3 of the 81 starts reach it; ends closer than 0.02 nm count as one.</figcaption>
+    </figure>
+    <ul>
+      <li><b>The lens numbers of section 5.1 are flattered.</b> The lens form starts with its lens value at 0.5 cycles per pixel, as the existing fit does; the generator drew the pages with 0.48. So on generated pages the fit starts next to the right valley. On your images nobody knows the lens&rsquo;s value, and the other valley is 0.19 nm away on 100 nm holes and 0.57 nm on 80 nm holes.</li>
+      <li><b>Which valley fits better depends on how far the model follows the neighbours&rsquo; light.</b> With the prototype&rsquo;s reach of about 21 px, the valley with the generator&rsquo;s lens value fits worse than the other one on all 4 generated pages tried. With 30 px it fits better on 3 of the 4; with 40 px the fitted blur on one of them is the generator&rsquo;s within 0.4 %. The longer reach costs 5 to 12 ms per page and does not move the answer inside a valley (0.02 nm at most).</li>
+      <li><b>A further, false gauss2 answer came from a defect of my prototype, now fixed.</b> The form&rsquo;s two Gaussians can swap roles, and a fit that drifted into the swapped arrangement stopped at a limit, short of the best fit. On small images (135 to 5,000 holes) the page CD then depended on which hole positions the fit was handed, by 0.4 to 0.6 nm; with the fix by 0.005 nm. On full pages it happened on 2 of 58 and moved one of them by 0.02 nm; no number on this page changed (largest change on the test file: 0.0004 nm).</li>
+      <li><b>For your test on real images.</b> A difference between <code>outline_fit_fast</code> and <code>outline_fit</code> of about 0.2 nm on 100 nm holes (0.6 nm on 80 nm holes) can come from this alone, with nothing wrong in either procedure. Each image&rsquo;s report line will show the blur&rsquo;s second part for both methods, so that it can be seen. Compare with gauss2 first: after the fix it has one answer on 7 of the 10 pages above, the lens form on 3.</li>
+    </ul>
+
     <h2 id="changes">6. What changes in your numbers</h2>
     <ul>
       <li><b>Page means move by a few hundredths to a few tenths of a nanometre</b> against the existing outline fit (section 5), towards the truth on the generated pages. Results of the two must not be mixed in one comparison.</li>
       <li><b>The page CD is the size of the average hole.</b> When hole sizes spread widely, that is above the average of the sizes by (spread)&sup2; / (2 &times; CD): 0.03 nm at a 2.5 nm spread, 0.125 nm at 5 nm (measured: +0.125). The existing fit has the same property.</li>
-      <li><b>The blur&rsquo;s second part is held near its default where a page does not determine it</b> (gauss2 form: a second, wider Gaussian that the page&rsquo;s blur may not have). Its width and weight are then arbitrary; the CD does not depend on them (&plusmn;0.002 nm over the whole range, measured). The existing fit lets them wander, which is why its blur readings jump from page to page.</li>
+      <li><b>The blur&rsquo;s second part is held near its default where a page does not determine it</b> (gauss2 form: a second, wider Gaussian that the page&rsquo;s blur may not have). Its width and weight are then arbitrary. On the test file, where the fit gives the second part under 7 % of the light, the CD does not depend on them (&plusmn;0.002 nm over the whole range, measured); on pages with another blur shape it can (section 5.5). The existing fit lets them wander, which is why its blur readings jump from page to page.</li>
       <li><b>Holes are found by the fit&rsquo;s own finder</b>, not by the report&rsquo;s segmentation. In the library, the holes that the other methods measure would be matched to it by position.</li>
       <li><b>Nothing else is new:</b> same outline (superellipse with harmonics), same blur forms, same hole stage, same CD definition.</li>
     </ul>
@@ -407,6 +462,7 @@ footer { margin-top: 3em; padding-top: 1.2em; border-top: 1px solid var(--border
       <li><b>The remote.</b> Nothing was timed there. Four GPUs at once were not tried (this PC has one).</li>
       <li><b>Pages without the pattern.</b> The fit does not recognise them: on the test file&rsquo;s blank pages it finds 27,000 noise peaks and fits them. The hole check has to stay in front of it. On the file&rsquo;s page with another pattern the page fit&rsquo;s leftover is 15 times the noise, which is a usable alarm; on the blank pages nothing looks wrong except a fitted blur of 14 nm.</li>
       <li><b>Small holes.</b> Section 5.4.</li>
+      <li><b>Which of two answers is the right one on a real page</b> (section 5.5). On generated pages the truth is known; on yours it is not, and the model cannot tell by itself.</li>
       <li><b>Not in the prototype yet:</b> measuring only a part of a page (your tiles), dark holes on a bright page, the switch that gives every hole the page&rsquo;s size when holes are too small for a size each, the x and y widths per hole, the workbench&rsquo;s outline drawing.</li>
     </ul>
 
@@ -418,24 +474,31 @@ footer { margin-top: 3em; padding-top: 1.2em; border-top: 1px solid var(--border
       <li><b>Per page it would write:</b> holes found and used, mean CD, x and y widths, blur, the page fit&rsquo;s leftover against the noise, the change between the first and the final page fit, and with step 6 the holes measured and the share at the size bound. The per-hole values can be kept or dropped.</li>
     </ul>
 
-    <h2 id="questions">9. Questions for you</h2>
-    <ol>
-      <li><b>Page values only, or a size for every hole?</b> The batch&rsquo;s <code>pages.csv</code> holds the mean per page today. Without the size per hole the fit takes 80 instead of 137 ms per page, and the page mean is the same number either way.</li>
-      <li><b>What can your hole check hand over per page?</b> I assume: the list of kept tiles (rectangles). And inside a kept tile, is the pattern always the reference page&rsquo;s pattern, or can a kept tile hold something else next to it?</li>
-      <li><b>Where does the one minute of reading come from?</b> I assume the remote, reading from its disk. And how many CPU threads does the remote have (<code>$env:NUMBER_OF_PROCESSORS</code>, one number)? One core per GPU is needed.</li>
-      <li><b>Shall I build it?</b> As a new method beside the existing one (section 10). Its first job on the remote is one command that fits a few of your real pages with both methods and prints five numbers.</li>
-    </ol>
+    <h2 id="questions">9. Questions and your answers</h2>
+    <p>Asked with this page; answered on 12 November 2026.</p>
+    <div class="table-wrap"><table class="wide">
+      <thead><tr><th>Question</th><th>Your answer</th></tr></thead>
+      <tbody>
+        <tr><td>Page values only, or a size for every hole?</td><td>The page mean for now. A size per hole possibly later, and only once the method has proven good enough.</td></tr>
+        <tr><td>What can your hole check hand over per page?</td><td>On the remote every page is cut into m tiles; phase correlation against the reference&rsquo;s tiles, over all N pages at once, gives the valid (page, tile) pairs. The fit does not have to follow this; a better way of picking the pattern may be proposed.</td></tr>
+        <tr><td>Where does the one minute of reading come from, and how many CPU threads has the remote?</td><td>Measured on the remote. 64 threads.</td></tr>
+        <tr><td>Shall I build it?</td><td>Yes: beside <code>outline_fit</code>, available in the report pipeline, so that it can be compared with <code>outline_fit</code> on real images in a folder. In a fresh session, from a handoff.</td></tr>
+      </tbody>
+    </table></div>
+    <p>Still open: whether the real test images are PNGs in a folder, as with the earlier reports; and whether a tile that passes the check always holds only the reference&rsquo;s pattern (this matters for the batch, not for the first build).</p>
 
-    <h2 id="build">10. If you say yes</h2>
+    <h2 id="build">10. The build</h2>
+    <p>The plan a fresh session builds from is <code>docs/outline_fit_fast_handoff.md</code>. In short:</p>
     <ol>
-      <li><b>Library:</b> a new method <code>outline_fit_fast</code> beside <code>outline_fit</code> (nothing replaced): <code>subpx.fit_outline_fast</code>, a method name for <code>measure_cds</code>, GPU only at first. Tests: the generated pages of section 5.1 as regression tests with their numbers.</li>
-      <li><b>Batch:</b> <code>scripts/cd_batch.py</code> gets the method, the area per page from the hole check, one process per GPU with 20 pages per call, the per-page columns of section 8.</li>
-      <li><b>Remote check, one command:</b> fits the first few hole pages of one of your images with both methods and prints: seconds per page, the two page CDs, their difference, the leftover against the noise. That is the first evidence on real pages.</li>
-      <li><b>Then decide</b> on the size per hole, on a second centring round, and on the items of section 7 in the order you need them.</li>
+      <li><b>First: library and folder reports.</b> A new method <code>outline_fit_fast</code> beside <code>outline_fit</code> (nothing replaced), on the GPU, giving the image&rsquo;s mean CD, x and y widths and blur. Both folder reports get a flag for it. With both methods switched on, a run ends with one line that compares them over the folder.</li>
+      <li><b>Then your check on real images:</b> one command on the remote, one line to type back.</li>
+      <li><b>After your verdict: the TIFF batch.</b> The area of each page from the hole check (your tiles as they are, or a hole-by-hole check against the reference&rsquo;s average hole that the fit can do itself: to be tried beside the tiles first), one process per GPU with 20 pages per call.</li>
+      <li><b>Only if the method proves itself:</b> a size per hole (step 6).</li>
     </ol>
+    <p>Three things turned up while the handoff was prepared. Two were defects and are fixed in the prototype: on images whose hole pitch is a whole number of pixels the first fit could land on a nonsense answer, and the gauss2 form could stop in a swapped arrangement of its two Gaussians (section 5.5). The third is not a defect and stays: on some pages the fit has two possible answers (section 5.5). An earlier version of this page said that the lens form does not depend on its start; that was wrong.</p>
 
     <footer>
-      <p>Prototype and every measurement: <code>artifacts/outline_fit/fast/</code> (scratch, on this PC only; its <code>README.txt</code> lists the scripts and commands). Builder&rsquo;s notes: <code>docs/outline_fit_one_pass.md</code>. The earlier proposal: <code>docs/outline_fit_speed.md</code>. Nothing in <code>subpx/</code> was changed.</p>
+      <p>Handoff for the build: <code>docs/outline_fit_fast_handoff.md</code>. Method, settings and every measurement: <code>docs/outline_fit_one_pass.md</code>. Prototype: <code>artifacts/outline_fit/fast/</code> (its code is in the repo, its run results on this PC only; <code>README.txt</code> lists the scripts). The earlier proposal: <code>docs/outline_fit_speed.md</code>. Nothing in <code>subpx/</code> was changed.</p>
     </footer>
   </article>
 </div>

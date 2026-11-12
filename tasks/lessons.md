@@ -22,6 +22,10 @@ General rules from past corrections, one or two lines each. Incident details are
 ## Testing and comparing
 - Test beyond the happy path: the user's example image (examples/data/synthetic_ch), staggered as well as square
   arrays, larger, irregular and rotated shapes, more blur; check the share of features measured, not only the error.
+  Before handing a method on, also run it the way its caller will: the caller's own inputs (its seeds), its small
+  images (hundreds of holes, not only tens of thousands), and a pitch of a whole number of pixels.
+- Before quoting a fit's accuracy or stability, start it from many points on the same data and list where it ends
+  (two changed starts are not a map), and check that no start value equals the value the test data were made with.
 - Define per-feature regions relative to the feature's own territory, never as a fixed fraction of the pitch.
 - Test a diagnostic's reading guide on planted causes: plant each candidate and check it names the right one.
 - Comparisons: calibrate once and reuse it for every image compared (per-image calibration fakes repeatability); a

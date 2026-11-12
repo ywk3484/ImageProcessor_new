@@ -6,6 +6,7 @@
 2. ShapeFitter.fit under NumPy on a stack synthesised from the model (a hole without neighbours), with noise: the
    outline CD recovered from the grid of starts and from a start at the truth.
 3. One full page per call on the GPU (steps A to C): seconds.
+4. gauss2 with its two Gaussians exchanged (pipeline.exchanged) is the same template; no GPU needed.
 """
 from __future__ import annotations
 
@@ -78,7 +79,23 @@ def one_page():
         print(f"3. one full page per call [{family}]: {min(times[1:]) * 1e3:.0f} to {max(times[1:]) * 1e3:.0f} ms (CD {out['cd']:.3f} nm)")
 
 
+def exchange():
+    from pipeline import exchanged, second_is_narrower
+
+    t = Template(upsample=8, size_px=24, blur="gauss2")
+    sf = ShapeFitter(t, box_px=56, f_max=0.6, U=4, R=8, n_poly=256, xp=np)
+    th = t.pack(2.4, 2.3, 2.2, 0.1, [[0.01, -0.02], [0.015, 0.005]], t.blur_pack(s1x=1.6, s1y=1.5, s2x=1.2, s2y=1.1, w2=0.45))
+    ex = exchanged(t, th)
+    a, b = sf.template_hat(th[None])[0, :, 0], sf.template_hat(ex[None])[0, :, 0]
+    edge = exchanged(t, t.pack(2.4, 2.3, 2.2, 0.1, np.zeros((2, 2)), t.blur_pack(w2=0.05)))
+    print(f"4. gauss2 exchange: second Gaussian the narrower before {second_is_narrower(t, th)}, after {second_is_narrower(t, ex)}; "
+          f"the two template spectra differ by {np.abs(a - b).max() / np.abs(a).max():.1e} of the peak; exchanged twice gives "
+          f"theta back to {np.abs(exchanged(t, ex) - th).max():.1e}; a weight of 0.05 becomes {1 / (1 + np.exp(-edge[-1])):.2f} "
+          f"(the 0.6 bound: then it is not the same blur)")
+
+
 if __name__ == "__main__":
+    exchange()
     for fam in ("gauss2", "lens"):
         jacobian(fam)
     for fam in ("gauss2", "lens"):

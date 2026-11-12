@@ -148,50 +148,43 @@ half width), real noise 7.5 grey levels flat across levels (measured).
 still what would make the existing `outline_fit` itself faster (workbench, small regions, CPU); the batch needs the
 one-pass method below. Its "reference start" stays withdrawn. Its "real pages" are pages of the generated test file.
 
-# Outline fit in one pass: the batch at reading speed (2026-11-12; proposal with a measured prototype, nothing built)
+# Outline fit in one pass: the batch at reading speed (2026-11-12; approved, handoff written, nothing built in subpx/)
 
 User (2026-11-12): one TIFF = up to 1,500 pages, 2-4 GB, thousands of them; the pattern areas are picked by PCC against
 a reference page cut into tiles (partial pages count); reading a TIFF takes about 1 minute and the fit must take less;
 one page at a time only at hundreds of ms per page; some accuracy may be given up if it cannot be avoided.
 
-Page for the user: `docs/outline_fit_one_pass.html`. Builder's notes (method, settings, findings, build order):
-`docs/outline_fit_one_pass.md`. Prototype and every run: `artifacts/outline_fit/fast/` (local; `README.txt`).
+**Handoff for the build: `docs/outline_fit_fast_handoff.md`.** Page for the user: `docs/outline_fit_one_pass.html`.
+Notes (method, settings, measurements, findings): `docs/outline_fit_one_pass.md`. Prototype, tracked:
+`artifacts/outline_fit/fast/` (`README.txt`; run results on this PC only). The proposal's finished items (method,
+time, accuracy, checks, first review) are in `tasks/archive/todo-2026-11.md`.
 
-- [x] Method: the page's average hole with the neighbours' light left in and modelled (one map of "who stands where"
-      per sub-pixel class), outline + blur by one direct least-squares fit; two centring passes of the hole stage;
-      average + fit again; optionally three size passes. No rounds. Same model, parameters and CD definition.
-- [x] Time (prototype, this PC's RTX 4060 Ti, 40 hole pages of the test file, 20 pages per call): 80 ms per page for
-      the page values, 137 ms with a size per hole = 2.0 / 3.4 min per 1,500-page image on one GPU; / 4 = 30 / 51 s
-      on four such GPUs (not measured; the remote's are faster). Existing fit: 104-150 s per page.
-- [x] Accuracy on 20 generated pages with known sizes, both fits: page mean closer to the truth than the existing
-      fit on 15 of the 17 pages of 80 nm and up, equal within 0.01 nm on 2 (lens: +0.01 / -0.23 / +0.09 / +0.12 /
-      +0.14 / -0.13 / 0.00 nm; existing -0.20 / -0.23 / +0.79 / +0.19 / +0.14 / -2.01 / -0.11); per-hole response
-      0.99-1.03; dense small holes wrong in both. Test file: +0.105 +- 0.018 nm from the existing fit, per hole
-      0.05 nm rms apart; repeats to 0.0002 nm.
-- [x] Proposal page, notes, checks (pages without the pattern, part of a page, repeats, load).
-- [ ] The user's answers: (1) page values only or a size per hole; (2) what the hole check hands over per page
-      (kept tiles?) and whether a kept tile always holds the reference's pattern; (3) where the minute of reading is
-      measured, and the remote's CPU threads; (4) build it?
-- [ ] Build (notes section 8): `outline_fit_fast` beside `outline_fit` (library, tests with the truth pages), the
-      batch (area per page, one process per GPU, 20 pages per call), one command for the remote that fits real
-      pages with both methods and prints five numbers.
-
-Review (2026-11-12): the target is met on this PC's numbers with four GPUs no faster than this one. Not shown: any
-real page (`stripe1_board1.tif` is generated: exact 8.5 px lattice, +-0.3 px uniform shifts; none is on this PC),
-the remote, four GPUs at once. Not in the prototype: area input, dark holes, the per-hole-size switch-off, x / y
-widths per hole. The fit does not recognise pages without the pattern (the hole check stays in front).
-
-Decision (user, 2026-11-12, later): build it beside `outline_fit`, in the folder reports first, page mean only, in a
-fresh session. Answers: page mean for now (a size per hole only once the method is proven); the minute of reading is
+Decision (user, 2026-11-12): build it beside `outline_fit`, in the folder reports first, page mean only, in a fresh
+session. Answers: page mean for now (a size per hole only once the method is proven); the minute of reading is
 measured on the remote; the remote has 64 CPU threads; the remote picks pattern areas by PCC of page tiles against
-reference tiles, (N, m) valid indices. **Handoff: `docs/outline_fit_fast_handoff.md`** (scope, port table, exact
-wiring points, tests with the prototype's numbers, pitfalls). Prototype code is tracked under
-`artifacts/outline_fit/fast/`.
+reference tiles, (N, m) valid indices.
+
 - [ ] Phase 1 (handoff section 5): library `fit_outline_fast` + `measure_cds` method `outline_fit_fast` (GPU, page
-      values), `--outline-fit-fast` in `cd_report.py` and `cd_fast_report.py` with one comparison line, tests, docs
+      values), `--outline-fit-fast` in `cd_report.py` and `cd_fast_report.py` with one comparison line and the
+      blur's second part of both methods per image, tests, docs
 - [ ] Give the user the one remote command; they type back the comparison line (real images, both methods)
+- [ ] With the result on real images: the pair reach (30 px?) and whether the fit should try both of its ends
+      (handoff 6.3, 6.13)
 - [ ] Phase 2 after the user's verdict: TIFF batch, areas (tiles or per-hole selection: handoff section 8)
 - [ ] Ask: are the real test images PNGs in a folder; does a kept tile always hold only the reference's pattern
-Found late: a pitch of a whole number of pixels broke the first fit (fixed in the prototype); gauss2 depends on the
-start at 0.1 nm on some pages, lens does not (notes 6.12-6.14).
 
+Review (2026-11-12, after the handoff's first version: the prototype run the way the reports will use it, with
+their seeds, on small images, and from 81 starts per page; notes 6.12-6.17, page section 5.5):
+- Defect, fixed in the prototype: a pitch of a whole number of pixels broke the first fit.
+- Defect, fixed in the prototype (`pipeline.in_order`): gauss2 could stop with its two Gaussians exchanged; on small
+  images the page CD then depended on the seeds handed in by 0.4-0.6 nm; 0.005 nm with the step. Full pages: 2 of
+  58 affected, the page's numbers unchanged (0.0004 nm).
+- Not a defect, stays: on some pages the fit has more than one end point and its start decides (lens: 7 of 10 full
+  pages, 0.02-0.65 nm apart; gauss2: 3 of 10). It belongs to the outline model. The lens errors first reported are
+  flattered: the generator's pupil (0.48) is where the fit starts (0.5); at the other end 100 nm circles read -0.17
+  instead of +0.01 nm.
+- Measured, not adopted: a pair reach of 30 px instead of 21 makes the generator's lens end the better fit on 3 of 4
+  generated pages; +5 to 12 ms per page.
+- Not found: why small images read 0.3-0.6 nm high at 135 holes (1 to 4 of the fit's own standard errors; the
+  image border is ruled out).
+- Withdrawn: "gauss2 depends on its start by 0.1 nm, lens is stable to 0.002 nm" (two start changes are not a map).

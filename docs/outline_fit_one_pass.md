@@ -7,6 +7,11 @@ handoff: the exact method, the settings, every measurement, what was tried and d
 `docs/outline_fit_one_pass.html`. It replaces `docs/outline_fit_speed.md` as the plan for the batch; that file's
 measurements of the existing fit still stand.
 
+Added later the same day, after running the prototype the way the reports will (their seeds, small images) and
+from many starts: findings 6.13 to 6.17 (the fit's end points, small images, the gauss2 exchange step now in the
+prototype, the pair reach, repeats). Section 5's tables were made before the exchange step; with it they are
+reproduced within 0.0004 nm (`runs/*_v5.*`).
+
 The prototype is in `artifacts/outline_fit/fast/` (its method and measurement scripts are tracked in git although
 `artifacts/` is ignored; the run results are on the development PC only); its `README.txt` lists every script and
 command.
@@ -95,6 +100,7 @@ class fills; the outermost bins are filled by part of a class and are left out).
     A  seeds -> plain stack -> Gamma -> first page fit                                  theta_0
     B  hole pass, size held: centre, brightness, level of every hole, two sweeps        (centres)
     C  plain stack with B's centres -> Gamma -> final page fit from theta_0             theta_1 = the page
+       (gauss2: a fit that ends with the two Gaussians exchanged is run again; 6.15)
     D  (optional) hole pass, size free, three sweeps with theta_1                       edge offset per hole
 
 - Seeds: Gaussian smoothing (sigma 1 px), local maxima within +-2 px above `lo + 0.3 (hi - lo)` (5 % and 99.8 %
@@ -123,6 +129,8 @@ class fills; the outermost bins are filled by part of a class and are left out).
 | Outline points | 256 (page fit), 256 (templates), 128 (far kernel) | |
 | Template grid for the hole passes | 8 per pixel, box `max(32, 2 (R + 6))` px | library: 24 or 48 px |
 | Sweeps | B 2, D 3 with step factor 1.3 | section 6.5, 6.6 |
+| Pair reach | `R + 13` px (20 or 21 px on the pages used) | 30 px changes which lens end fits better: 6.16 |
+| gauss2 exchange step | on, after C | 6.15 |
 | Pages per call | 20 | 10 to 40 make no difference |
 
 ## 5. Measurements
@@ -210,9 +218,10 @@ Copy of the test file (100 nm circles, pitch 8.5 px, placement 3.6 nm, Gaussian 
 3. **gauss2 on a page whose blur is one Gaussian is degenerate**: the second Gaussian's width and weight are free
    (and a very wide one trades against the constant). SciPy's solver took 1,289 evaluations to stop; the existing
    fit's blur parameters differ from page to page for this reason (s2 1.4 to 3.4 px, weight 0.007 to 0.10 on the
-   test file). The page CD does not depend on where they end (+-0.002 nm with the weight held anywhere from 0.02 to
-   0.45). The prototype holds them with weak priors, in chi-square units: `log(s2 / s1) ~ N(log 2, 0.7)` per axis,
-   `logit w2 ~ N(logit 0.05, 1.5)`. They need the stack's weights in 1 / variance units.
+   test file). On the test file the page CD does not depend on where they end (+-0.002 nm with the weight held
+   anywhere from 0.02 to 0.45); on pages with another blur shape it can (6.13). The prototype holds them with weak
+   priors, in chi-square units: `log(s2 / s1) ~ N(log 2, 0.7)` per axis, `logit w2 ~ N(logit 0.05, 1.5)`. They
+   need the stack's weights in 1 / variance units.
 4. **Centring against the plain stack is wrong.** One Gauss-Newton step of every centre against the stack itself
    (which holds the neighbours' mean light) pulled the centres with their neighbours and read the page +0.38 nm
    too big. Centring needs the page model (step B).
@@ -243,13 +252,102 @@ Copy of the test file (100 nm circles, pitch 8.5 px, placement 3.6 nm, Gaussian 
     a 300 nm outline (chi-square per bin 20) and stayed there. Fixed in the prototype: the grid is compared on
     each page's most populated class, and the first guess is the stack's second moment over its filled bins.
     Full pages did not change (lens: 0.000 nm on every page; gauss2: 0.013 nm at most on the test file).
-13. **gauss2 depends on the start at the 0.1 nm level on some pages.** The two start fixes moved the 80 nm circles
-    from -0.74 to -0.82 nm (response 1.12 to 1.03) and the 100 nm circles at blur 72 nm from -0.29 to -0.16 nm;
-    every lens result stayed within 0.002 nm. The generator's blur has no second Gaussian for gauss2 to find.
-14. **Small images, seeds from `measure_cds`** (pattern of the library's test page; error of the page CD, gauss2 /
-    lens): 135 stacked holes +0.02 / +0.31 nm; 999 holes -0.28 / +0.16; 4,941 holes (pitch 200 nm) +0.09 / -0.06;
-    21 holes +0.95 / +1.17. The library's `outline_fit` on the same images: +0.08, -0.16 (not settled), -0.52,
-    +0.35 nm. One image per call takes 0.23 s (gauss2) or 0.12 s (lens) for a full page.
+13. **On some pages the final fit has more than one end point; its start decides** (`basins.py`,
+    `runs/check_basins_a.log`, `_b.log`). On the pipeline's final stack the final stage was started from 81 points
+    round the pipeline's end (sizes x 0.92 / 1 / 1.08, exponent 1.7 / 2 / 2.5, blur widths x 0.8 / 1 / 1.25, three
+    settings of the blur's second part) and run to its end (400 iterations at most, `ftol 1e-12`). Error of the
+    page CD in nm (test file: the page CD); in brackets the starts that end there; * = the pipeline's own end:
+
+    | Page (full size) | lens | gauss2 (with 15) |
+    |---|---|---|
+    | 100 nm circles, square array | +0.01 * (43), -0.17 (36) | -0.14 * (81) |
+    | 100 nm circles, blur 72 nm | -0.11 * (47), +0.09 (30) | -0.16 * (40), +0.09 (39) |
+    | 100 nm circles, staggered | +0.09 * (41), +0.06 (28) | +0.06 * (81) |
+    | 80 nm circles | -0.23 * (40), -0.80 (31) | -0.82 * (43), -0.80 (7), -0.74 (30) |
+    | 80 nm circles, blur 72 nm | -0.08 * (52), -0.70 (19), -0.72 (6) | -0.68 * (38), -0.73 (21), -0.57 (3), -0.52 (14) |
+    | 150 nm squares, staggered | +0.12 * (80) | +0.11 * (67; 14 starts fell off) |
+    | 160 x 80 nm ellipses | -0.13 * (81) | -0.26 * (81) |
+    | 250 nm circles | +0.14 * (81) | +0.06 * (81) |
+    | test file, page 0 | 100.66 * (57), 100.70 (23) | 100.71 * (81) |
+    | test file, page 22 | 100.75 * (56), 100.80 (24) | 100.82 * (81) |
+
+    - lens: the two ends are a pupil end (cut-off 0.46 to 0.52 cycles/px) and an end with the pupil outside the
+      band (cut-off 0.75 up to the bound of 8) and a wider smear. On all seven pages with two ends the second
+      has the lower cost (by 16 to 533 chi-square units), although the generated pages were drawn with a pupil;
+      see 16 for why.
+    - The pipeline starts where the library's fit starts: cut-off 0.5; second Gaussian twice as wide with weight
+      0.05. The generator's pupil cut-off is 0.480 (`LENS_FWHM_FACTOR / lens_px`), so the lens form starts next
+      to the generator's own end: **the lens errors of 5.2 are flattered by the generated pages.** gauss2 is not
+      (the generator's blur is not of its form).
+    - It is a property of the model (one outline, one free blur shape): size trades against the blur's shape.
+      Whether the library's alternating fit ends at the same end on a given page was not tested.
+    - An earlier version of this entry said "gauss2 depends on the start at the 0.1 nm level, every lens result
+      stayed within 0.002 nm". That came from two changes of the start only and was wrong as a general statement.
+14. **Small images** (`small_pages.py`, `runs/small_pages_v5.log`; pattern of the library's test page). Error of
+    the page CD with `measure_cds`' seeds, gauss2 / lens: 135 stacked holes +0.63 / +0.31 nm; 999 holes +0.34 /
+    +0.16; 4,941 holes (pitch 200 nm) +0.09 / -0.06; 21 holes +0.95 / +1.17. With the method's own seeds the
+    same within 0.005 nm (gauss2) and 0.02 nm (lens). The library's `outline_fit` on the same images: +0.08, -0.16
+    (not settled), -0.52, +0.35 nm; its gauss2 second Gaussian ends at 1.98 px with 19 % of the light, 2.26 px
+    with 14 %, 1.56 px with 42 %, where the one-pass minimum has 3.3 to 3.5 px with 21 to 25 %.
+    - The fit's own standard error of the page CD (inverse of its Gauss-Newton matrix with the priors): 0.5 nm at
+      21 holes, 0.23 to 0.25 at 135, 0.08 at 999, 0.04 at 4,941. The errors above are 1 to 4 of those.
+    - Holes near the image border against inner holes (`ring.py`; same centres and model, only the stacked set
+      changes): lens, inner / ring: +0.78 (55 holes) / -0.04 (80 holes); +0.15 / +0.22; +0.03 / -0.21; -0.05 /
+      +0.01 (120 x 170, 300 x 400, 600 x 800, 900 x 1200 px). No trend: light from holes beyond the border is not
+      what makes small images read high. Not pinned down beyond that.
+    - Centres after B: 0.53 to 0.58 nm rms from the truth (both axes together), from seeds that are 2.5 to 3.1 nm
+      off (`measure_cds`) or 0.66 to 0.76 nm off (own).
+    - One image per call takes 0.23 s (gauss2) or 0.12 s (lens) for a full page.
+15. **gauss2: the exchanged half** (found with 14: the page CD depended on which seeds were handed in, by 0.62,
+    0.62 and 0.40 nm on the three larger small images). The two Gaussians can be exchanged without changing the
+    blur, but the bounds (`w2 <= 0.6`) and the priors are written for a wide, weak second one. A final fit that
+    drifts to a narrower second Gaussian stops with `w2` on the bound: cost 23 to 96 above the minimum, page CD
+    0.4 to 0.6 nm away. Whether it drifts depends on the first fit (the seeds' centres blur the first stack).
+    Started from the exchanged labels the fit walks to the minimum in about 20 iterations; nothing else holds
+    the two apart (restarting with only the blur's parameters from the other end reaches the other end; with only
+    the outline's it does not: a scratch test, not kept).
+    - The step (`pipeline.in_order`): after C, pages with `log s2x + log s2y < log s1x + log s1y` are fitted again
+      (`full`, 30 iterations) from `s1 <-> s2`, `logit w2 -> -logit w2`, clipped to the bounds; per page the end
+      with the lower cost is kept.
+    - After it the two seed sets agree to 0.005, 0.005, 0.004 nm. With 21 stacked holes the exchanged end has the
+      lower cost by 1.5 and is kept (0.01 nm from the other).
+    - Full pages: 2 of 58 ended exchanged (`pipeline` before the step): 100 nm circles staggered, +0.043 ->
+      +0.061 nm with the cost 101 lower; test file page 13, where the second Gaussian has 5 % of the light: no
+      change. With the step the test file's page CDs differ from before by 0.0004 nm at most
+      (`runs/file_l2_v5.json` against `_v4`), the generated pages of 5.2 by 0.0003 nm (`truth_*_v5.json`), and the
+      time is the same (79 ms per page for the page values).
+    - The library's `outline_fit` does not end exchanged on the small images (14).
+16. **The pair reach decides which lens end fits better** (`reach.py`, `runs/check_reach_ends.log`,
+    `check_reach_time.log`). The final stage from three starts (pupil cut-off 0.5; 0.9; 3) on four generated pages
+    whose blur is in the lens family (smear 1.0072 px, or 1.1819 px at blur 72 nm; cut-off 0.4802). Cost of the
+    pupil end minus cost of the other end:
+
+    | Page | reach `R + 13` (21 px; 19 for 80 nm) | 30 px | 40 px |
+    |---|---|---|---|
+    | 100 nm circles, square array | +22 | -39 | -25 |
+    | 100 nm circles, staggered | +533 | -36 | -103 |
+    | 80 nm circles | +62 | -25 | -36 |
+    | 100 nm circles, blur 72 nm | +78 (from 13; these three starts all end at the other end) | only the other end found | +29 |
+
+    - The fitted blur at the pupil end, staggered page: smear 1.026 / 1.030 px, cut-off 0.496 at 21 px; 1.009 /
+      1.013, 0.481 at 30 px; 1.007 / 1.011, 0.480 at 40 px.
+    - Inside one end the page CD moves by 0.02 nm at most with the reach (100 nm circles +0.014 / +0.005 /
+      +0.003). gauss2 does not depend on the reach (0.002 nm on the test file, 0.005 nm on the generated pages).
+    - Time for the page values, 20 pages of the test file per call, at 20 / 30 / 40 px: gauss2 80.5 / 92.5 / 105.0
+      ms per page; lens 73.4 / 78.6 / 85.5.
+    - Reading (not measured further): the lens blur has faint far rings; a neighbour's rings beyond the reach are
+      missing from the stack's model, and the fit makes up for them with the blur's shape. The generator draws
+      each hole's light on a periodic patch of 64 px, so its pages hold nothing beyond 32 px from a hole: what a
+      real page needs is not known.
+    - With the blur held at the generator's values and only the outline fitted, the fit is worse than at the
+      pupil end (cost 5,864 against 5,339 on the 100 nm circles; CD +0.29 nm; the same on the other pages): the
+      free fit takes 2 % more smear (1.027 px for 1.007) and a 2 % higher cut-off than one hole was drawn with.
+      An oracle test must leave the smear free.
+    - Not adopted: the default stays `R + 13`; the numbers of section 5 were made with it.
+17. **Poorly determined pages repeat worse.** The same page fitted in two runs: 0.0003 nm where the page has one
+    end; 0.005 to 0.007 nm on the pages with several ends at 72 nm blur; 0.02 to 0.07 nm on the small dense
+    patterns (60 nm: +1.64 and +1.71; 50 nm: +9.58 and +9.56; 90 x 60 nm ellipses: -0.55 and -0.53). The hole
+    kernels add in an order that differs from run to run.
 
 ## 7. Not done
 
@@ -261,6 +359,10 @@ Copy of the test file (100 nm circles, pitch 8.5 px, placement 3.6 nm, Gaussian 
 - A CPU path. The prototype's page fit runs under NumPy (`ShapeFitter(xp=np)`, about 1.7 s per fit); the hole
   passes are CUDA kernels only.
 - Two processes per GPU, to use the idle third of the GPU.
+- Choosing between the fit's ends (6.13): a second start with the pupil outside the band (lens) and keeping the
+  lower cost. Not built; with the default reach it would pick the end the generator did not use (6.16).
+- The existing `outline_fit` from several starts (does it have the same ends, and which does it reach?).
+- What makes small images read high (6.14).
 
 ## 8. Build order and checks
 
