@@ -162,3 +162,45 @@ half width), real noise 7.5 grey levels flat across levels (measured).
       1.3's and 6's "this is why the average hole", 5.3's window description, 7.3's re-description of the cleaning,
       the post-lecture "never computes a spectrum", part 8 down to four lines). Animations: play / pause, step,
       scrub, autoplay in view, off under prefers-reduced-motion. Page 1.7 MB
+
+# Outline fit: speed (2026-11-12; proposal only, nothing built)
+
+User: the outline fit "seems to work pretty well and I would like to test this on my real data. However, its
+extremely slow. Diagnose why this method takes so long ... Do not change any code at the moment and just make a
+proposal."
+
+Measured with the unchanged library on real pages of stripe1_board1.tif (2048 x 1378, 39,042 holes), RTX 4060 Ti
+idle, float64, gauss2 (scripts, logs and every number: `artifacts/outline_fit/speed/README.txt`): 104 s for page 0
+(10 rounds, 43 hole sweeps), 133-154 s for page 24 (13-14 rounds), 255 s with the lens family, 330 s for a
+raw-image-sized picture (5408 x 2048, 117k holes), 30 s for a 285-hole region on the CPU. Where the 104 s go:
+- hole stage 68 s: 58 s of it is `cubic_sample` (reading the templates at every window pixel), run as 17,000
+  separate GPU operations per sweep that create 82 GB of temporary arrays per sweep for a 22 MB page: the GPU is
+  96 % busy moving memory. The 5 x 5 solves take 0.3 s, the far-field FFT 1.0 s
+- shape stage 27 s on one CPU core: 4,000 template renders at 6.6 ms, 5.1 ms of each recomputing the outline's
+  coverage on all 768 x 768 sub-samples although only the ring on the edge (under 1 % of the pixels) is not 0 or 1
+- the same sampler in the stack, start and size check 5 s; far kernels' FFT on the CPU 2.4 s; noise line 1.1 s
+
+Proposal (same model, procedure and stop rule; each step prototyped and run end to end on page 0):
+- [ ] 1. Hole stage on the GPU as two fused kernels (per hole: sample the templates and sum the normal equations;
+      per pixel: old light out, new light in), the sampler as one kernel for its other callers; the NumPy path stays
+      as it is (the reference). One sweep 1.29 -> 0.062 s, every parameter equal to 1e-12; page 104 -> 42 s
+- [ ] 2. Template render with the same values bit for bit: coverage sub-sampled only in the ring the edge can
+      reach, outline spectrum / blur transfer function remembered between renders. Render 6.6 -> 1.6 ms, shape
+      stage 27.8 -> 5.4 s with identical fitted parameters; page -> 15 s; the CPU region 30 -> 9 s, same result
+- [ ] 3. Far kernels' FFT and the noise line on the device (GPU only). Page -> 10 s
+- [ ] Tests (one sweep kernel against NumPy, render new against old, GPU against CPU fit), the times in
+      docs/outline_fit.md, cd.py and the report scripts' hint, pages 0 / 24 and two stress pages rerun for the numbers
+Result of 1-3 in the prototype: page 0 104 -> 10.3 s, page 24 133 -> 14 s, lens 255 -> 36 s, the 117k-hole picture
+330 -> 27 s. Outline CD within 0.005 nm, per-hole CD 0.004-0.008 nm rms: what two runs of today's code differ by on
+page 0 (0.009 nm rms). 400 pages: 12-17 h -> 1.1-1.6 h on this GPU, plus the other methods' 8-11 s per image.
+- [ ] 4. (optional) half-spectrum FFT in the render: page 0 10.3 -> 7.9 s, lens 36 -> 17 s. Values equal to 1e-15,
+      but on page 24 the fit then lands on blur 63.3 / 62.3 instead of 62.6 / 63.2 nm (page CD -0.015 nm, per-hole
+      0.09 nm rms; the lens family did not move): for the lens family only, or not at all
+Rejected after measuring: the outline fit continued from the current template without its grid of starts (no time
+gained, page CD -0.05 nm); threads for the renders (5.4 -> 4.0 s); float32 (no gain once fused); one chunk per
+colour (another sweep order). Not in the proposal: the CPU backend's hole stage (a full page stays tens of minutes;
+a kernel there needs a compiled dependency); fewer rounds by starting from the previous page's outline and blur
+(ties pages together, not measured).
+Found on the way, not a speed matter and not caused by the proposal (cause not isolated): two runs of today's code
+on page 24 give page CD 100.72 (converged in 13 rounds) and 100.83 nm (round limit reached, flagged NOT converged);
+on the 285-hole CPU region a change in the 13th decimal moves the outline CD by 0.26 nm (both runs converged).
