@@ -393,11 +393,38 @@ Copy of the test file (100 nm circles, pitch 8.5 px, placement 3.6 nm, Gaussian 
     - Remedy measured, not built: the final fit from several starts of the blur's second part, each run to its end,
       the end with the lowest leftover kept (the table's third column). Estimated cost: one more page fit per
       start (about 12 ms per page and start at 20 pages per call).
+19. **The leftover is a ratio to the average hole's noise, not a distance, and it is not comparable between a
+    generated and a real image** (2026-11-13; the user read 430 to 526 as grey levels and asked whether the 16 bit
+    PNGs or 8 bit TIFFs are the cause). Measured with `scripts/image_values.py` (how the files are stored; the
+    fit's noise, the average hole's brightness and the gap between best match and average hole in grey steps;
+    table and fields in `docs/outline_fit.md`, "What the leftover is"):
+    - Bit depth as such: no effect. One image as 8 bit, as the same values x 257 in 16 bit, with 257 times finer
+      steps and as 12 bit values: 100.07 nm four times, leftover 1.30 to 1.36.
+    - Rounding to whole grey steps on a quiet image: an effect. True noise 0.1 grey level between the holes: 8 bit
+      99.61 nm with a leftover of 86, the same image in 16 bit 100.03 nm with 6.9 (true 99.98). No difference down
+      to a true noise of 0.5; 0.06 nm at 0.3; 0.23 nm at 0.2. The fit's own noise figure is 0.39 there (it holds the
+      rounding and the differences between holes), 0.69 at a true noise of 0.5.
+    - The leftover rises on a quiet image with the fit still right: 16 bit copies 1.25, 2.3, 3.7, 5.0, 6.9 at a
+      true noise of 1.0, 0.5, 0.3, 0.2, 0.1 (CD 100.03 to 100.11 nm).
+    - In grey levels the gaps are tiny: 0.022 to 0.038 of a hole 55 to 59 bright where the model fits (noise alone
+      0.019 to 0.030), 0.034 to 0.054 (0.06 to 0.10 % of the hole) on the third row of 18's table, where the page
+      CD is 1.2 nm off. The CD reacts to misses far below what can be seen in a picture of the average hole.
+    - The generated pages have a pitch of exactly 10 px: nearly every hole has the same sub-pixel position, 306
+      bins of the stack hold about 24,000 pixels each (92 % of all) and the other 1,800 to 2,300 filled bins a
+      median of 18 to 66. The leftover (a mean over bins) is then mostly sparse bins at their noise. At 10.3 px (all 4,761 bins
+      about 1,600 pixels) the leftover is 1.6 to 1.75 at the usual noise and the CD 100.02 nm: the conclusions
+      above hold there, but every earlier leftover in these notes is from whole-pixel pitches.
+    - For the real images' 431 to 526 this leaves three readings that the number cannot separate: a real miss of
+      the model, a quiet image with many holes, or coarse grey steps (only if the PNGs hold 8 bit content). The
+      line of `image_values.py` separates them; not yet run there.
 
 ## 7. Not done
 
 - Nothing was run on real pages by me, on the remote, or on more than one GPU. The user's first run on real images
-  (2026-11-13) is in 6.18; `scripts/outline_fast_check.py` is the check to run there.
+  (2026-11-13) is in 6.18; `scripts/outline_fast_check.py` is the check to run there, `scripts/image_values.py`
+  the one that puts its leftover into grey levels (6.19).
+- Generated pages at pitches that are not a whole number of pixels as the standard test (6.19): the measurements of
+  section 5 and 6.1 to 6.18 are at whole-pixel pitches, where the average hole is sampled at one sub-pixel position.
 - The final fit from several starts, each run to its end, the lowest leftover kept (6.18): measured by the check,
   not in the library.
 - Area per page (the user's tiles): seeds on the whole page, stack and report inside the area, one window from its

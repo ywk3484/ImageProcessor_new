@@ -211,9 +211,30 @@ explain why this happened, and what can be done about it."
       not act on the real images. User: "Before fixing anything, explain what exactly is going on based on
       this." Explained in chat; nothing built. The first explanation (the line field by field, gaps in noise
       units, width arithmetic) was not understood; explained again from what the method does.
+- [x] User (2026-11-13): "Sounds like a datatype issue not accuracy. My remote images are 16 bit images for png
+      and 8 bit for tiff. Is this the case? If it is, then you should have known since 430~526 is an impossible
+      number to obtain with a 8 bit image." Answer, measured on generated images (`docs/outline_fit.md`, "What the
+      leftover is"; notes 6.19):
+      - the leftover is a ratio to the average hole's noise, without a unit (I had not said so): 484 = 22 times
+        the noise, in 8 bit as in 16 bit;
+      - bit depth as such: no effect (the same image in 8 bit, x 257 in 16 bit, finer steps, 12 bit values:
+        100.07 nm four times, leftover 1.30 to 1.36);
+      - rounding to whole grey steps on a quiet image: an effect (true noise 0.1 grey level: 8 bit 99.61 nm,
+        leftover 86; 16 bit 100.03 nm, 6.9; none down to a noise of 0.5). For the 16 bit PNGs only if they hold
+        8 bit content; open for the 8 bit TIFFs;
+      - what I had overstated: the leftover says the gap is far above the noise, not that it is large. On
+        generated images a gap of 0.05 grey levels on a hole 54 bright (0.1 %) goes with 1.2 nm of CD; the same
+        fit on a quieter image has a higher leftover with the CD still right.
+- [x] `scripts/image_values.py` (+ `tests/test_image_values.py`): how the files are stored (type, range, different
+      grey values, grey step, values cut off) and the fit's noise, hole brightness and gap in grey steps; one line
+      to type back. The library is unchanged.
+- [ ] The user types back the line of `python scripts\image_values.py D:\data\png_images` (offered, not yet run)
 - [ ] Not known, the next thing to measure if the user wants it: where the model misses the real average hole
-      (centre, edge, towards the neighbours), how large the gap is in grey levels, whether holes are missing
-      from the seed list, and the same number for `outline_fit` (same model, not measured)
+      (centre, edge, towards the neighbours), whether holes are missing from the seed list, and the same number
+      for `outline_fit` (same model, not measured)
+- [ ] Generated test pages at a pitch that is not a whole number of pixels: at 210 nm = 10 px one bin in 16 of
+      the average hole holds 92 % of the pixels, so the fit was never tested on an evenly sampled average hole
+      except in the three runs of 6.19 (CD right there)
 - [ ] On hold: the final fit from several starts, each run to its end (the check's `best`). It would not change
       the real images' spread; the cap still moves single images (three of eight) and the generated cases stand
 - [ ] The user's decision: a size per hole now (the prototype's step D), or only after the page value holds

@@ -242,17 +242,96 @@ check N=8 | rep 97.13-98.88 3s 2.01 nc 5 | end 3s 2.14 it<=56 | best 97.13-98.88
 - Not the cap: run to their ends (56 iterations at most) the images are as far
   apart as before, 3 s 2.14 nm against 2.01 nm; three images changed when
   allowed to finish.
-- **The model does not describe the real average hole**: leftover 431 to 526,
-  a gap of 21 to 23 times the average hole's noise (generated images: 1.3 to
-  2.0; with a blur shape the model cannot follow 3 to 8, and the page CD was
-  then 1.2 nm off). Each image has one settled answer, but it is the best
-  compromise of a model that does not match, and it differs by up to 1.75 nm
+- **The best match is 21 to 23 times further from the real average hole than
+  noise explains** (leftover 431 to 526; generated images: 1.3 to 2.0; with a
+  blur shape the model cannot follow 3 to 8, and the page CD was then 1.2 nm
+  off). Each image has one settled answer, and it differs by up to 1.75 nm
   between images of one area. The CD does not follow the fitted blur width
   (`rblur -0.21`).
-- Not known from the line: where the model misses (the blur's shape, the
-  neighbours' light, holes that are not alike, holes missing from the seed
-  list), how large the gap is in grey levels, and whether `outline_fit`, which
-  has the same model, is affected in the same way (not measured).
+- The leftover does not say how large that gap is, nor what it is made of: see
+  the next section. Not known either: where the best match misses (the blur's
+  shape, the neighbours' light, holes that are not alike, holes missing from
+  the seed list), and whether `outline_fit`, which has the same model, is
+  affected in the same way (not measured).
+
+### What the leftover is, and what the images hold
+
+The leftover has no unit and is not a brightness: it is (the distance between
+the fit's best match and the average hole) / (the distance noise alone would
+leave), squared, averaged over the average hole's bins. 484 = 22 times the
+noise, in an 8 bit image as in any other. The noise of the average hole is one
+pixel's noise / sqrt(pixels averaged per bin), about holes / 16, so the same
+distance in grey levels gives a larger leftover on a quieter image and on one
+with more holes. Three things raise it, and the number alone does not tell
+them apart:
+
+- the best match misses the average hole (what the model assumes does not
+  hold);
+- a quiet image or many holes: a small miss counts;
+- few grey levels for the image's noise: with noise well below one grey step,
+  rounding to whole grey steps does not average out over the holes.
+
+```
+python scripts\image_values.py D:\data\png_images
+```
+
+prints, per image and as a last line for the folder, how the files are stored
+and the fit's numbers in grey steps of the file (about 2 s per image; GPU for
+the fit's half, `--no-fit` without; `.tif` pages with `--page`; the library is
+not changed):
+
+```text
+values N=8 | uint16 3251-23544 | levels 17175-18217 step 1 | top 0.00% zero 0.00% | noise 299 hole 14767 | gap 6.10-9.81 (5.47) = 0.04-0.06%
+```
+
+| Field | Meaning |
+|---|---|
+| `uint16 A-B` | file type as read; lowest and highest pixel value of all images |
+| `levels a-b` | different grey values in one image (fewest, most): 256 or fewer in a 16 bit file = 8 bit content |
+| `step s` | the values lie a whole number of steps apart: 1 normally, 257 or 256 = 8 bit content in a 16 bit file, 16 = 12 bit |
+| `top p% zero q%` | most pixels of one image at the file type's highest value, and at 0: above about 0.01 % the values are cut off |
+| `noise n` | one pixel's noise as the fit takes it (a single hole against the average hole, rms, median hole), in grey steps; differences between holes are in it |
+| `hole h` | brightness of the average hole: its top above its darkest point |
+| `gap a-b (n) = p%` | distance between the best match and the average hole (rms, each bin by its pixels), lowest and highest image; in brackets what noise alone leaves; then the gap in percent of the hole's brightness. (gap / bracket)^2 = leftover |
+
+Generated images (26,000 to 28,000 holes of 100 nm, 55 to 59 grey levels
+bright in 8 bit; the noise is the one printed):
+
+| Case | noise | gap (noise alone) | % of the hole | leftover | CD error |
+|---|---|---|---|---|---|
+| the model fits, usual noise | 1.2 | 0.022-0.038 (0.019-0.030) | 0.04-0.06 | 1.2-1.8 | < 0.1 nm |
+| a blur the model cannot describe (60 nm lens in 70 nm) | 1.2 | 0.034-0.054 (0.019) | 0.06-0.10 | 3-8 | 1.2 nm |
+| 8 bit, quiet image (true noise 0.1 grey level) | 0.39 | 0.058-0.069 (0.006-0.010) | 0.10-0.12 | 49-95 | 0.3-0.4 nm low |
+| the same quiet image stored in 16 bit | 71 | 3.1-3.9 (1.2-1.8) | 0.02-0.03 | 4.6-6.9 | < 0.1 nm |
+
+- **Bit depth as such changes nothing.** One image stored in 8 bit, the same
+  values in a 16 bit file (x 257), with 257 times finer steps, and as 12 bit
+  values in a 16 bit file: page CD 100.07 nm four times, leftover 1.30 to
+  1.36. The files are read at their full depth (`PIL`, then `float32` on the
+  GPU, sums in `float64`), and the fit has no constant in grey levels.
+- **Grey steps too coarse for the noise do.** The same holes at falling noise,
+  each stored in 8 and in 16 bit (noise between the holes in 8 bit grey
+  levels; true CD 99.98 nm):
+
+  | True noise | 8 bit: CD, leftover | 16 bit: CD, leftover |
+  |---|---|---|
+  | 1.0 | 100.10, 1.2 | 100.11, 1.3 |
+  | 0.5 | 100.07, 2.0 | 100.07, 2.3 |
+  | 0.3 | 100.01, 4.5 | 100.07, 3.7 |
+  | 0.2 | 99.82, 23 | 100.05, 5.0 |
+  | 0.1 | 99.61, 86 | 100.03, 6.9 |
+
+  At a pitch that is not a whole number of pixels (10.3 px) the same: 99.66 nm
+  and 49 against 99.94 nm and 4.6 at a noise of 0.1.
+- **A gap far too small to see already moves the CD.** In the second row of
+  the first table the best match is 0.05 grey levels from an average hole 54
+  grey levels bright (0.1 %), and the page CD is 1.2 nm off.
+- The leftover of a generated image is not the leftover of a real one even for
+  the same miss: besides noise and hole count, the generated pages have a
+  pitch of exactly 10 px, so 1 bin in 16 of the average hole holds nearly all
+  pixels and the others a few dozen (the leftover is a mean over bins).
+
+Not yet run on the real images.
 
 ```python
 fit = subpx.fit_outline_fast(image, pixel_size=21, unit="nm")          # own seed finder; or pass seeds_xy

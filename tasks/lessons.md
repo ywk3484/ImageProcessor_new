@@ -46,6 +46,8 @@ General rules from past corrections, one or two lines each. Incident details are
 - Keep stored or displayed data at the precision the method used wherever the method is sensitive to it.
 - Check where a test file comes from (the script that made it, an exact lattice, its metadata) before calling a
   result real-data; name generated data as generated wherever its numbers are quoted.
+- Generate test patterns at a pitch that is not a whole number of pixels: on an exact pixel lattice every feature
+  has the same sub-pixel position, so anything that averages or samples by sub-pixel position goes untested.
 
 ## Speed and I/O
 - Measure under the user's conditions: real file size, real disk, cold cache, pages that behave like real data
@@ -66,6 +68,9 @@ General rules from past corrections, one or two lines each. Incident details are
   through each figure. Compact prose there is not an explanation, and a derivation without its object is not one either.
 - Explain a result from what the method does, in everyday words, then one number with what it should be and what
   it is. Never by walking through the fields of a tool's output line, and never in units the user does not use.
+- Give every number its unit the first time it appears, or say that it has none and what 1 means. A fit score that
+  is a ratio to the noise is not compared between data of different noise or size: convert it to the data's own
+  units (grey levels, percent of the signal) first, and never read "far above the noise" as "large".
 - Never state a cause that was not measured: a model error seen at the truth is the cause only once removing it
   moves the estimate. Never call a partial fix "fixed": say what is left and what it costs.
 - Before reporting, check the deliverable against the literal request (the level, the place, the view asked for).
