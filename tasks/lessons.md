@@ -96,6 +96,11 @@ General rules from past corrections, one or two lines each. Incident details are
   looked at (every stage, layer and overlay of the old UI), not the widget with the same name. A view for judging
   a result shows it on the image.
 
+- When the cause of a fault on data I cannot see is not known, do not hand the user checks to run and type back
+  one after another: build a view that shows every step of the calculation on their data (the input, each
+  intermediate result, the output) so they can see which step is odd. A typed-back number can confirm a cause
+  already suspected; it cannot find one.
+
 ## Repo hygiene
 - Stage only your own files, by explicit path; the working tree holds the user's uncommitted work. Do not edit
   files that hold the user's pending changes.
