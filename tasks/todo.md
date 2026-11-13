@@ -161,3 +161,19 @@ Not in it: the slow `outline_fit`, a workbench window, any fix.
       gallery; pointer in `docs/outline_fit.md`
 - [ ] 6 Tests (`tests/test_outline_fit_trace.py`, `tests/test_outline_fit_steps.py`), whole suite, time per image
       at 2048 x 1378 and 2048 x 5408, commit and push after each stage
+
+State 2026-11-13 (session cut off by the usage limit; continue from here):
+- Done and pushed: items 1 to 4 (recording, script, page, redrawn copy, all-images view) and the tests of item 6
+  (tests/test_outline_fit_trace.py 9, tests/test_outline_fit_steps.py 12; 54 outline tests pass). Added beyond the plan:
+  the copy takes its noise from the pixel-to-pixel jitter of image minus picture; picture 8e (average hole of each
+  ninth of the image against the whole image); graph 9e (difference averaged round the centre).
+- Looked at in a browser on generated 600 x 800 folders: nothing planted (image and copy alike), blur form (9e wave;
+  CD 1.5 nm off at 1.13 x the noise), tops cut off (step 1, 4a, 9d), two sizes and blur changing across the image
+  (8e, 7e), holes not found (2a, 7a, 7e), coarse grey steps (image and copy both 4.6 to 4.9 x), 8 repeats (A4).
+- Time: 3.3 s per 1378 x 2048 image, 8 s per 2048 x 5408 image (104,000 holes) with its copy, RTX 4060 Ti; 4 to 5 MB of
+  page data per image.
+- LEFT: the full-size page not yet looked at in a browser; docs/outline_fit_steps.md with the gallery and the pointer
+  in docs/outline_fit.md (item 5); the whole test suite; notes 6.20 in docs/outline_fit_one_pass.md (the fit is not
+  the same from run to run: 22 to 30 iterations and up to 0.04 nm for one image; a perfect copy can hit the limit of
+  30; the lens form reads its own copies 0.1 to 0.3 nm low; holes cut by the frame are placed poorly); the memory
+  note; giving the user the command.
