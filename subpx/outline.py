@@ -370,6 +370,8 @@ def fit_outline_fast(
     backend: str = "auto",
     device: int = 0,
     log=None,
+    trace: dict | None = None,
+    redraw_seed: int | None = None,
 ) -> OutlineFastResult:
     """Fit one outline and one blur to the whole image in one pass (GPU only); page values, no size per hole.
 
@@ -395,6 +397,15 @@ def fit_outline_fast(
         There is no CPU path: 'cpu', or no usable GPU, raises ``RuntimeError``.
     log : callable, optional
         Called with one line of text per step.
+    trace : dict, optional
+        Receives what every step of the fit produced, as NumPy arrays in the fit's own frame (bright holes: with
+        ``invert`` the image turned over; lengths in pixels): the keys of
+        ``subpx._gpu.outline_onepass.fit_images``' ``trace``, and ``image`` (``inverted``, ``top``: the value the
+        image was turned over at, ``own_seeds``: the method found the holes itself). The result is the same with
+        and without it; a fit that raises leaves the steps it reached. ``scripts/outline_fit_steps.py`` shows it.
+    redraw_seed : int, optional
+        With ``trace``: also ``trace['redrawn']``, the image the fit's answer stands for (every hole drawn with
+        the image's outline and blur at its own centre, brightness and level, plus noise from this seed).
 
     Returns
     -------
@@ -435,13 +446,17 @@ def fit_outline_fast(
         from ._gpu._cuda import release_memory
         from ._gpu.outline_onepass import find_seeds, fit_images, lib_template
 
+        steps = None if trace is None else []
         try:
             if seeds is None:
                 seeds = cupy.asnumpy(find_seeds(cupy.asarray(signal).astype(cupy.float32)))
                 if len(seeds) < MIN_HOLES:
                     raise ValueError(f"the outline fit needs at least {MIN_HOLES} holes; {len(seeds)} were found")
-            res = fit_images([signal], [seeds], blur=blur, log=log)[0]
+            res = fit_images([signal], [seeds], blur=blur, log=log, trace=steps, redraw_seed=redraw_seed)[0]
         finally:
+            if trace is not None:
+                trace.update(steps[0] if steps else {})
+                trace["image"] = dict(inverted=bool(invert), top=top, own_seeds=seeds_xy is None)
             release_memory()
     template = lib_template(blur)
     theta = res["theta"]

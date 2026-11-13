@@ -225,6 +225,18 @@ class ShapeFitter:
         mask = xp.asarray(self.pad[:, None, :, None] & self.pad[None, :, None, :])
         return xp.where(mask, out, 0.0), mask
 
+    def from_classes(self, by_class):
+        """The way back, on the host: a NumPy array by class (U, U, npts, npts) on the fit's bins, a
+        (2 nmax + 1) square with the hole's centre in the middle (the middle of ``to_classes``' grid)."""
+        nb = 2 * self.nmax + 1
+        grid = np.full((nb, nb), np.nan)
+        for qy in range(self.U):
+            for qx in range(self.U):
+                ky, kx = self.pad[qy], self.pad[qx]
+                grid[np.ix_(self.idx[qy][ky], self.idx[qx][kx])] = by_class[qy, qx][np.ix_(np.flatnonzero(ky),
+                                                                                         np.flatnonzero(kx))]
+        return grid
+
     # ------------------------------------------------------------------------------------------- the model
     def _outline(self, th):
         """Host: outline points, tangents and the radius' derivatives for parameter vectors th (B, P)."""
@@ -407,10 +419,13 @@ class ShapeFitter:
             tm[k, free.index(src)] = 1.0
         return free, ties, tm
 
-    def grid_start(self, base, data, chunk=8):
+    def grid_start(self, base, data, chunk=8, keep=None):
         """The library's grid of starts for the round stage (15 sizes x 12 blur widths): the cheapest per page.
         One outline per size and one transfer function per width; the 180 products are compared on the bins of
-        the page's most populated sub-pixel class (a coarse scan: a fraction of the holes is plenty)."""
+        the page's most populated sub-pixel class (a coarse scan: a fraction of the holes is plenty).
+        ``keep``: a list that receives, per page, the scan itself: ``sizes_px`` (15,) half widths, ``widths_px``
+        (12,) blur sigmas, ``cost`` (15, 12) on that class's bins, ``weight`` (the sum of the bins' weights:
+        cost / weight is the weighted mean square distance to the stack) and ``pick`` (size index, width index)."""
         xp = self.xp
         B = base.shape[0]
         j = self.n_shape
@@ -456,12 +471,18 @@ class ShapeFitter:
             var = (wb * dm * dm).sum(axis=2, keepdims=True)
             scale = (wb * dm * dy).sum(axis=2, keepdims=True) / xp.where(var > 0, var, 1.0)
             res = scale * dm - dy
-            best = (wb * res * res).sum(axis=2).argmin(axis=1)
+            table = (wb * res * res).sum(axis=2)
+            best = table.argmin(axis=1)
             best = np.asarray(best.get() if hasattr(best, "get") else best)
+            if keep is not None:
+                table, total = (np.asarray(v.get() if hasattr(v, "get") else v) for v in (table, ws[:, 0, 0]))
             for bi in range(e - s):
                 ia, isg = divmod(int(best[bi]), 12)
                 out[s + bi, 0] = out[s + bi, 1] = tha[s + bi, ia, 0]
                 out[s + bi, j:] = ths[isg, j:]
+                if keep is not None:
+                    keep.append(dict(sizes_px=np.exp(tha[s + bi, :, 0]), widths_px=np.exp(ths[:, j]),
+                                     cost=table[bi].reshape(15, 12).copy(), weight=float(total[bi]), pick=(ia, isg)))
         return out
 
     def default_prior(self):
@@ -485,7 +506,13 @@ class ShapeFitter:
         """Staged Levenberg-Marquardt for a batch of pages. theta0 (B, P) on the host; gamma (B, U, U, nky, nkx),
         y and w (B, U, U, npts, npts) on the device, w in 1 / variance units so that the cost is a chi-square.
         Returns theta (B, P), scale, const, cost (host arrays), [(stage, iterations, stopped)]: ``stopped`` (B,)
-        is True for the pages whose stage ended by its tolerance, False for those ended by the iteration cap."""
+        is True for the pages whose stage ended by its tolerance, False for those ended by the iteration cap.
+
+        ``trace``: a dict that receives what the fit did, without changing it: ``grid`` (``grid_start``'s scan per
+        page, when it ran) and ``iterations``, one record per stage start (``iteration`` 0) and per iteration:
+        ``stage``, ``iteration``, and per page (B,) ``theta`` (B, P) and ``cost`` where the fit stands after it
+        (the cost includes the priors), ``tried`` (the cost of the point tried), ``accepted`` (the point was
+        taken), ``damping`` and ``done`` (the page's stage has ended)."""
         data = self.prepare(gamma, y, w)
         theta = np.clip(np.asarray(theta0, float).copy(), self.lo + 1e-6, self.hi - 1e-6)
         B = theta.shape[0]
@@ -506,7 +533,8 @@ class ShapeFitter:
                 base[:, 3] = 0.0
                 base[:, 4:self.n_shape] = 0.0
                 if grid:
-                    base = self.grid_start(base, data)
+                    scan = None if trace is None else trace.setdefault("grid", [])
+                    base = self.grid_start(base, data, keep=scan)
             lo, hi = self.lo[free] + 1e-6, self.hi[free] - 1e-6
             fixed = base * (1.0 - tm.sum(axis=1))[None, :]  # entries no free parameter drives
             nf = len(free)
@@ -528,6 +556,10 @@ class ShapeFitter:
             nu = np.full(B, 2.0)
             done = np.zeros(B, dtype=bool)
             its = 0
+            if trace is not None:
+                trace.setdefault("iterations", []).append(dict(
+                    stage=stage, iteration=0, theta=expand(q), cost=cost.copy(), tried=cost.copy(),
+                    accepted=np.ones(B, dtype=bool), damping=lam.copy(), done=done.copy()))
             for its in range(1, cap + 1):
                 q_new = q.copy()
                 for b in range(B):
@@ -579,7 +611,9 @@ class ShapeFitter:
                 lam = np.where(better, lam * grow, lam * nu)
                 nu = np.where(better, 2.0, nu * 2.0)
                 if trace is not None:
-                    trace.append((stage, its, float(cost[0]), float(lam[0]), bool(better[0])))
+                    trace["iterations"].append(dict(
+                        stage=stage, iteration=its, theta=expand(q), cost=cost.copy(), tried=np.asarray(cost2).copy(),
+                        accepted=better.copy(), damping=lam.copy(), done=done.copy()))
                 if done.all():
                     break
             theta = expand(q)

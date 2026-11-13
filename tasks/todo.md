@@ -144,9 +144,12 @@ the image redrawn from the fit's own answer and run through the same steps; a se
 folder. Nothing in the method is fixed or changed. Plan: `C:\Users\USER\.claude\plans\effervescent-gathering-ember.md`.
 Not in it: the slow `outline_fit`, a workbench window, any fix.
 
-- [ ] 1 Recording in the library: `fit_images(trace=)`, `GpuPage` trace points, `ShapeFitter.fit(trace=)` per
+- [x] 1 Recording in the library: `fit_images(trace=)`, `GpuPage` trace points, `ShapeFitter.fit(trace=)` per
       iteration and per page, `grid_start`'s table, best match and hole alone on the bin grid,
-      `fit_outline_fast(trace=)`; test that the results are identical with and without it
+      `fit_outline_fast(trace=, redraw_seed=)`; `tests/test_outline_fit_trace.py` (8). Found on the way: the fit is
+      not the same from run to run even without recording (the device adds in another order: CD 3e-4 nm
+      apart on a 4,400-hole image, 22 to 30 iterations of the final fit for the same image), so "unchanged"
+      is tested within that width; under NumPy the page fit is bit-identical with and without it
 - [ ] 2 `scripts/outline_fit_steps.py` + `scripts/outline_fit_steps.html`: the 10 steps for one image (your-image
       column), data reduced to a few MB per image, offline from file://
 - [ ] 3 The redrawn copy (final outline and blur, every hole refitted, near and far light + level of the nearest

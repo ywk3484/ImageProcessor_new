@@ -518,9 +518,13 @@ class CellList:
 
 # ------------------------------------------------------------------------------------------------ page
 class GpuPage:
-    """One image through the one-pass fit: seeds, plain stack, pair maps, templates, hole pass."""
+    """One image through the one-pass fit: seeds, plain stack, pair maps, templates, hole pass.
 
-    def __init__(self, image, *, blur="gauss2", seeds=None, pair_reach_px=None, tt="float"):
+    ``trace``: a dict that receives what every step produced, as host copies (``fit_images`` describes it). The
+    steps themselves do not depend on it: with ``trace=None`` nothing is recorded and nothing else differs."""
+
+    def __init__(self, image, *, blur="gauss2", seeds=None, pair_reach_px=None, tt="float", trace=None):
+        self.trace = trace
         self.img = cp.asarray(image).astype(cp.float32)
         self.h, self.w = self.img.shape
         self.U, self.pair_U, self.f_max = STACK_BINS, PAIR_BINS, F_MAX
@@ -557,6 +561,13 @@ class GpuPage:
         self.level = cp.zeros(self.n)
         self.far = None
         self._chunks = None
+        self._keep("window", seeds=self.c, nearest_px=nn, spacing_px=self.spacing, window_px=self.R,
+                   bins_per_px=self.U, stack_bins=self.Ms, reach_px=self.reach, box_px=self.L)
+
+    def _keep(self, name, **values):
+        """Record what a step produced under ``name`` (device arrays as host copies) when the page is traced."""
+        if self.trace is not None:
+            self.trace[name] = {k: cp.asnumpy(v) if isinstance(v, cp.ndarray) else v for k, v in values.items()}
 
     # -------------------------------------------------------------------------------------------- stack
     def interior(self):
@@ -601,6 +612,10 @@ class GpuPage:
         a = cp.maximum(a / med, 1e-3)
         typical = float(cp.median(o[inside, 2]))
         use = inside & (a > 0.4) & (a < 2.5) & (o[:, 2] < 2.0 * typical) & (o[:, 5] > 0)
+        if self.trace is not None:  # the average of every interior hole, each hole against it, and who is dropped
+            self._keep("average_all", stack=stack, pixels=wsum, inside=inside, brightness=a, level=o[:, 1],
+                       leftover=o[:, 2], compared=o[:, 5] > 0, kept=use, median_brightness=med,
+                       typical_leftover=typical, core_px=core, brightness_limits=(0.4, 2.5), leftover_limit=2.0)
         if not bool(use.any()):
             raise ValueError("no hole of usual brightness and leftover to stack")
         self.a = a
@@ -611,6 +626,8 @@ class GpuPage:
         self.rms = o[:, 2]
         self.noise = float(cp.median(self.rms[use]))
         self.stack, self.wsum, self.use, self.sw, self.nrm = stack, wsum, use, sw, nrm
+        self._keep("average_1", stack=stack, pixels=wsum, kept=use, brightness=self.a_rel, level=self.lev_rel,
+                   leftover=self.rms, noise=self.noise)
 
     def restack(self, good, scale):
         """The plain stack again, from the hole pass's centres (``good``: device mask of the holes to stack;
@@ -623,10 +640,14 @@ class GpuPage:
         self.stack, self.wsum, self.sw, self.nrm = self._stack(good)
         self.a_rel = self.a
         self.noise = float(cp.median(self.hole_rms[good]))
+        self._keep("average_2", stack=self.stack, pixels=self.wsum, kept=good, noise=self.noise)
 
     # ------------------------------------------------------------------------------------------ pair map
-    def pair_map(self, sf):
-        """Gamma_q (U, U, nky, nkx) on the page fitter's band."""
+    def pair_map(self, sf, keep=None):
+        """Gamma_q (U, U, nky, nkx) on the page fitter's band. ``keep``: a dict that receives ``neighbour_map``
+        (where the stacked holes' neighbours and they themselves stand, weighted by brightness: the sum of the 16
+        classes' maps, ``neighbour_bins_per_px`` samples per pixel, the stacked hole in the middle) and
+        ``holes_per_class`` (U, U), the stacked holes of each sub-pixel class."""
         U, Ug = self.U, self.pair_U
         Ng = self.L * Ug
         v = -self.c * U
@@ -646,6 +667,9 @@ class GpuPage:
                                               np.int32(self.n), np.int32(self.cells.ncx), np.int32(self.cells.ncy),
                                               np.float64(self.cells.cs), np.float64(self.reach), np.int32(Ug),
                                               np.int32(Ng), hist))
+        if keep is not None:
+            keep.update(neighbour_map=cp.asnumpy(hist.reshape(U * U, Ng, Ng).sum(axis=0)), neighbour_bins_per_px=Ug,
+                        holes_per_class=cp.asnumpy(wq).reshape(U, U))
         spec = cp.fft.rfft2(hist.reshape(U * U, Ng, Ng))
         ky = np.arange(-sf.kmax, sf.kmax + 1)
         rows = cp.asarray(np.mod(ky, Ng))
@@ -784,10 +808,11 @@ class GpuPage:
         self._chunks = chunks
         return chunks
 
-    def fit_holes(self, sweeps=2, size=False, max_move=0.25, robust_c=3.0, relax=1.0):
+    def fit_holes(self, sweeps=2, size=False, max_move=0.25, robust_c=3.0, relax=1.0, keep=None):
         """The library's hole stage (Gauss-Seidel over colours, complete page model, robust weights) for a fixed
         number of sweeps: centre, brightness and level of every hole (``size``: its edge offset too). Returns
-        per-sweep statistics."""
+        per-sweep statistics. ``keep``: a dict that receives ``light``, the complete page model the last sweep
+        ended with (device, (H, W): every hole's near and far light, without the holes' levels)."""
         kA, kU, kB = (self.mod.get_function(k) for k in ("hole_normal", "hole_update", "render_scatter"))
         chunks = self.colours()
         H, W, N, U, R, Rr = self.h, self.w, self.tN, self.tU, self.R, self.Rr
@@ -839,6 +864,8 @@ class GpuPage:
         order = cp.concatenate(chunks)
         self.hole_rms = cp.empty(self.n)
         self.hole_rms[order] = stat[:, 2]
+        if keep is not None:
+            keep["light"] = page.reshape(H, W)
         return log
 
     def good_mask(self):
@@ -847,41 +874,99 @@ class GpuPage:
         inside = self.interior()
         med = cp.median(self.a[inside])
         typical = cp.median(self.hole_rms[inside])
-        return inside & (self.a > 0.4 * med) & (self.a < 2.5 * med) & (self.hole_rms < 2.0 * typical)
+        bright = (self.a > 0.4 * med) & (self.a < 2.5 * med)
+        quiet = self.hole_rms < 2.0 * typical
+        if self.trace is not None:
+            self._keep("kept_2", inside=inside, usual_brightness=bright, usual_leftover=quiet,
+                       median_brightness=float(med), typical_leftover=float(typical), brightness_limits=(0.4, 2.5),
+                       leftover_limit=2.0)
+        return inside & bright & quiet
+
+    def picture(self, light):
+        """The method's picture of the image (device, (H, W)): every hole's light (``light`` of ``fit_holes``)
+        plus, at each pixel, the level of its nearest hole (a hole's level holds over its own window)."""
+        from .voronoi import _labels_device
+
+        return light + self.level[_labels_device(cp.asnumpy(self.c), (self.h, self.w))]
 
 
 # ---------------------------------------------------------------------------------------------- driver
-def page_fits(pages, blur, theta0=None, stages=("round", "super", "full"), grid=True, max_iter=(12, 20, 30), ftol=1e-7):
+def _record_fits(trace, sf, members, pages, record, maps, starts, gam, ys, ws, theta, scale, const, cost, info):
+    """What a page fit did, per page, into ``trace`` (``page_fits`` describes the record). The best match is the
+    fit's own model at its end point (the same synthesis, in the same precision), and the hole alone is that
+    model with nothing but the hole itself in the pair map."""
+    data = sf.prepare(gam, ys, ws)
+    hat = sf.template_hat(theta)
+    with_neighbours = sf.synth(hat, data["gamma"])[:, 0].astype(cp.float64)
+    alone = sf.synth(hat, cp.ones_like(data["gamma"]))[:, 0].astype(cp.float64)
+    nb = 2 * sf.nmax + 1
+    for k, i in enumerate(members):
+        pg = pages[i]
+        s, c = float(scale[k]), float(const[k])
+        match = s * with_neighbours[k] + c
+        distance = match - ys[k]
+        lo = pg.Ms // 2 - sf.nmax
+        steps = [dict(stage=r["stage"], iteration=int(r["iteration"]), theta=np.array(r["theta"][k], dtype=float),
+                      cost=float(r["cost"][k]), tried=float(r["tried"][k]), accepted=bool(r["accepted"][k]),
+                      damping=float(r["damping"][k]), done=bool(r["done"][k])) for r in record["iterations"]]
+        trace[i] = dict(
+            start=np.array(starts[k], dtype=float), grid=record["grid"][k] if "grid" in record else None,
+            iterations=steps, stages=[(name, int(its), bool(stopped[k])) for name, its, stopped in info],
+            theta=np.array(theta[k], dtype=float), scale=s, const=c, cost=float(cost[k]),
+            data_cost=float((ws[k] * distance * distance).sum()), bins=int((ws[k] > 0).sum()), noise=float(pg.noise),
+            bins_per_px=sf.U, average=cp.asnumpy(pg.stack)[lo:lo + nb, lo:lo + nb],
+            pixels=cp.asnumpy(pg.wsum)[lo:lo + nb, lo:lo + nb], fitted=sf.from_classes(cp.asnumpy(ws[k] > 0)) > 0,
+            match=sf.from_classes(cp.asnumpy(match)), alone=sf.from_classes(cp.asnumpy(s * alone[k])), **maps[k])
+
+
+def page_fits(pages, blur, theta0=None, stages=("round", "super", "full"), grid=True, max_iter=(12, 20, 30), ftol=1e-7,
+              trace=None):
     """The page fit of several pages at once (grouped by window size, each group in lockstep). Per page:
-    (theta, scale, const, dict(chi2, bins, iterations, converged))."""
+    (theta, scale, const, dict(chi2, bins, iterations, converged)).
+
+    ``trace``: a list with one entry per page that receives a dict of what the fit did, without changing it:
+    ``start`` (theta), ``grid`` (the scan of starts, or None), ``iterations`` (per stage start and iteration:
+    stage, iteration, theta, cost, tried, accepted, damping, done), ``stages`` [(name, iterations, stopped by its
+    tolerance)], ``theta``, ``scale``, ``const``, ``cost`` (with the priors), ``data_cost`` (the chi-square of the
+    bins alone), ``bins``, ``noise``; on the fit's bins ((2 nmax + 1) square, ``bins_per_px`` per pixel, NaN
+    outside): ``average`` (the stack), ``pixels`` (pixels per bin), ``fitted`` (the bins the fit used), ``match``
+    (the best match: scale x hole with its neighbours + const) and ``alone`` (scale x the hole without its
+    neighbours); and ``pair_map``'s ``neighbour_map`` and ``holes_per_class``."""
     out = [None] * len(pages)
     groups = {}
     for i, pg in enumerate(pages):
         groups.setdefault(fitter_for(pg, blur), []).append(i)
     for sf, members in groups.items():
-        gam, ys, ws, th = [], [], [], []
+        gam, ys, ws, th, maps = [], [], [], [], []
         for i in members:
             pg = pages[i]
-            gam.append(pg.pair_map(sf))
+            maps.append(None if trace is None else {})
+            gam.append(pg.pair_map(sf, keep=maps[-1]))
             y, w = pg.stack_data(sf)
             ys.append(y)
             ws.append(w)
             th.append(pg.start_theta() if theta0 is None else theta0[i])
-        ws = cp.stack(ws)
-        theta, scale, const, cost, info = sf.fit(np.stack(th), cp.stack(gam), cp.stack(ys), ws, stages=stages,
-                                                 grid=grid, max_iter=max_iter, ftol=ftol)
+        ws, gam, ys, th = cp.stack(ws), cp.stack(gam), cp.stack(ys), np.stack(th)
+        record = None if trace is None else {}
+        theta, scale, const, cost, info = sf.fit(th, gam, ys, ws, stages=stages, grid=grid, max_iter=max_iter,
+                                                 ftol=ftol, trace=record)
         bins = cp.asnumpy((ws > 0).reshape(len(members), -1).sum(axis=1))
         for k, i in enumerate(members):
             out[i] = (theta[k], float(scale[k]), float(const[k]),
                       dict(chi2=float(cost[k]), bins=int(bins[k]), iterations=int(info[-1][1]),
                            converged=bool(info[-1][2][k])))
+        if trace is not None:
+            _record_fits(trace, sf, members, pages, record, maps, th, gam, ys, ws, theta, scale, const, cost, info)
     return out
 
 
-def in_order(pages, blur, fits, max_iter=FINAL_ITERATIONS):
+def in_order(pages, blur, fits, max_iter=FINAL_ITERATIONS, trace=None):
     """gauss2 only: pages whose final fit ended with the second Gaussian the narrower one (stopped by the bound on
     its weight, short of the minimum) are fitted again from the exchanged labels, together; per page the end with
-    the lower cost is kept. Sets ``exchanged`` in every fit's record (False for any other ``blur``)."""
+    the lower cost is kept. Sets ``exchanged`` in every fit's record (False for any other ``blur``).
+
+    ``trace``: a list with one entry per page that receives the record of the page's second fit (as
+    ``page_fits``' ``trace``, with ``kept``: its end was taken), or None for a page that needed none."""
     for f in fits:
         f[3]["exchanged"] = False
     if blur != "gauss2":
@@ -889,17 +974,41 @@ def in_order(pages, blur, fits, max_iter=FINAL_ITERATIONS):
     idx = [i for i, f in enumerate(fits) if second_is_narrower(pages[i].t, f[0])]
     if not idx:
         return fits
+    second = None if trace is None else [None] * len(idx)
     again = page_fits([pages[i] for i in idx], blur, theta0=[exchanged(pages[i].t, fits[i][0]) for i in idx],
-                      stages=("full",), grid=False, max_iter=(max_iter,))
+                      stages=("full",), grid=False, max_iter=(max_iter,), trace=second)
     out = list(fits)
-    for i, f in zip(idx, again):
+    for k, (i, f) in enumerate(zip(idx, again)):
         f[3]["exchanged"] = bool(f[3]["chi2"] < fits[i][3]["chi2"])
         if f[3]["exchanged"]:
             out[i] = f
+        if trace is not None:
+            trace[i] = dict(second[k], kept=f[3]["exchanged"])
     return out
 
 
-def fit_images(images, seeds=None, *, blur="gauss2", pair_reach_px=None, exchange=True, log=None):
+def redraw(pg, theta, scale, const, seed=0):
+    """The image the fit's answer stands for, from a page that has been through steps A to C: the final outline
+    and blur are set, every hole's centre, brightness and level are fitted under them (the hole pass, as step B),
+    and the image is every hole's near and far light, at each pixel the level of its nearest hole, and noise of the
+    holes' own leftover (the median over the stacked holes), the same at every pixel. The page is changed by this:
+    call it after its results have been taken. Returns host arrays: ``image`` and ``picture`` (with and without
+    the noise, float32 (H, W), bright holes), ``noise``, and per hole ``centers_xy``, ``brightness``, ``level``,
+    ``rms``."""
+    pg.trace = None
+    pg.set_template(theta, scale, const)
+    kept = {}
+    pg.fit_holes(sweeps=CENTRING_SWEEPS, size=False, keep=kept)
+    picture = pg.picture(kept["light"])
+    noise = float(cp.median(pg.hole_rms[pg.use]))
+    grain = cp.random.default_rng(seed).standard_normal(picture.shape, dtype=cp.float32)
+    return dict(image=cp.asnumpy((picture + noise * grain).astype(cp.float32)),
+                picture=cp.asnumpy(picture.astype(cp.float32)), noise=noise, centers_xy=cp.asnumpy(pg.c),
+                brightness=cp.asnumpy(pg.a), level=cp.asnumpy(pg.level), rms=cp.asnumpy(pg.hole_rms))
+
+
+def fit_images(images, seeds=None, *, blur="gauss2", pair_reach_px=None, exchange=True, log=None, trace=None,
+               redraw_seed=None):
     """Steps A to C for a list of images (bright holes; the page fits run in lockstep). ``seeds``: one (N, 2)
     array per image, or None for the method's own seed finder. ``pair_reach_px``: how far from a stacked hole its
     neighbours' light is in the stack's model (default: window half width + ``PAIR_REACH_MARGIN_PX``).
@@ -909,7 +1018,19 @@ def fit_images(images, seeds=None, *, blur="gauss2", pair_reach_px=None, exchang
     model's units: clear-area light above the hole's level), ``rms`` (leftover of its window), ``good`` (stacked
     in C); per page ``theta``, ``scale``, ``const``, ``chi2``, ``bins``, ``iterations``, ``converged``,
     ``exchanged``, ``theta_first`` (step A), ``stack`` and ``stack_weight`` (bins of 1 / ``upsample`` px, NaN and 0
-    where no pixel fell), ``spacing_px``, ``window_px``, ``noise_sd``, ``seconds`` (the call's time / images)."""
+    where no pixel fell), ``spacing_px``, ``window_px``, ``noise_sd``, ``seconds`` (the call's time / images).
+
+    ``trace``: a list that receives one dict per image with what every step produced (host arrays), for
+    ``scripts/outline_fit_steps.py``; the returned values are the same with and without it. Keys, in the order of
+    the calculation: ``window`` (seeds, nearest_px, spacing_px, window_px, bins_per_px, stack_bins, reach_px,
+    box_px); ``average_all`` (the stack of every interior hole and its pixels per bin; per hole inside, brightness
+    relative to the median, level, leftover, compared, kept; the limits used); ``average_1`` (the stack without
+    the unusual holes: the first fit's data; per hole brightness, level, leftover against it; noise);
+    ``fit_1`` (``page_fits``' record); ``holes`` (after the hole pass: centers_xy, brightness, level, leftover,
+    passes, and ``picture``, the method's picture of the image, float32 (H, W)); ``kept_2`` (who is stacked
+    again, by reason); ``average_2``; ``fit_2``; ``exchange`` (the second fit of a gauss2 fit that ended
+    exchanged, with ``kept``, or None). With ``redraw_seed`` (an int) also ``redrawn``: ``redraw``'s image of the
+    fit's answer, with noise from that seed."""
     started = time.perf_counter()
 
     def say(text):
@@ -917,22 +1038,40 @@ def fit_images(images, seeds=None, *, blur="gauss2", pair_reach_px=None, exchang
             cp.cuda.get_current_stream().synchronize()
             log(f"{text} ({time.perf_counter() - started:.2f} s)")
 
+    tracing = trace is not None
+    steps = [{} for _ in images] if tracing else [None] * len(images)
+    if tracing:
+        trace.extend(steps)  # filled as the steps run: a fit that fails leaves the steps it reached
     pages = []
     for k, image in enumerate(images):
-        pg = GpuPage(image, blur=blur, seeds=None if seeds is None else seeds[k], pair_reach_px=pair_reach_px)
+        pg = GpuPage(image, blur=blur, seeds=None if seeds is None else seeds[k], pair_reach_px=pair_reach_px,
+                     trace=steps[k])
         pg.build_stack()
         pages.append(pg)
     say("A: seeds and stack")
-    first = page_fits(pages, blur, stages=FIRST_STAGES, max_iter=FIRST_ITERATIONS, ftol=FIRST_FTOL)
+    recorded = [None] * len(pages) if tracing else None
+    first = page_fits(pages, blur, stages=FIRST_STAGES, max_iter=FIRST_ITERATIONS, ftol=FIRST_FTOL, trace=recorded)
+    if tracing:
+        for s, r in zip(steps, recorded):
+            s["fit_1"] = r
     say("A: first page fit")
     for pg, (theta, scale, const, _) in zip(pages, first):
         pg.set_template(theta, scale, const)
-        pg.fit_holes(sweeps=CENTRING_SWEEPS, size=False)
+        kept = {} if tracing else None
+        passes = pg.fit_holes(sweeps=CENTRING_SWEEPS, size=False, keep=kept)
+        if tracing:
+            pg._keep("holes", centers_xy=pg.c, brightness=pg.a, level=pg.level, leftover=pg.hole_rms, passes=passes,
+                     picture=pg.picture(kept["light"]).astype(cp.float32))
         pg.restack(pg.good_mask(), scale)
     say("B: hole pass and stack")
+    recorded = [None] * len(pages) if tracing else None
     fits = page_fits(pages, blur, theta0=[f[0] for f in first], stages=("full",), grid=False,
-                     max_iter=(FINAL_ITERATIONS,))
-    fits = in_order(pages, blur if exchange else None, fits)
+                     max_iter=(FINAL_ITERATIONS,), trace=recorded)
+    second = [None] * len(pages) if tracing else None
+    fits = in_order(pages, blur if exchange else None, fits, trace=second)
+    if tracing:
+        for s, r, x in zip(steps, recorded, second):
+            s["fit_2"], s["exchange"] = r, x
     say("C: final page fit")
     out = []
     for pg, f0, (theta, scale, const, record) in zip(pages, first, fits):
@@ -945,4 +1084,7 @@ def fit_images(images, seeds=None, *, blur="gauss2", pair_reach_px=None, exchang
     seconds = (time.perf_counter() - started) / max(len(images), 1)
     for o in out:
         o["seconds"] = seconds
+    if tracing and redraw_seed is not None:  # after the results are on the host: the copy changes the pages
+        for s, pg, (theta, scale, const, _) in zip(steps, pages, fits):
+            s["redrawn"] = redraw(pg, theta, scale, const, seed=redraw_seed)
     return out
