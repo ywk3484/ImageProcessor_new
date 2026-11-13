@@ -8,6 +8,14 @@ with one outline (a superellipse with harmonics: any star-convex shape) convolve
 own position, brightness, local level and edge offset. A hole's CD is that of the outline moved by its edge offset:
 the blur is fitted per page, so a focus change moves the blur, not the CD, and the brightness is free per hole.
 Method, checks and limits: docs/outline_fit.md. The fit itself is ``subpx._outline`` (NumPy, or CuPy on the GPU).
+
+    fast = subpx.fit_outline_fast(image, pixel_size=21, unit="nm")
+    result = subpx.measure_cds(image, methods=("outline_fit_fast", "half_area"), pixel_size=21, unit="nm")
+
+``fit_outline_fast`` (CD method ``outline_fit_fast``) fits the same model in one pass instead of 10 to 14 rounds: the
+image's outline CD, x / y widths and blur in a fraction of a second, on the GPU only, and no size per hole (every
+hole reads the image's CD). Method and measurements: docs/outline_fit_one_pass.md; the fit is
+``subpx._outline.onepass`` and ``subpx._gpu.outline_onepass``.
 """
 
 from __future__ import annotations
@@ -16,7 +24,7 @@ import math
 
 import numpy as np
 
-from .types import CDMethodResult, OutlineFitResult
+from .types import CDMethodResult, OutlineFastResult, OutlineFitResult
 
 BLUR_FAMILIES = {"gauss2": 24, "lens": 48}  # blur family -> first template box (px); it doubles when light reaches past it
 MIN_HOLES = 10  # fewer seeds than this: no fit (the page's outline and blur come from the average of its holes)
@@ -325,3 +333,250 @@ def fit_line(summary: dict | None, ascii_only: bool = False) -> str:
             f"{summary['blur_fwhm'][1]:.1f} {u} ({summary['blur_family']}), exponent p {summary['p']:.2f}; {state}; "
             f"{size}; {summary['holes_fitted']:,} holes fitted, {summary['at_clip']} at the edge-offset bound; "
             f"{summary['seconds']:.0f} s")
+
+
+# ------------------------------------------------------------------------------------------- one-pass fit
+_reading_templates: dict[str, object] = {}
+
+
+def _reading_template(blur):
+    """A ``Template`` for the page readings (CD, extents, blur widths) on ``fit_outline``'s first box of the blur
+    form, so that the two methods' blur widths are read the same way. No coverage grid (``aa=1``): none is used."""
+    from ._outline.model import Template
+
+    if blur not in _reading_templates:
+        _reading_templates[blur] = Template(upsample=UPSAMPLE, size_px=BLUR_FAMILIES[blur], blur=blur, aa=1)
+    return _reading_templates[blur]
+
+
+def _gpu_usable() -> bool:
+    from .backends import cp
+
+    try:
+        return cp is not None and cp.cuda.runtime.getDeviceCount() > 0
+    except Exception:
+        return False
+
+
+def fit_outline_fast(
+    image: np.ndarray,
+    seeds_xy: np.ndarray | None = None,
+    *,
+    pixel_size: float = 1.0,
+    unit: str = "px",
+    blur: str = "gauss2",
+    invert: bool = False,
+    n_rays: int = 128,
+    backend: str = "auto",
+    device: int = 0,
+    log=None,
+) -> OutlineFastResult:
+    """Fit one outline and one blur to the whole image in one pass (GPU only); page values, no size per hole.
+
+    The model, its parameters and the CD are ``fit_outline``'s. Instead of alternating a hole stage and a shape
+    stage for 10 to 14 rounds, the image's holes are averaged as they are (binned at their sub-pixel offsets), the
+    neighbours' light is put into the model of that average, and outline and blur are fitted to it once; the holes
+    are then centred against the complete page model, and the fit is repeated with those centres. About 0.1 to
+    0.3 s for a 2048 x 1378 image of 39,000 holes on an RTX 4060 Ti (the first call compiles the GPU routines:
+    about half a minute, once per machine). Measurements and limits: docs/outline_fit_one_pass.md.
+
+    Parameters
+    ----------
+    image : (H, W) ndarray
+        The image, bright holes (``invert=True``: dark holes on a bright background).
+    seeds_xy : (N, 2) ndarray, optional
+        A starting position [x, y] for every hole of the image, including those cut by the frame. Default: the
+        method's own seed finder (local maxima of the lightly smoothed image).
+    blur : {'gauss2', 'lens'}
+        The blur's family, as for ``fit_outline``.
+    n_rays : int
+        Directions of the page's outline returned (``rays_px``), at least 16.
+    backend : {'auto', 'gpu', 'cpu'}
+        There is no CPU path: 'cpu', or no usable GPU, raises ``RuntimeError``.
+    log : callable, optional
+        Called with one line of text per step.
+
+    Returns
+    -------
+    OutlineFastResult
+        NumPy arrays, lengths in pixels.
+    """
+    import time
+
+    started = time.perf_counter()
+    img = np.asarray(image)
+    if img.ndim != 2 or img.size == 0 or not np.issubdtype(img.dtype, np.number) or not np.isfinite(img).all():
+        raise ValueError("image must be a nonempty 2D array of finite intensities")
+    seeds = None
+    if seeds_xy is not None:
+        seeds = np.asarray(seeds_xy, dtype=np.float64).reshape(-1, 2)
+        if len(seeds) < MIN_HOLES or not np.isfinite(seeds).all():
+            raise ValueError(f"the outline fit needs at least {MIN_HOLES} finite seeds")
+    if blur not in BLUR_FAMILIES:
+        raise ValueError("blur must be one of " + ", ".join(BLUR_FAMILIES))
+    if int(n_rays) != n_rays or n_rays < 16:
+        raise ValueError("n_rays must be an integer of at least 16")
+    if not (np.isfinite(pixel_size) and pixel_size > 0):
+        raise ValueError("pixel_size must be positive")
+    if backend not in ("auto", "gpu", "cpu"):
+        raise ValueError("backend must be 'auto', 'gpu' or 'cpu'")
+    if backend == "cpu" or not _gpu_usable():
+        raise RuntimeError("fit_outline_fast needs the GPU (CuPy); it has no CPU path (fit_outline has one)")
+    from .backends import gpu_device
+
+    # bright holes over a level, as fit_outline: dark holes are reflected (max - image)
+    signal = img.astype(np.float64)
+    top = float(signal.max())
+    if invert:
+        signal = top - signal
+    with gpu_device(device):
+        import cupy
+
+        from ._gpu._cuda import release_memory
+        from ._gpu.outline_onepass import find_seeds, fit_images, lib_template
+
+        try:
+            if seeds is None:
+                seeds = cupy.asnumpy(find_seeds(cupy.asarray(signal).astype(cupy.float32)))
+                if len(seeds) < MIN_HOLES:
+                    raise ValueError(f"the outline fit needs at least {MIN_HOLES} holes; {len(seeds)} were found")
+            res = fit_images([signal], [seeds], blur=blur, log=log)[0]
+        finally:
+            release_memory()
+    template = lib_template(blur)
+    theta = res["theta"]
+    zero = np.zeros(1)
+    cd = float(template.cd_px(theta))
+    cd_x, cd_y = (float(v[0]) for v in ellipse_widths(template, theta, zero))
+    rays = outline_rays(template, theta, zero, int(n_rays))[0]
+    centers = res["centers_xy"] + np.asarray(template.centroid_px(theta))
+    level = top - res["level"] if invert else res["level"]
+    d = _reading_template(blur).describe(theta, 1.0)  # in pixels
+    fwhm = tuple(float(v) for v in d["blur_fwhm_nm"])
+    summary = {
+        "blur_family": blur, "outline_cd_px": cd,
+        "outline_extent_x_px": float(d["extent_x_nm"]), "outline_extent_y_px": float(d["extent_y_nm"]),
+        "superellipse_p": float(d["superellipse"]["p"]), "outline_turn_deg": float(d["superellipse"]["phi_deg"]),
+        "harmonics": {k: [float(v) for v in pair] for k, pair in d["harmonics"].items()},
+        "blur_fwhm_px": [float(v) for v in fwhm], "blur_rms_px": [float(v) for v in d["blur_rms_nm"]],
+        "holes_fitted": int(len(seeds)), "holes_stacked": int(np.sum(res["good"])),
+        "spacing_px": float(res["spacing_px"]), "window_px": int(res["window_px"]),
+        "pair_reach_px": float(res["pair_reach_px"]), "noise_sd": float(res["noise_sd"]),
+        "leftover_chi2": float(res["chi2"]) / max(int(res["bins"]), 1),
+        "first_cd_px": float(template.cd_px(res["theta_first"])),
+        "fit_iterations": int(res["iterations"]), "converged": bool(res["converged"]),
+        "exchanged": bool(res["exchanged"]), "per_hole_size": False,
+        "seconds": time.perf_counter() - started, "backend": "gpu", "theta": [float(v) for v in theta],
+        "lengths": "px",
+    }
+    return OutlineFastResult(
+        centers_xy=centers, brightness=res["brightness"], level=level, rms=res["rms"],
+        good=np.asarray(res["good"], dtype=bool), outline_cd_px=cd, cd_x_px=cd_x, cd_y_px=cd_y, rays_px=rays,
+        blur_fwhm_px=fwhm, theta=theta, stack=res["stack"], stack_weight=res["stack_weight"],
+        upsample=int(res["upsample"]), blur=blur, summary=summary, pixel_size=float(pixel_size), unit=str(unit),
+    )
+
+
+def blur_second(theta, blur: str) -> str:
+    """The blur's second part of a fitted ``theta`` (of ``fit_outline`` or ``fit_outline_fast``) in words, in
+    pixels; '' for a form without one. On some images the fit has more than one end point, and this is what tells
+    them apart: two fits whose page CDs differ and whose second parts differ sit at different ends of the same
+    model (docs/outline_fit_fast_handoff.md, 6.3)."""
+    theta = np.asarray(theta, dtype=float)
+    if blur == "gauss2":
+        s2x, s2y = np.exp(theta[-3:-1])
+        return f"second Gaussian {s2x:.1f} x {s2y:.1f} px, {100 / (1 + math.exp(-theta[-1])):.0f} % of the light"
+    if blur == "lens":
+        return f"pupil cut-off {math.exp(theta[-1]):.2f} cycles/px"
+    return ""
+
+
+FAST_METRICS = ("area_px2", "cd_equivalent_px", "cd_x_px", "cd_y_px", "perimeter_px", "brightness", "background",
+                "leftover_rms")
+
+
+def measure_outline_fast(image, seeds_xy, rows, origins_xy, *, pixel_size, unit, blur, invert, n_rays, backend,
+                         device=0):
+    """``measure_cds``'s ``outline_fit_fast``: the one-pass fit of every seed, reported for ``rows``;
+    (CDMethodResult, page summary). Every reported hole reads the image's CD (status ``page_size``): the mean is a
+    reading, the spread is not one. Not fitted, with every hole invalid and the reason in the summary: fewer than
+    ``MIN_HOLES`` seeds (status ``too_few_holes``), a run on the CPU (``needs_gpu``), or an image the fit cannot
+    stack (``not_fitted``). None of these raises: the image's other methods are kept."""
+    from ._cpu.cd import radial_contours
+
+    rows = np.asarray(rows, dtype=np.int64)
+    n = len(rows)
+
+    def unfitted(status, reason):
+        measured = CDMethodResult(
+            method="outline_fit_fast", centers_xy=np.full((n, 2), np.nan),
+            contours_xy=np.full((n, n_rays + 1, 2), np.nan), valid=np.zeros(n, bool),
+            status=np.full(n, status, dtype="U32"), metrics={name: np.full(n, np.nan) for name in FAST_METRICS},
+            geometry={"center_local": np.full((n, 2), np.nan), "edge_px": np.full((n, n_rays), np.nan)})
+        return measured, {"fitted": False, "reason": reason, "holes_fitted": int(len(seeds_xy))}
+
+    if len(seeds_xy) < MIN_HOLES:
+        return unfitted("too_few_holes", f"fewer than {MIN_HOLES} holes")
+    if backend != "gpu":
+        return unfitted("needs_gpu", "needs the GPU (CuPy); this run uses the CPU")
+    try:
+        fit = fit_outline_fast(image, seeds_xy, pixel_size=pixel_size, unit=unit, blur=blur, invert=invert,
+                               n_rays=n_rays, backend="gpu", device=device)
+    except ValueError as error:  # the options were checked by measure_cds: this is about the image
+        return unfitted("not_fitted", str(error))
+    centers = fit.centers_xy[rows]
+    origins = np.asarray(origins_xy, dtype=float).reshape(n, 2)
+    valid = np.isfinite(centers).all(axis=1) & bool(np.isfinite(fit.outline_cd_px))
+    status = np.where(valid, "page_size", "not_finite").astype("U32")
+    center_local = centers - origins
+    edge = np.repeat(fit.rays_px[None, :], n, axis=0)
+    contours = radial_contours(center_local, edge, origins, edge.shape[1])
+    segments = np.diff(contours, axis=1)
+
+    def page(value):
+        return np.where(valid, value, np.nan)
+
+    cd = fit.outline_cd_px
+    metrics = {
+        "area_px2": page(np.pi * cd * cd / 4), "cd_equivalent_px": page(cd), "cd_x_px": page(fit.cd_x_px),
+        "cd_y_px": page(fit.cd_y_px),
+        "perimeter_px": np.where(valid, np.hypot(segments[..., 0], segments[..., 1]).sum(axis=1), np.nan),
+        "brightness": fit.brightness[rows].copy(), "background": fit.level[rows].copy(),
+        "leftover_rms": fit.rms[rows].copy(),
+    }
+    measured = CDMethodResult(method="outline_fit_fast", centers_xy=centers.copy(), contours_xy=contours, valid=valid,
+                              status=status, metrics=metrics,
+                              geometry={"center_local": center_local, "edge_px": edge})
+    return measured, {"fitted": True, **fit.summary}
+
+
+def fast_summary(fit_meta: dict | None, pixel_size: float = 1.0, unit: str = "px") -> dict | None:
+    """The page readings of ``measure_cds``' ``meta["outline_fit_fast"]`` in ``unit`` (None without the method)."""
+    if not fit_meta:
+        return None
+    if not fit_meta.get("fitted"):
+        return {"fitted": False, "reason": fit_meta.get("reason", "")}
+    scale = float(pixel_size)
+    return {"fitted": True, "outline_cd": fit_meta["outline_cd_px"] * scale,
+            "blur_fwhm": [v * scale for v in fit_meta["blur_fwhm_px"]], "blur_family": fit_meta["blur_family"],
+            "blur_second": blur_second(fit_meta["theta"], fit_meta["blur_family"]), "p": fit_meta["superellipse_p"],
+            "leftover_chi2": fit_meta["leftover_chi2"], "first_cd": fit_meta["first_cd_px"] * scale,
+            "holes_stacked": fit_meta["holes_stacked"], "holes_fitted": fit_meta["holes_fitted"],
+            "converged": fit_meta["converged"], "iterations": fit_meta["fit_iterations"],
+            "exchanged": fit_meta["exchanged"], "seconds": fit_meta["seconds"], "unit": unit}
+
+
+def fast_line(summary: dict | None, ascii_only: bool = False) -> str:
+    """One line on an image's one-pass outline fit from ``fast_summary`` (``ascii_only`` for a console)."""
+    if not summary:
+        return ""
+    if not summary["fitted"]:
+        return f"not fitted ({summary['reason']})"
+    u, x = summary["unit"], "x" if ascii_only else "×"
+    second = f"; {summary['blur_second']}" if summary["blur_second"] else ""
+    state = "" if summary["converged"] else f"; final fit NOT converged in {summary['iterations']} iterations"
+    return (f"outline CD {summary['outline_cd']:.2f} {u}, blur FWHM {summary['blur_fwhm'][0]:.1f} {x} "
+            f"{summary['blur_fwhm'][1]:.1f} {u} ({summary['blur_family']}{second}), exponent p {summary['p']:.2f}; "
+            f"leftover {summary['leftover_chi2']:.2f} (chi-square per bin: 1 = at the noise); first fit "
+            f"{summary['first_cd']:.2f} {u}{state}; {summary['holes_stacked']:,} of {summary['holes_fitted']:,} holes "
+            f"stacked; page size for every hole; {summary['seconds']:.2f} s")

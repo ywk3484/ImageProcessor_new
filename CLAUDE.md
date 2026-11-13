@@ -45,7 +45,7 @@ GPU implementations are **hybrid**: segmentation stays on CPU (OpenCV), expensiv
 | `pitch.py` | Pitch estimation: KNN or index_regression, global and per-line |
 | `registration.py` | Phase cross-correlation shift between two images (not pattern placement; see `pattern.py`) |
 | `cd.py` | Contact-hole contours, CD methods, spatial maps, raw exports (backends `_cpu/`/`_gpu/` `cd.py`, `local_cd.py`, `deblend.py`) |
-| `outline.py` | Outline fit: one sharp outline and one blur per page (`fit_outline`, CD method `outline_fit`); the fit is in `_outline/` (NumPy or CuPy) |
+| `outline.py` | Outline fit: one sharp outline and one blur per page (`fit_outline`, CD method `outline_fit`); the fit is in `_outline/` (NumPy or CuPy). The same fit in one pass, page values only, GPU only: `fit_outline_fast`, CD method `outline_fit_fast` (`_outline/onepass.py`, `_gpu/outline_onepass.py`) |
 | `pattern.py` | CD-center lattice indexing, pitch profiles, placement ("registration") reports |
 | `preprocess.py` | Denoising and the super-resolved average hole (from the ACTIS preprocessing proposal) |
 | `synthetic_arrays.py` | Synthetic hole arrays with exactly known centers, for center and pitch tests |

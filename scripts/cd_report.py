@@ -26,6 +26,14 @@ on the GPU (tens of minutes on the CPU). Its page readings (outline CD, blur, ro
 the holes were large enough for a size each) are printed and shown on each image tab; where the per-hole size was
 switched off, every hole reads the image's CD and its within-image sigma is shown as not measured.
 
+--outline-fit-fast adds outline_fit_fast (docs/outline_fit.md): the same model fitted in one pass, a fraction of a
+second per image, on the GPU only (on the CPU it is reported as not fitted). It gives the image's outline CD, x / y
+widths and blur; every hole reads the image's CD, so it has a mean per image and no within-image sigma. With both
+flags the two are compared: per image a note with the blur's second part of each fit, and one last line on the
+console (also among the report's notes),
+    outline_fit_fast - outline_fit: mean +0.08, largest 0.14 nm over 12 images; 0.30 s against 95 s per image
+the mean and the largest absolute difference of the two outline CDs per image, and each method's seconds per image.
+
 Open REPORT/index.html in a browser (works from the folder, no server). It has a summary tab and one tab per image.
 
 The summary tab first answers whether the images show the same CD on average. Per method, with m_i the mean CD
@@ -72,7 +80,7 @@ if str(ROOT) not in sys.path:
 
 from subpx import measure_cds, save_cd_results
 from subpx.cd import METHOD_LABELS
-from subpx.outline import fit_line, fit_summary
+from subpx.outline import blur_second, fast_line, fast_summary, fit_line, fit_summary
 
 ALL_METHODS = ("gaussian", "projection", "half_area", "half_area_min", "half_area_min_avg", "tail_area",
                "tail_area_norm", "edge_area", "foot_area", "foot_area_ratio")
@@ -124,8 +132,21 @@ DESCRIPTIONS.update({
                    "(neighbours' light modelled). CD = area-equivalent diameter of the outline moved by the hole's "
                    "edge offset: the blur is fitted, so a focus change moves the blur, not the CD; brightness is free "
                    "per hole. x / y: the diameters of the ellipse with the outline's area and x / y spread.",
+    "outline_fit_fast": "The outline fit's model (one sharp outline blurred by one blur, both fitted to this image) "
+                        "fitted in one pass on the GPU: the image's holes averaged as they are, the neighbours' "
+                        "light in the model of that average. It gives the image's outline CD, x / y widths and "
+                        "blur. Every hole reads the image's CD: the mean is a reading, there is no size per hole "
+                        "and no within-image sigma.",
 })
 OPTIONAL_METHODS = ("outline_fit",)  # opt-in (--outline-fit): minutes per image on the GPU
+FAST_OUTLINE = "outline_fit_fast"  # opt-in (--outline-fit-fast): a fraction of a second per image, GPU only
+FAST_NOTE = ("outline_fit_fast gives every hole the image's size: it has a mean per image and no within-image "
+             "sigma (shown as not measured).")
+
+
+def optional_methods(args) -> tuple[str, ...]:
+    """The opt-in methods the flags --outline-fit and --outline-fit-fast add."""
+    return (OPTIONAL_METHODS if args.outline_fit else ()) + ((FAST_OUTLINE,) if args.outline_fit_fast else ())
 # The CD and the x / y widths: statistics key suffix, metric, label.
 AXES = (("", "cd_equivalent_px", "CD"), ("_x", "cd_x_px", "x"), ("_y", "cd_y_px", "y"))
 
@@ -153,6 +174,9 @@ def cd_statistics(result) -> dict[str, dict]:
         # the spread is not one
         for suffix, _, _ in AXES:
             stats["outline_fit"]["std" + suffix] = stats["outline_fit"]["three_sigma_pct" + suffix] = float("nan")
+    if FAST_OUTLINE in stats:  # the one-pass fit gives every hole the image's size, on every image
+        for suffix, _, _ in AXES:
+            stats[FAST_OUTLINE]["std" + suffix] = stats[FAST_OUTLINE]["three_sigma_pct" + suffix] = float("nan")
     return stats
 
 
@@ -162,6 +186,51 @@ def outline_summary(result, unit: str) -> dict | None:
 
 
 outline_line = fit_line  # one line on the outline fit of an image (``ascii_only`` for the console)
+
+
+def outline_fast_summary(result, unit: str) -> dict | None:
+    """The one-pass outline fit's page readings in ``unit`` (None without the method)."""
+    return fast_summary(result.meta.get(FAST_OUTLINE), float(result.pixel_size), unit)
+
+
+outline_fast_line = fast_line  # one line on the one-pass outline fit of an image
+
+
+def blur_second_note(result) -> str:
+    """With both outline fits on an image: the blur's second part of each ('' otherwise, or for a blur form
+    without one). Clearly different second parts mean the two fits ended at different end points of the same
+    model, which is not a disagreement of the two procedures."""
+    fits = [result.meta.get(name) or {} for name in ("outline_fit", FAST_OUTLINE)]
+    if not all(fit.get("fitted") for fit in fits):
+        return ""
+    parts = [blur_second(fit["theta"], fit["blur_family"]) for fit in fits]
+    if not all(parts):
+        return ""
+    return f"blur second part: outline_fit {parts[0]}; outline_fit_fast {parts[1]}"
+
+
+def outline_fast_note(name: str, summary: dict) -> str:
+    """A report note for an image whose one-pass outline fit is not a reading ('' when it is)."""
+    if not summary["fitted"]:
+        return f"{name}: outline_fit_fast not fitted ({summary['reason']})."
+    if not summary["converged"]:
+        return (f"{name}: outline_fit_fast's final fit did not converge in {summary['iterations']} iterations "
+                "(its outline was still moving).")
+    return ""
+
+
+def outline_comparison(entries: list[dict], unit: str) -> str:
+    """One line on the images both outline fits read: the mean and the largest absolute difference of the two
+    outline CDs (one-pass minus outline_fit, per image) and each method's seconds per image; '' without such an
+    image. ASCII, short enough to be typed back from another machine."""
+    pairs = [(e["outline_fast"], e["outline"]) for e in entries
+             if not e.get("error") and (e.get("outline_fast") or {}).get("fitted") and (e.get("outline") or {}).get("fitted")]
+    if not pairs:
+        return ""
+    diff = np.array([fast["outline_cd"] - slow["outline_cd"] for fast, slow in pairs])
+    seconds = np.mean([[fast["seconds"], slow["seconds"]] for fast, slow in pairs], axis=0)
+    return (f"outline_fit_fast - outline_fit: mean {diff.mean():+.2f}, largest {np.abs(diff).max():.2f} {unit} over "
+            f"{len(pairs)} image{'s' if len(pairs) > 1 else ''}; {seconds[0]:.2f} s against {seconds[1]:.0f} s per image")
 
 
 def layer_values(result) -> dict[str, np.ndarray]:
@@ -500,7 +569,8 @@ COLORS = {"gaussian": "#5bbf2a", "projection": "#7a7a7a", "projection_x": "#2b8c
           "tail_area_norm": "#2e86c1", "edge_area": "#c0392b",
           "foot_area": "#16a085", "foot_area_ratio": "#7d3c98"}
 COLORS.update({"local_projection": "#64748b", "local_half_area": "#b83280",
-               "local_half_area_min_avg": "#b7791f", "local_tail_area": "#0d9488", "outline_fit": "#e11d48"})
+               "local_half_area_min_avg": "#b7791f", "local_tail_area": "#0d9488", "outline_fit": "#e11d48",
+               "outline_fit_fast": "#4f46e5"})
 # x / y width layers: the method's colour, lighter for x and darker for y (projection keeps its own two).
 COLORS["cell_intensity"] = "#b8860b"
 for _name, _color in list(COLORS.items()):
@@ -611,6 +681,9 @@ def write_report(output: Path, entries: list[dict], methods: tuple[str, ...], no
         f"<p class='meta'>{e['holes']:,} holes · {e['width']} × {e['height']} px · image intensity (mean of all "
         f"pixels) {_fmt(e['image_mean'])} counts · {e['seconds']:.1f} s</p>"
         + (f"<p class='meta'><b>Outline fit:</b> {html.escape(outline_line(e['outline']))}</p>" if e.get("outline") else "")
+        + (f"<p class='meta'><b>Outline fit (fast):</b> {html.escape(outline_fast_line(e['outline_fast']))}</p>"
+           if e.get("outline_fast") else "")
+        + (f"<p class='meta'>{html.escape(e['blur_second'])}</p>" if e.get("blur_second") else "")
         + f"{_stats_table(e['stats'], unit)}"
         f"{_intensity_table(e['intensity'], e.get('intensity_source') or intensity_source(e['stats']) or 'tail_area') if e.get('intensity') else ''}"
         f"{_agreement_table(*e['agreement'])}"
@@ -676,8 +749,12 @@ def main(argv=None) -> None:
     parser.add_argument("--methods", nargs="+", choices=ALL_METHODS, default=list(ALL_METHODS))
     parser.add_argument("--outline-fit", action="store_true",
                         help="Also measure outline_fit (minutes per image on the GPU; see docs/outline_fit.md)")
+    parser.add_argument("--outline-fit-fast", action="store_true",
+                        help="Also measure outline_fit_fast: the outline fit in one pass, page values only, a "
+                             "fraction of a second per image, GPU only (see docs/outline_fit.md)")
     parser.add_argument("--outline-blur", choices=("gauss2", "lens"), default="gauss2",
-                        help="outline_fit: the blur's family (two Gaussians, or a Gaussian times a circular pupil)")
+                        help="outline_fit and outline_fit_fast: the blur's family (two Gaussians, or a Gaussian "
+                             "times a circular pupil)")
     parser.add_argument("--outline-rounds", type=int, default=14,
                         help="outline_fit: most rounds of its fit (it stops earlier once the outline settles)")
     parser.add_argument("--half-level", type=float, default=0.5,
@@ -708,8 +785,9 @@ def main(argv=None) -> None:
     if not images:
         raise SystemExit(f"No .png images in {args.folder}")
     methods, notes = tuple(m for m in ALL_METHODS if m in args.methods), []
-    if args.outline_fit:
-        methods += OPTIONAL_METHODS
+    methods += optional_methods(args)
+    if args.outline_fit_fast:
+        notes.append(FAST_NOTE)
     output = args.output
     for sub in ("images", "data"):
         (output / sub).mkdir(parents=True, exist_ok=True)
@@ -774,16 +852,25 @@ def main(argv=None) -> None:
         if args.save_results:
             save_cd_results(result, output / "results" / ident, compact=True)
         outline = outline_summary(result, args.unit)
+        outline_fast = outline_fast_summary(result, args.unit)
+        second = blur_second_note(result)
         entries.append({"id": ident, "name": path.name, "holes": len(result.seeds_xy), "stats": stats,
                         "width": image.shape[1], "height": image.shape[0], "seconds": seconds,
                         "image": f"images/{ident}.png", "data": f"data/{ident}.js", "detail": detail, "tail": tail,
                         "agreement": agreement(result), "intensity": intensity, "image_mean": image_mean,
-                        "outline": outline})
+                        "outline": outline, "outline_fast": outline_fast, "blur_second": second})
         if outline:
             print(f"  outline fit: {outline_line(outline, ascii_only=True)}", flush=True)
             note = outline_note(path.name, outline)
             if note:
                 notes.append(note)
+        if outline_fast:
+            print(f"  outline fit (fast): {outline_fast_line(outline_fast, ascii_only=True)}", flush=True)
+            note = outline_fast_note(path.name, outline_fast)
+            if note:
+                notes.append(note)
+        if second:
+            print(f"  {second}", flush=True)
         for method, s in stats.items():
             rows.append({"image": path.name, "status": "ok", "method": method, "holes": len(result.seeds_xy), **s,
                          "unit": args.unit})
@@ -828,8 +915,13 @@ def main(argv=None) -> None:
         pooled = np.concatenate(parts)
         if pooled.size:
             ranges[layer] = [float(v) for v in np.quantile(pooled, [0.02, 0.98])]
+    comparison = outline_comparison(entries, args.unit)
+    if comparison:
+        notes.append(comparison)
     path = write_report(output, entries, methods, notes, args.unit, ranges)
     print(f"Report: {path} ({time.perf_counter() - started:.1f} s)", flush=True)
+    if comparison:  # the last line: the one to type back from another machine
+        print(comparison, flush=True)
 
 
 _HTML = r"""<!doctype html>

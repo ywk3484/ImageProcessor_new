@@ -92,6 +92,102 @@ Limits:
 - **GPU runs repeat to about 0.01 nm**, not bit for bit (the GPU's sums run in
   a varying order). CPU runs repeat exactly.
 
+## The same fit in one pass (`outline_fit_fast`)
+
+`outline_fit_fast` fits the same model (one sharp outline, one blur, the same
+parameters and the same CD) without the 10 to 14 rounds: it averages the image's
+holes as they are, puts the neighbours' light into the model of that average,
+and fits outline and blur to it once, centres the holes, and fits once more. It
+gives the **image's** outline CD, x / y widths and blur in a fraction of a
+second. It is there to be compared with `outline_fit` on real images; a size per
+hole and the TIFF batch come after that comparison.
+
+```bat
+python scripts\cd_fast_report.py D:\data\png_images --output D:\data\report_fast_cmp --pixel-size 21 --unit nm --outline-fit --outline-fit-fast
+```
+
+`--outline-fit-fast` works in `cd_report.py` and `cd_fast_report.py`, alone or
+beside `--outline-fit`; `--outline-blur` applies to both methods. What the
+report shows for it:
+
+- per image, on the console and the image tab: *Outline fit (fast): outline CD
+  100.71 nm, blur FWHM 63.1 × 62.8 nm (gauss2; second Gaussian 3.4 x 3.4 px,
+  23 % of the light), exponent p 2.00; leftover 0.99 (chi-square per bin: 1 = at
+  the noise); first fit 100.57 nm; 38,240 of 39,042 holes stacked; page size for
+  every hole; 0.21 s*
+- in the tables: the image's mean CD and x / y widths. **Every hole reads the
+  image's CD** (status `page_size`), so the within-image σ is shown as "–"
+  (`nan` in `summary.csv`); the between-image 3σ is measured.
+- with both flags, per image: *blur second part: outline_fit second Gaussian
+  2.0 x 2.0 px, 19 % of the light; outline_fit_fast second Gaussian 3.5 x
+  3.6 px, 25 % of the light*
+- with both flags, as the last line of the console and among the report's
+  notes: `outline_fit_fast - outline_fit: mean +0.08, largest 0.14 nm over 12
+  images; 0.30 s against 95 s per image` (the mean and the largest absolute
+  difference of the two outline CDs per image; each method's seconds per image).
+
+Reading the line:
+
+- **leftover** is the chi-square per bin of the final fit to the average hole:
+  near 1 the model fits the average hole to its noise (0.9 to 1.7 on generated
+  images); far above 1 the model does not fit the image's average hole.
+- **first fit** is the CD before the holes were centred; the final one is the
+  reading.
+- **the blur's second part** (the second Gaussian, or the pupil's cut-off for
+  `lens`) is what tells two fits apart that sit at different end points of the
+  same model. On some images the fit has more than one end (below); if the two
+  methods' CDs differ and their second parts clearly differ too, that is a
+  question about the model, not about the one-pass procedure.
+- *final fit NOT converged in 30 iterations*: the fit stopped at its iteration
+  cap; the report adds a note.
+
+Limits (all numbers are from generated images; nothing has been run on a real
+one):
+
+- **GPU only.** On the CPU the method is reported as not fitted (status
+  `needs_gpu`) and the other methods run as usual. The first run on a machine
+  compiles the GPU routines (about half a minute, once).
+- **Page values only.** No size per hole, no within-image σ.
+- **Few holes.** Error of the page CD on generated images, gauss2 / lens: 135
+  stacked holes +0.63 / +0.31 nm, 999 holes +0.34 / +0.16, 4,941 holes +0.09 /
+  −0.06, full pages of 30,000 holes −0.14 / +0.01 (100 nm circles). The cause of
+  the small images' offset was not found. With fewer than 10 holes nothing is
+  fitted (`too_few_holes`).
+- **More than one end point.** On some images the final fit can end in more
+  than one place, and its start decides: with `lens` on 7 of 10 generated full
+  pages (the ends 0.02 to 0.65 nm apart in page CD), with `gauss2` on 3 of 10.
+  It belongs to the model (one outline, one free blur shape), and whether
+  `outline_fit` ends at the same end on a given image is not known. Compare with
+  `gauss2` (the default) first. The `lens` errors on generated pages are
+  flattered: the generator's pupil is where the fit starts.
+- **Small holes** as for `outline_fit`: below about 70 nm size and blur cannot
+  be told apart (60 nm dense holes read +1.7 nm, 50 nm holes +9.6 nm).
+- **It does not know an image without the pattern**: it fits whatever bright
+  blobs it is given and reports a CD with a good leftover.
+- **Repeats** to 0.0003 nm on well determined images, to 0.007 nm where the fit
+  has several ends, to 0.02 to 0.07 nm on small dense patterns (the GPU's sums
+  run in a varying order).
+- **Time** on an RTX 4060 Ti, 2048 × 1378 px, 39,000 holes: about 0.2 s per
+  image with `gauss2`, 0.15 s with `lens` (0.02 to 0.2 s on small images),
+  beside the report's other methods.
+
+```python
+fit = subpx.fit_outline_fast(image, pixel_size=21, unit="nm")          # own seed finder; or pass seeds_xy
+fit.outline_cd_px, fit.cd_x_px, fit.cd_y_px, fit.blur_fwhm_px, fit.summary
+result = subpx.measure_cds(image, methods=("half_area", "outline_fit_fast"), pixel_size=21, unit="nm")
+result.meta["outline_fit_fast"]                                         # the page fit, or {"fitted": False, "reason": ...}
+```
+
+Per-hole metrics of the method in `measure_cds`: `cd_equivalent_px`, `cd_x_px`,
+`cd_y_px`, `area_px2`, `perimeter_px` (the image's values, repeated),
+`brightness`, `background` (the hole's level) and `leftover_rms`. Statuses:
+`page_size`; `not_finite`; `too_few_holes`, `needs_gpu`, `not_fitted` (no fit).
+
+Method, settings and every measurement: `docs/outline_fit_one_pass.md` (page:
+`docs/outline_fit_one_pass.html`). Code: `fit_outline_fast` and the adapter in
+`subpx/outline.py`, the page fit in `subpx/_outline/onepass.py`, the GPU steps
+in `subpx/_gpu/outline_onepass.py`. Tests: `tests/test_outline_fit_fast.py`.
+
 ## Workbench
 
 Tick **Outline fit** (group *Page fit*) in **CD methods**; its settings, **Blur**

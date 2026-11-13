@@ -148,7 +148,7 @@ half width), real noise 7.5 grey levels flat across levels (measured).
 still what would make the existing `outline_fit` itself faster (workbench, small regions, CPU); the batch needs the
 one-pass method below. Its "reference start" stays withdrawn. Its "real pages" are pages of the generated test file.
 
-# Outline fit in one pass: the batch at reading speed (2026-11-12; approved, handoff written, nothing built in subpx/)
+# Outline fit in one pass: the batch at reading speed (2026-11-12; phase 1 built 2026-11-13, waiting for real images)
 
 User (2026-11-12): one TIFF = up to 1,500 pages, 2-4 GB, thousands of them; the pattern areas are picked by PCC against
 a reference page cut into tiles (partial pages count); reading a TIFF takes about 1 minute and the fit must take less;
@@ -164,10 +164,11 @@ session. Answers: page mean for now (a size per hole only once the method is pro
 measured on the remote; the remote has 64 CPU threads; the remote picks pattern areas by PCC of page tiles against
 reference tiles, (N, m) valid indices.
 
-- [ ] Phase 1 (handoff section 5): library `fit_outline_fast` + `measure_cds` method `outline_fit_fast` (GPU, page
+- [x] Phase 1 (handoff section 5): library `fit_outline_fast` + `measure_cds` method `outline_fit_fast` (GPU, page
       values), `--outline-fit-fast` in `cd_report.py` and `cd_fast_report.py` with one comparison line and the
-      blur's second part of both methods per image, tests, docs
-- [ ] Give the user the one remote command; they type back the comparison line (real images, both methods)
+      blur's second part of both methods per image, tests, docs (2026-11-13; review below)
+- [x] Give the user the one remote command (handoff 5.6)
+- [ ] The user types back the comparison line (real images, both methods)
 - [ ] With the result on real images: the pair reach (30 px?) and whether the fit should try both of its ends
       (handoff 6.3, 6.13)
 - [ ] Phase 2 after the user's verdict: TIFF batch, areas (tiles or per-hole selection: handoff section 8)
@@ -188,3 +189,40 @@ their seeds, on small images, and from 81 starts per page; notes 6.12-6.17, page
 - Not found: why small images read 0.3-0.6 nm high at 135 holes (1 to 4 of the fit's own standard errors; the
   image border is ruled out).
 - Withdrawn: "gauss2 depends on its start by 0.1 nm, lens is stable to 0.002 nm" (two start changes are not a map).
+
+Review of the phase 1 build (2026-11-13). Plan = handoff section 5, built in its order; no plan-mode round (the
+handoff was the approved plan).
+- Built: `subpx/_outline/onepass.py` (Spec, Band, ShapeFitter, the gauss2 exchange helpers; NumPy or CuPy),
+  `subpx/_gpu/outline_onepass.py` (kernels, seed finder, GpuPage, driver `fit_images` in batch form),
+  `fit_outline_fast`, `blur_second`, `measure_outline_fast`, `fast_summary`, `fast_line` in `subpx/outline.py`,
+  `OutlineFastResult`, method `outline_fit_fast` in `measure_cds`, `--outline-fit-fast` in both reports,
+  `docs/outline_fit.md`, `tests/test_outline_fit_fast.py` (23 tests). A display name in the workbench's name table
+  (its test wants one per method); the method is not offered in the workbench.
+- Left out of the port, as the handoff says: the prototype's step D (noise line, per-hole results), the other stack
+  weightings, `recentre`, `Band.from_grid`. Added: `ShapeFitter.fit` reports per page whether a stage stopped by
+  its tolerance (for `converged`); errors instead of NaN when no hole can be stacked (the adapter turns them into
+  "not fitted" with the reason); `invert` (dark holes), tested against the bright image.
+- Port against the prototype (all generated data): the 40 hole pages of the test file with own seeds, largest
+  difference 0.0004 nm (gauss2, mean 100.799) and 0.0006 nm (lens, 100.743); 26 full generated pages: well
+  determined ones within 0.0007 nm, the pages with several ends within 0.006, the small dense patterns within
+  0.05; the three small images +0.63 / +0.31, +0.34 / +0.16, +0.09 / -0.06 nm as in the handoff. Steps A to C
+  alone, one full page per call: 178 to 241 ms gauss2, 112 to 123 ms lens.
+- Both reports on three pages of the test file as PNG, both flags: gauss2 `outline_fit_fast - outline_fit: mean
+  +0.09, largest 0.12 nm over 3 images; 0.29 s against 124 s per image`; lens `mean +0.09, largest 0.20 nm ...;
+  0.26 s against 268 s`. Between the three images the one-pass page CD spreads 3s 0.11 nm, outline_fit's 0.37 nm
+  (lens run).
+- Seen in those runs, not in the handoff:
+  - With the report's seeds the lens fit of the test file ends with the pupil cut-off on its bound (8 cycles/px,
+    the "pupil outside the band" end), not at 0.5 as with the method's own seeds; the page CD is the same to
+    0.01 nm on these pages (the handoff's two ends are 0.04 nm apart here). `outline_fit` ended at 1.5 on one page
+    and at 8 on the other two.
+  - gauss2, page 0 with the report's seeds: the final fit stopped at its 30-iteration cap with a second Gaussian
+    of 1 % of the light (undetermined); page CD equal to the own-seeds run (100.71). The line says "final fit NOT
+    converged", and the report adds a note.
+  - The first fit reads 0.4 to 0.6 nm higher with the report's seeds than with the method's own (101.15 against
+    100.57 nm on page 0); the final fit does not (centring removes it).
+- Whole suite: 598 pass; 9 failures in files this build did not touch fail the same way without it
+  (`test_isophote_curvature`, `test_pitch_gpu`, `test_radial_symmetry` x2, `test_tiled_gpu_pipeline` x5).
+- Not checked: anything on a real image or on the remote; the report's click panel in a browser (the method uses
+  the generic branch; the data files are written and the HTML is checked for its lines only).
+

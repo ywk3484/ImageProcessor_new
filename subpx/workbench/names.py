@@ -29,7 +29,9 @@ METHOD_NAMES = {
     "local_projection": "Raw-cell projection", "local_half_area": "Raw-cell half area",
     "local_half_area_min_avg": "Raw-cell half area, min level, avg peak", "local_tail_area": "Raw-cell tail area",
     "pixel_half_area": "Pixel half area", "pixel_half_area_min_avg": "Pixel half area, min level, avg peak",
-    "pixel_tail_area": "Pixel tail area", "outline_fit": "Outline fit", "detection": "Previewed holes",
+    "pixel_tail_area": "Pixel tail area", "outline_fit": "Outline fit",
+    "outline_fit_fast": "Outline fit, one pass",  # a name only: the method is in the folder reports, not offered here
+    "detection": "Previewed holes",
     # Pitch only: centers of the same holes found by the GPU center finders
     **{f"gpu_{key}": f"GPU {word} centers" for key, word in GPU_CENTER_FINDERS.items()},
 }

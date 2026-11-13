@@ -201,6 +201,45 @@ class OutlineFitResult:
 
 
 @dataclass
+class OutlineFastResult:
+    """One-pass outline fit of one image (``subpx.fit_outline_fast``): one sharp outline and one blur for the image,
+    in one pass. Page values only: there is no size per hole.
+
+    Per hole, in the order of the seeds (the method's own when none were given): ``centers_xy`` (from the hole pass
+    with the size held), ``brightness`` (clear-area light above the level), ``level`` (the hole's local level, in
+    the image's grey levels), ``rms`` (leftover of the hole's window) and ``good`` (the holes whose windows were
+    stacked for the final page fit).
+
+    Per page: ``outline_cd_px`` (area-equivalent diameter of the outline); ``cd_x_px`` / ``cd_y_px`` (the x / y
+    diameters of the ellipse with the outline's area and x / y spread); ``rays_px`` (n,), the outline's distance
+    from its centre at angles 2 pi j / n (x right, y down); ``blur_fwhm_px`` (x, y); ``theta`` (the model's
+    parameters, as ``fit_outline``'s) and ``blur`` (its family); ``stack`` and ``stack_weight`` (the plain average
+    hole and the number of pixels in each of its bins, ``upsample`` bins per pixel; NaN and 0 where no pixel fell);
+    ``summary`` (outline, blur and fit readings, JSON-ready). Lengths are in pixels; ``pixel_size`` converts them
+    to ``unit``.
+    """
+
+    centers_xy: np.ndarray
+    brightness: np.ndarray
+    level: np.ndarray
+    rms: np.ndarray
+    good: np.ndarray
+    outline_cd_px: float
+    cd_x_px: float
+    cd_y_px: float
+    rays_px: np.ndarray
+    blur_fwhm_px: tuple[float, float]
+    theta: np.ndarray
+    stack: np.ndarray
+    stack_weight: np.ndarray
+    upsample: int
+    blur: str
+    summary: dict[str, Any] = field(default_factory=dict)
+    pixel_size: float = 1.0
+    unit: str = "px"
+
+
+@dataclass
 class CDSummary:
     """Numerical per-hole measurements without image, label maps or cell statistics.
 

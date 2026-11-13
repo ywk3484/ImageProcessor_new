@@ -4,8 +4,14 @@
 
 Includes the ten original report methods and four interpolated raw-cell
 methods; --outline-fit adds outline_fit (minutes per image on the GPU,
-docs/outline_fit.md). Maps, measured outlines, hole details and statistics use
-the original report. Open the printed index.html path directly in a browser.
+docs/outline_fit.md) and --outline-fit-fast adds outline_fit_fast (the same
+model in one pass: page values only, a fraction of a second per image, GPU
+only). With both, the last line printed compares the two outline CDs:
+
+    outline_fit_fast - outline_fit: mean +0.08, largest 0.14 nm over 12 images; 0.30 s against 95 s per image
+
+Maps, measured outlines, hole details and statistics use the original report.
+Open the printed index.html path directly in a browser.
 """
 
 from __future__ import annotations
@@ -87,8 +93,12 @@ def argument_parser():
     parser.add_argument("--save-results", action="store_true", help="Also save full per-hole results (compact NPZ + CSVs)")
     parser.add_argument("--outline-fit", action="store_true",
                         help="Also measure outline_fit (minutes per image on the GPU; see docs/outline_fit.md)")
+    parser.add_argument("--outline-fit-fast", action="store_true",
+                        help="Also measure outline_fit_fast: the outline fit in one pass, page values only, a "
+                             "fraction of a second per image, GPU only (see docs/outline_fit.md)")
     parser.add_argument("--outline-blur", choices=("gauss2", "lens"), default="gauss2",
-                        help="outline_fit: the blur's family (two Gaussians, or a Gaussian times a circular pupil)")
+                        help="outline_fit and outline_fit_fast: the blur's family (two Gaussians, or a Gaussian "
+                             "times a circular pupil)")
     parser.add_argument("--outline-rounds", type=int, default=14,
                         help="outline_fit: most rounds of its fit (it stops earlier once the outline settles)")
     return parser
@@ -162,7 +172,9 @@ def _process_image(path, name, ident, output, options, rng, *, hole_details=True
                  height=image.shape[0], seconds=measure_s, image=f"images/{ident}.png", data=f"data/{ident}.js",
                  detail=detail, tail=tail, agreement=report.agreement(result), intensity=intensity,
                  image_mean=image_mean, intensity_source="tail_area",
-                 outline=report.outline_summary(result, result.unit))
+                 outline=report.outline_summary(result, result.unit),
+                 outline_fast=report.outline_fast_summary(result, result.unit),
+                 blur_second=report.blur_second_note(result))
     source.update(id=ident, status="ok", meta=result.meta)
     return entry, rows, timing, source, samples
 
@@ -182,7 +194,7 @@ def main(argv=None):
         parser.error(f"No PNG images in {args.folder}")
     backend, _ = _resolve_backends(args.backend, None, "model")
     options = _settings(args, backend)
-    methods = ALL_METHODS + (report.OPTIONAL_METHODS if args.outline_fit else ())
+    methods = ALL_METHODS + report.optional_methods(args)
     # Validate numerical options before creating output folders.
     try:
         measure_cds(np.zeros((8, 8), np.uint8), methods=methods, **{**options, "backend": "cpu"})
@@ -191,11 +203,12 @@ def main(argv=None):
     for folder in ("images", "data", "arrays"):
         (output / folder).mkdir(parents=True, exist_ok=True)
     print(f"CD report: {len(images)} PNGs; {len(ORIGINAL_METHODS)} original + {len(FAST_METHODS)} fast methods"
-          f"{' + outline_fit' if args.outline_fit else ''}; {backend.upper()} device {args.device}.", flush=True)
+          f"{''.join(' + ' + m for m in report.optional_methods(args))}; {backend.upper()} device {args.device}.",
+          flush=True)
     if args.outline_fit:
         print("outline_fit: about 1.5-4.5 min per 2048 x 1378 image of 30-50k holes on the GPU, 25-70 min on the CPU",
               flush=True)
-    notes = []
+    notes = [report.FAST_NOTE] if args.outline_fit_fast else []
     started = time.perf_counter()
     entries, rows, timings, sources = [], [], [], []
     samples, used = {}, set()
@@ -231,6 +244,14 @@ def main(argv=None):
                 note = report.outline_note(name, entry["outline"])
                 if note:
                     notes.append(note)
+            if entry["outline_fast"]:
+                print(f"  outline fit (fast): {report.outline_fast_line(entry['outline_fast'], ascii_only=True)}",
+                      flush=True)
+                note = report.outline_fast_note(name, entry["outline_fast"])
+                if note:
+                    notes.append(note)
+            if entry["blur_second"]:
+                print(f"  {entry['blur_second']}", flush=True)
     fields = (["image", "status", "method", "holes", "cells"]
               + [key + suffix for suffix, _, _ in report.AXES
                  for key in ("valid", "mean", "std", "three_sigma_pct")] + ["unit", "error"])
@@ -247,6 +268,9 @@ def main(argv=None):
         values = np.concatenate(parts)
         if len(values):
             ranges[layer] = np.quantile(values, [0.02, 0.98]).tolist()
+    comparison = report.outline_comparison(entries, args.unit)
+    if comparison:
+        notes.append(comparison)
     page = report.write_report(output, entries, methods, notes, args.unit, ranges)
     elapsed = time.perf_counter() - started
     failures = [e for e in entries if e.get("error")]
@@ -259,6 +283,8 @@ def main(argv=None):
                          "raw cells. Full display inputs and outlines are retained; this is not a fast-only batch timing.")
     (output / "run.json").write_text(json.dumps(finite_json(manifest), indent=2, allow_nan=False) + "\n", encoding="utf-8")
     print(f"Report: {page} ({elapsed:.1f} s; {len(failures)} failed images).", flush=True)
+    if comparison:  # the last line: the one to type back from another machine
+        print(comparison, flush=True)
     return int(bool(failures))
 
 

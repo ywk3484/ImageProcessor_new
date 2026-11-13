@@ -21,7 +21,7 @@ from .centers import (
 )
 from .legacy import detect_centers_tiled, detect_centers_tiled_global_otsu
 from .cd import load_cd_results, measure_cds, plot_cd_map, save_cd_results, save_cd_viewer
-from .outline import fit_outline
+from .outline import fit_outline, fit_outline_fast
 from .components import connected_components_stats
 from .pitch import estimate_pitch, estimate_pitch_lines, pitch_residuals
 from .pattern import analyze_pitch
@@ -76,6 +76,7 @@ __all__ = [
     "detect_centers",
     "measure_cds",
     "fit_outline",
+    "fit_outline_fast",
     "load_cd_results",
     "plot_cd_map",
     "save_cd_results",
