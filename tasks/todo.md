@@ -209,7 +209,8 @@ explain why this happened, and what can be done about it."
       2.14 against 2.01 nm; three images changed when run on). The model does not fit the real average hole:
       leftover 431 to 526, a gap of 21 to 23 times the average's noise. My two causes from generated images do
       not act on the real images. User: "Before fixing anything, explain what exactly is going on based on
-      this." Explained in chat; nothing built.
+      this." Explained in chat; nothing built. The first explanation (the line field by field, gaps in noise
+      units, width arithmetic) was not understood; explained again from what the method does.
 - [ ] Not known, the next thing to measure if the user wants it: where the model misses the real average hole
       (centre, edge, towards the neighbours), how large the gap is in grey levels, whether holes are missing
       from the seed list, and the same number for `outline_fit` (same model, not measured)

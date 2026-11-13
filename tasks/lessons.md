@@ -64,6 +64,8 @@ General rules from past corrections, one or two lines each. Incident details are
   to (which image, which crop, which average), show each unit as a drawing on the object's own scale before using
   it, define each quantity, derive each equation, justify each numerical choice (grid, frequency step, window), walk
   through each figure. Compact prose there is not an explanation, and a derivation without its object is not one either.
+- Explain a result from what the method does, in everyday words, then one number with what it should be and what
+  it is. Never by walking through the fields of a tool's output line, and never in units the user does not use.
 - Never state a cause that was not measured: a model error seen at the truth is the cause only once removing it
   moves the estimate. Never call a partial fix "fixed": say what is left and what it costs.
 - Before reporting, check the deliverable against the literal request (the level, the place, the view asked for).
