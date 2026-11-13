@@ -371,7 +371,7 @@ def fit_outline_fast(
     device: int = 0,
     log=None,
     trace: dict | None = None,
-    redraw_seed: int | None = None,
+    redrawn: bool = False,
 ) -> OutlineFastResult:
     """Fit one outline and one blur to the whole image in one pass (GPU only); page values, no size per hole.
 
@@ -403,9 +403,10 @@ def fit_outline_fast(
         ``subpx._gpu.outline_onepass.fit_images``' ``trace``, and ``image`` (``inverted``, ``top``: the value the
         image was turned over at, ``own_seeds``: the method found the holes itself). The result is the same with
         and without it; a fit that raises leaves the steps it reached. ``scripts/outline_fit_steps.py`` shows it.
-    redraw_seed : int, optional
-        With ``trace``: also ``trace['redrawn']``, the image the fit's answer stands for (every hole drawn with
-        the image's outline and blur at its own centre, brightness and level, plus noise from this seed).
+    redrawn : bool
+        With ``trace``: also ``trace['redrawn']``, the method's picture of the image under its final answer (every
+        hole drawn with the image's outline and blur at its own centre, brightness and level, fitted to the image
+        under them; no noise) and the image's pixel-to-pixel noise: together, the image the answer stands for.
 
     Returns
     -------
@@ -452,7 +453,7 @@ def fit_outline_fast(
                 seeds = cupy.asnumpy(find_seeds(cupy.asarray(signal).astype(cupy.float32)))
                 if len(seeds) < MIN_HOLES:
                     raise ValueError(f"the outline fit needs at least {MIN_HOLES} holes; {len(seeds)} were found")
-            res = fit_images([signal], [seeds], blur=blur, log=log, trace=steps, redraw_seed=redraw_seed)[0]
+            res = fit_images([signal], [seeds], blur=blur, log=log, trace=steps, redrawn=redrawn)[0]
         finally:
             if trace is not None:
                 trace.update(steps[0] if steps else {})

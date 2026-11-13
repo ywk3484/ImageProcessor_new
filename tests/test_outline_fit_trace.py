@@ -105,15 +105,17 @@ def report_seeds(image):
 
 @pytest.fixture(scope="module")
 def fitted(gpu):
-    """A generated image (pitch 10.3 px; 4,642 holes found, 4,389 of them a window away from the frame) fitted
-    plainly and with the record and the redrawn copy."""
+    """A generated image that is what the method assumes (one hole size, a Gaussian blur, the same noise of 1.2
+    grey levels at every pixel, 8 bit; pitch 10.3 px; 4,642 holes found, 4,389 of them a window away from the
+    frame), fitted plainly and with the record and the redrawn picture."""
     page = render_hole_array((600, 800), hole="circle", size_nm=(100, 100), pitch_nm=(216.3, 216.3), layout="square",
-                             cd_sigma_nm=2.5, seed=7, backend="cpu")
+                             blur_nm=65, lens_nm=0, photons_per_level=None, read_noise=1.2, cd_sigma_nm=0,
+                             row_shift_nm=0, seed=11, backend="cpu")
     seeds = report_seeds(page.image)
     plain = fit_outline_fast(page.image, seeds, pixel_size=PIXEL_NM, unit="nm")
     trace = {}
-    traced = fit_outline_fast(page.image, seeds, pixel_size=PIXEL_NM, unit="nm", trace=trace, redraw_seed=3)
-    return page.image, seeds, plain, traced, trace
+    traced = fit_outline_fast(page.image, seeds, pixel_size=PIXEL_NM, unit="nm", trace=trace, redrawn=True)
+    return page, seeds, plain, traced, trace
 
 
 def test_recording_changes_nothing(fitted):
@@ -128,7 +130,8 @@ def test_recording_changes_nothing(fitted):
 
 
 def test_every_step_is_recorded(fitted):
-    image, seeds, _, traced, trace = fitted
+    page, seeds, _, traced, trace = fitted
+    image = page.image
     assert tuple(trace) == STEPS  # in the order of the calculation
     n = len(seeds)
     window = trace["window"]
@@ -170,7 +173,7 @@ def test_every_step_is_recorded(fitted):
     assert holes["centers_xy"].shape == (n, 2) and len(holes["passes"]) == 2
     assert holes["picture"].shape == image.shape and holes["picture"].dtype == np.float32
     assert np.abs(holes["centers_xy"] - seeds).max() <= 0.5 + 1e-9  # two passes of at most a quarter pixel
-    assert float(np.sqrt(np.mean((holes["picture"] - image) ** 2))) < 2.0  # [1.34 grey levels; noise 1.2]
+    assert float(np.sqrt(np.mean((holes["picture"] - image) ** 2))) < 2.0  # [1.41 grey levels; noise 1.2]
 
     kept = trace["kept_2"]
     np.testing.assert_array_equal(trace["average_2"]["kept"],
@@ -194,25 +197,38 @@ def test_the_pictures_add_up_to_the_fits_own_cost(fitted):
     assert traced.summary["fit_iterations"] == last["stages"][-1][1]
 
 
-def test_the_redrawn_copy_reads_back_the_cd_it_was_drawn_with(fitted):
-    image, seeds, _, traced, trace = fitted
+def test_the_redrawn_picture_is_the_image_without_its_noise(fitted):
+    page, seeds, _, _, trace = fitted
     copy = trace["redrawn"]
-    assert copy["image"].shape == copy["picture"].shape == image.shape and copy["image"].dtype == np.float32
+    assert copy["picture"].shape == page.image.shape and copy["picture"].dtype == np.float32
     assert copy["centers_xy"].shape == (len(seeds), 2) and copy["brightness"].shape == (len(seeds),)
-    assert 0.8 < copy["noise"] < 1.6  # [1.17 grey levels: the holes' own leftover]
-    assert float(np.std(copy["image"] - copy["picture"])) == pytest.approx(copy["noise"], rel=0.02)
-    assert float(np.sqrt(np.mean((copy["picture"] - image) ** 2))) < 2.0  # [1.32]
-    stored = np.clip(np.rint(copy["image"]), 0, 255).astype(np.uint8)  # rounded as the file is
+    # away from the frame (holes beyond it are in the image and not in the picture) the picture is the generator's
+    # noise-free image to a fifth of the noise: what is left of 1.2 grey levels after fitting a hole's four numbers
+    inner = (slice(20, -20), slice(20, -20))
+    assert float(np.sqrt(np.mean((copy["picture"] - page.clean)[inner] ** 2))) < 0.35  # [0.22]
+    assert float(np.sqrt(np.mean((trace["holes"]["picture"] - page.clean)[inner] ** 2))) < 0.35  # [0.22], step B's
+    # the pixel noise found is the noise put in (1.2) with the rounding to whole grey levels (1 / 12 of variance)
+    assert copy["pixel_noise"] == pytest.approx(np.sqrt(1.2 ** 2 + 1 / 12), rel=0.03)  # [1.235]
+    assert copy["leftover"] == pytest.approx(copy["pixel_noise"], rel=0.1)  # nothing but noise is left of a hole
+
+
+def test_an_image_redrawn_from_the_answer_reads_back_the_cd_it_was_drawn_with(fitted):
+    page, _, _, traced, trace = fitted
+    copy = trace["redrawn"]
+    grain = np.sqrt(copy["pixel_noise"] ** 2 - 1 / 12)  # the rounding below adds its twelfth again
+    drawn = copy["picture"] + grain * np.random.default_rng(3).standard_normal(copy["picture"].shape)
+    stored = np.clip(np.rint(drawn), 0, 255).astype(np.uint8)
     again = fit_outline_fast(stored, report_seeds(stored), pixel_size=PIXEL_NM, unit="nm")
-    # four noise seeds: -0.03 to +0.02 nm (the lens form reads its own copies 0.2 to 0.3 nm low: notes 6.20)
-    assert abs(again.outline_cd_px - traced.outline_cd_px) * PIXEL_NM < 0.15
-    assert 0.7 < again.summary["leftover_chi2"] < 1.5  # [1.04 to 1.09: at the noise, as the method expects]
+    # four noise seeds: +0.00 to +0.06 nm here; -0.10 to 0.00 on an image with a size spread and a lens blur
+    assert abs(again.outline_cd_px - traced.outline_cd_px) * PIXEL_NM < 0.2
+    assert 0.7 < again.summary["leftover_chi2"] < 1.4  # [0.95 to 1.04: at the noise, as the method expects]
 
 
 def test_dark_holes_are_recorded_turned_over(gpu, fitted):
-    image, seeds, _, traced, _ = fitted
+    page, seeds, _, traced, _ = fitted
+    image = page.image
     trace = {}
-    dark = fit_outline_fast(255 - image, seeds, pixel_size=PIXEL_NM, unit="nm", invert=True, trace=trace, redraw_seed=3)
+    dark = fit_outline_fast(255 - image, seeds, pixel_size=PIXEL_NM, unit="nm", invert=True, trace=trace, redrawn=True)
     assert trace["image"] == {"inverted": True, "top": float((255 - image).max()), "own_seeds": False}
     assert dark.outline_cd_px == pytest.approx(traced.outline_cd_px, abs=1e-3)
     turned = trace["image"]["top"] - (255.0 - image)  # the fit's own frame: bright holes

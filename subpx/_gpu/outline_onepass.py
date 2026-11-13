@@ -987,28 +987,39 @@ def in_order(pages, blur, fits, max_iter=FINAL_ITERATIONS, trace=None):
     return out
 
 
-def redraw(pg, theta, scale, const, seed=0):
-    """The image the fit's answer stands for, from a page that has been through steps A to C: the final outline
-    and blur are set, every hole's centre, brightness and level are fitted under them (the hole pass, as step B),
-    and the image is every hole's near and far light, at each pixel the level of its nearest hole, and noise of the
-    holes' own leftover (the median over the stacked holes), the same at every pixel. The page is changed by this:
-    call it after its results have been taken. Returns host arrays: ``image`` and ``picture`` (with and without
-    the noise, float32 (H, W), bright holes), ``noise``, and per hole ``centers_xy``, ``brightness``, ``level``,
-    ``rms``."""
+def pixel_noise(leftover):
+    """One pixel's noise (sd) from an image's leftover (device, (H, W)), by its pixel-to-pixel jitter alone
+    (Immerkaer's estimate in its robust form): the leftover is filtered with [[1, -2, 1], [-2, 4, -2], [1, -2, 1]],
+    which removes whatever is smooth over three pixels (what a blurred hole can leave behind) and multiplies
+    uncorrelated noise by 6; sd = 1.4826 x the median absolute value / 6. Noise that neighbouring pixels share is
+    not seen by it, and where the noise grows with the light this is the noise of the usual (dark) pixel."""
+    r = leftover
+    jitter = (r[:-2, :-2] + r[:-2, 2:] + r[2:, :-2] + r[2:, 2:] + 4.0 * r[1:-1, 1:-1]
+              - 2.0 * (r[:-2, 1:-1] + r[2:, 1:-1] + r[1:-1, :-2] + r[1:-1, 2:]))
+    return 1.4826 * float(cp.median(cp.abs(jitter))) / 6.0
+
+
+def redraw(pg, theta, scale, const):
+    """The method's picture of the image under its final answer, from a page that has been through steps A to C:
+    the final outline and blur are set and every hole's centre, brightness and level are fitted under them (the
+    hole pass, as step B); the picture is every hole's near and far light plus, at each pixel, the level of its
+    nearest hole. The page is changed by this: call it after its results have been taken. Returns host arrays:
+    ``picture`` (float32 (H, W), bright holes, no noise), ``pixel_noise`` (``pixel_noise`` of image minus picture),
+    ``leftover`` (the median leftover of a stacked hole's window: noise and whatever the picture misses) and per
+    hole ``centers_xy``, ``brightness``, ``level``, ``rms``. An image redrawn from the answer is the picture plus
+    noise of ``pixel_noise``."""
     pg.trace = None
     pg.set_template(theta, scale, const)
     kept = {}
     pg.fit_holes(sweeps=CENTRING_SWEEPS, size=False, keep=kept)
     picture = pg.picture(kept["light"])
-    noise = float(cp.median(pg.hole_rms[pg.use]))
-    grain = cp.random.default_rng(seed).standard_normal(picture.shape, dtype=cp.float32)
-    return dict(image=cp.asnumpy((picture + noise * grain).astype(cp.float32)),
-                picture=cp.asnumpy(picture.astype(cp.float32)), noise=noise, centers_xy=cp.asnumpy(pg.c),
+    return dict(picture=cp.asnumpy(picture.astype(cp.float32)), pixel_noise=pixel_noise(pg.img - picture),
+                leftover=float(cp.median(pg.hole_rms[pg.use])), centers_xy=cp.asnumpy(pg.c),
                 brightness=cp.asnumpy(pg.a), level=cp.asnumpy(pg.level), rms=cp.asnumpy(pg.hole_rms))
 
 
 def fit_images(images, seeds=None, *, blur="gauss2", pair_reach_px=None, exchange=True, log=None, trace=None,
-               redraw_seed=None):
+               redrawn=False):
     """Steps A to C for a list of images (bright holes; the page fits run in lockstep). ``seeds``: one (N, 2)
     array per image, or None for the method's own seed finder. ``pair_reach_px``: how far from a stacked hole its
     neighbours' light is in the stack's model (default: window half width + ``PAIR_REACH_MARGIN_PX``).
@@ -1029,8 +1040,8 @@ def fit_images(images, seeds=None, *, blur="gauss2", pair_reach_px=None, exchang
     ``fit_1`` (``page_fits``' record); ``holes`` (after the hole pass: centers_xy, brightness, level, leftover,
     passes, and ``picture``, the method's picture of the image, float32 (H, W)); ``kept_2`` (who is stacked
     again, by reason); ``average_2``; ``fit_2``; ``exchange`` (the second fit of a gauss2 fit that ended
-    exchanged, with ``kept``, or None). With ``redraw_seed`` (an int) also ``redrawn``: ``redraw``'s image of the
-    fit's answer, with noise from that seed."""
+    exchanged, with ``kept``, or None). With ``redrawn=True`` also ``redrawn``: ``redraw``'s picture of the image
+    under the final answer, and the image's pixel noise."""
     started = time.perf_counter()
 
     def say(text):
@@ -1084,7 +1095,7 @@ def fit_images(images, seeds=None, *, blur="gauss2", pair_reach_px=None, exchang
     seconds = (time.perf_counter() - started) / max(len(images), 1)
     for o in out:
         o["seconds"] = seconds
-    if tracing and redraw_seed is not None:  # after the results are on the host: the copy changes the pages
+    if tracing and redrawn:  # after the results are on the host: the picture changes the pages
         for s, pg, (theta, scale, const, _) in zip(steps, pages, fits):
-            s["redrawn"] = redraw(pg, theta, scale, const, seed=redraw_seed)
+            s["redrawn"] = redraw(pg, theta, scale, const)
     return out
