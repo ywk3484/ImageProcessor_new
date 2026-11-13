@@ -348,10 +348,51 @@ Copy of the test file (100 nm circles, pitch 8.5 px, placement 3.6 nm, Gaussian 
     end; 0.005 to 0.007 nm on the pages with several ends at 72 nm blur; 0.02 to 0.07 nm on the small dense
     patterns (60 nm: +1.64 and +1.71; 50 nm: +9.58 and +9.56; 90 x 60 nm ellipses: -0.55 and -0.53). The hole
     kernels add in an order that differs from run to run.
+18. **The final fit's start and its cap of 30 iterations can decide the page CD** (2026-11-13, after the user's
+    first run on real images: the final fit stopped at its cap on all 8 images of one area and their page CDs span
+    97.13 to 98.89 nm). No real image is on this PC; what follows is from generated images, measured with
+    `scripts/outline_fast_check.py` and scratch runs. 8 images of the same 28,000 holes (100 nm circles, pitch
+    210 nm), new noise each, the blur changing by +-2 nm from image to image, the report's seeds:
+
+    | Planted | Page CD as built, 3 s over the 8 images | Lowest-leftover end of 10 starts | Ends per image |
+    |---|---|---|---|
+    | blur 63 to 67 nm (as section 5.2), gauss2 | 100.04 to 100.09, 0.05 | the same | 1 |
+    | blur 73 to 77 nm, gauss2 | 99.24 to 100.13, 1.13 (2 images 0.9 nm low, both "NOT converged") | 99.98 to 100.18, 0.20 | 1 to 2, the next end 710 chi-square units worse |
+    | blur 68 to 72 nm with a 60 nm lens (a shape gauss2 cannot follow, leftover 3 to 8), gauss2 | 98.59 to 98.88, 0.33 | 98.72 to 98.88, 0.13 | 2 to 3, the next 325 worse |
+    | blur 73 to 77 nm, lens form | 99.74 to 99.92, 0.17 (6 of 8 "NOT converged") | the same within 0.02 | 1 |
+    | blur 73 to 77 nm at pitch 178.5 nm; 90 nm holes at blur 68 to 72 nm; Gaussian blur 68 to 72 nm | 0.11; 0.27; 0.09 | the same | 1 (to 2, alike) |
+
+    - **The start.** The first fit leaves the blur's second part anywhere: on the 8 images of the second row the
+      second Gaussian ends at 1.9 x 2.0 px with 13 %, 2.2 px with 2 %, 1.7 px with 60 % (the bound), 1.5 px with
+      3 %, 4.0 x 1.0 px with 2 %, 1.7 px with 50 %, 2.4 px with 2 %, 4.0 x 1.1 px with 3 %. The final fit starts
+      there. From the two elongated ones it ends at another outline (CD 99.24 nm, leftover 1.8 to 2.0, exponent
+      2.11) than from anywhere else (100.12 to 100.18 nm, leftover 1.37 to 1.44): of 10 starts per image (the
+      built one and 9 with the second part put to 1.3 / 2 / 3 times the first width at 5 / 20 / 45 % of the light)
+      only the built one reaches the worse end. On the third row no single start reaches the best end on every
+      image (the built one on 5 of 8).
+    - **The cap.** On generated images the final fit needs 3 to 40 iterations in most cases and up to 99 in some;
+      the cap is 30. Where it is hit the CD is usually at its end (0.02 nm at most on the fourth row). Not always:
+      on image 4 of the second row the fit stands at 96.57 nm with a leftover of 8.0 after 30 iterations; run on,
+      it ends after 84 iterations at 99.46 nm with the two Gaussians exchanged, and from there the exchange step
+      (15) reaches 100.02 nm. The report shows 100.02 nm only because that step happened to apply at iteration 30.
+    - Where the exchange step is left out, the 8 images of the second row read 96.61 to 100.13 nm after 30
+      iterations (3 s 3.6 nm) and 99.21 to 100.13 nm at their ends.
+    - The same full-size image fitted five times gives the same reading (0.001 nm; 0.01 nm where the cap is
+      hit): the jumps are between images. On the library's test page (135 stacked holes) the fit repeats to
+      0.04 nm only with the seed list the reports pass (100.996 or 100.955 nm from identical seeds, 221 of them),
+      and with the list that `tests/test_outline_fit_fast.py` and 6.14 used (`measure_cds(...).seeds_xy`: the 187
+      reported holes, without those cut by the frame) it ends 0.4 nm away, at 100.58 nm. The small-image numbers
+      of 6.14 are therefore not what the reports give; not looked into further.
+    - Remedy measured, not built: the final fit from several starts of the blur's second part, each run to its end,
+      the end with the lowest leftover kept (the table's third column). Estimated cost: one more page fit per
+      start (about 12 ms per page and start at 20 pages per call).
 
 ## 7. Not done
 
-- Nothing was run on real pages, on the remote, or on more than one GPU.
+- Nothing was run on real pages by me, on the remote, or on more than one GPU. The user's first run on real images
+  (2026-11-13) is in 6.18; `scripts/outline_fast_check.py` is the check to run there.
+- The final fit from several starts, each run to its end, the lowest leftover kept (6.18): measured by the check,
+  not in the library.
 - Area per page (the user's tiles): seeds on the whole page, stack and report inside the area, one window from its
   border. Tested only as a pattern that ends inside the page.
 - `invert` (dark holes), the per-hole-size switch-off rule, x / y widths per hole (`ellipse_widths`), outline rays

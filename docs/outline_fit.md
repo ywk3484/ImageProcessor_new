@@ -138,8 +138,11 @@ Reading the line:
   same model. On some images the fit has more than one end (below); if the two
   methods' CDs differ and their second parts clearly differ too, that is a
   question about the model, not about the one-pass procedure.
-- *final fit NOT converged in 30 iterations*: the fit stopped at its iteration
-  cap; the report adds a note.
+- *final fit NOT converged in 30 iterations*: the final fit was cut at its cap
+  of 30 iterations; the report adds a note. The message alone does not say how
+  far the CD is from the fit's end: on generated images it is usually within
+  0.02 nm, but one fit stood 2.9 nm from its end at iteration 30. The check
+  below measures it on a folder.
 
 Limits (all numbers are from generated images; nothing has been run on a real
 one):
@@ -154,7 +157,8 @@ one):
   the small images' offset was not found. With fewer than 10 holes nothing is
   fitted (`too_few_holes`).
 - **More than one end point.** On some images the final fit can end in more
-  than one place, and its start decides: with `lens` on 7 of 10 generated full
+  than one place, and its start decides (and the start is not a fixed point:
+  see the check below): with `lens` on 7 of 10 generated full
   pages (the ends 0.02 to 0.65 nm apart in page CD), with `gauss2` on 3 of 10.
   It belongs to the model (one outline, one free blur shape), and whether
   `outline_fit` ends at the same end on a given image is not known. Compare with
@@ -170,6 +174,64 @@ one):
 - **Time** on an RTX 4060 Ti, 2048 × 1378 px, 39,000 holes: about 0.2 s per
   image with `gauss2`, 0.15 s with `lens` (0.02 to 0.2 s on small images),
   beside the report's other methods.
+
+### Does the image's CD depend on where the final fit starts or stops?
+
+First run on real images (2026-11-13, 8 images of one area): every hole of an
+image has one colour on the map, the colours differ from image to image (page
+CDs 97.13 to 98.89 nm), and the final fit stopped at its cap on all 8.
+
+- One colour per image is what the method gives: it has one CD per image, and
+  the map paints it on every hole. It measures no size per hole.
+- The page CD of repeated images moving by 1.8 nm, and the cap being hit, is
+  not what a settled fit does. On generated images of the same holes two causes
+  were found (`docs/outline_fit_one_pass.md`, 6.18): the final fit **starts**
+  where the first fit left the blur's second part, which is anywhere, and from
+  some starts it ends at another, worse-fitting outline (0.9 nm away in one
+  case); and the **cap** of 30 iterations can cut a slow fit nanometres from
+  its end. Which of them acts on real images is not known: no real image is on
+  the development PC.
+
+The check, on the folder the report was run on (GPU; the report's
+`--outline-blur`, `--seeds`, `--invert` apply):
+
+```bat
+python scripts\outline_fast_check.py D:\data\png_images --pixel-size 21 --unit nm
+```
+
+Per image it runs the one-pass fit as the reports do, then repeats the final
+fit (a) from the same start without the cap and (b) from 9 other starts of the
+blur's second part (4 with `lens`), each to its end. It prints one line per
+image, saves every start's result as JSON under `artifacts/`, and ends with the
+line to type back:
+
+```text
+check N=8 | rep 97.13-98.89 3s 1.82 nc 8 | end 3s 1.80 it<=212 | best 98.02-98.11 3s 0.09 moved 5 | ends 1-3 gap 344 | left 1.3-2.0 | rblur -0.93
+```
+
+| Field | Meaning |
+|---|---|
+| `rep A-B 3s X nc K` | the page CD the report shows: lowest and highest image, 3 × the standard deviation over the images, and how many images stopped at the cap |
+| `end 3s X it<=M` | the same start run to its end; M = the most iterations an image needed |
+| `best A-B 3s X moved K` | the end with the lowest leftover of all starts; K images whose best end is not the reported CD |
+| `ends a-b gap G` | fewest and most different ends per image; G = how much worse the next end fits than the best (chi-square units; a few units = they fit alike) |
+| `left a-b` | leftover of the best end (1 = the average hole is fitted to its noise) |
+| `rblur R` | correlation over the images between the best page CD and its fitted blur width |
+
+Reading it (each case planted on generated images, 8 images of the same holes
+with the blur changing by ±2 nm):
+
+| The line shows | It means | Planted case |
+|---|---|---|
+| `best 3s` far below `rep 3s`, `moved` > 0 | the reported CD depends on the final fit's start; the fit should start from several points and keep the best end | blur 73–77 nm: `rep 99.24-100.13 3s 1.13 nc 2`, `best 99.98-100.18 3s 0.20 moved 2`, `ends 1-2 gap 710` |
+| `end 3s` far below `rep 3s` | the cap cuts the fit short | (seen on single images, hidden in the folders by the fit's exchange step) |
+| `nc` > 0 but `rep` = `end` = `best`, one end | the cap is hit harmlessly | blur 73–77 nm with `lens`: `nc 6`, `moved 0`, `ends 1-1` |
+| several ends, large `gap`, `left` well above 1 | the model cannot follow the blur's shape; the best end is still the repeatable one | 60 nm lens in a 70 nm blur: `rep 3s 0.33`, `best 3s 0.13 moved 3`, `ends 2-3 gap 325`, `left 3.1-7.5` |
+| several ends with a `gap` of a few units | two outlines fit the images alike: a question about the model | (not met on full images) |
+| `rep` = `end` = `best`, one end, and still a large `3s` | the fit is at its end: the spread is in the images | (not planted) |
+
+The remedy the check measures as `best` (several starts, each run to its end,
+the lowest leftover kept) is not in the library yet.
 
 ```python
 fit = subpx.fit_outline_fast(image, pixel_size=21, unit="nm")          # own seed finder; or pass seeds_xy

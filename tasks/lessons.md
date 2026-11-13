@@ -23,7 +23,10 @@ General rules from past corrections, one or two lines each. Incident details are
 - Test beyond the happy path: the user's example image (examples/data/synthetic_ch), staggered as well as square
   arrays, larger, irregular and rotated shapes, more blur; check the share of features measured, not only the error.
   Before handing a method on, also run it the way its caller will: the caller's own inputs (its seeds), its small
-  images (hundreds of holes, not only tens of thousands), and a pitch of a whole number of pixels.
+  images (hundreds of holes, not only tens of thousands), a pitch of a whole number of pixels, and repeated images
+  of the same content (new noise, the nuisance changed a little): the spread between repeats is the user's first test.
+- An iteration cap is a safety net, not a stop: set it several times above the most iterations seen, and measure
+  what the result is when it is hit before shipping it.
 - Before quoting a fit's accuracy or stability, start it from many points on the same data and list where it ends
   (two changed starts are not a map), and check that no start value equals the value the test data were made with.
 - Define per-feature regions relative to the feature's own territory, never as a fixed fraction of the pitch.
@@ -67,7 +70,8 @@ General rules from past corrections, one or two lines each. Incident details are
 - When something failed, say so plainly; never explain a miss by what the user did not say.
 - When raising a defect, say: bug or not, the measured cause (isolated by a test that changes one thing), how often
   it triggers on the user's data, the exact fix with a prototype result, and how it changes the user's numbers.
-- A measurement tool measures: add no statistics the user did not ask for.
+- A measurement tool measures: add no statistics the user did not ask for. Show a value at the level it was
+  measured: one number per image is not painted on every hole of a map.
 - Look at every plot as the user will, at its default view: truth and measured in separate panels, planted events
   rare enough to read as events, controls next to the graph they change.
 - In a page with many figures, number every figure in page order and refer to it by that number; letters name

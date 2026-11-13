@@ -168,61 +168,55 @@ reference tiles, (N, m) valid indices.
       values), `--outline-fit-fast` in `cd_report.py` and `cd_fast_report.py` with one comparison line and the
       blur's second part of both methods per image, tests, docs (2026-11-13; review below)
 - [x] Give the user the one remote command (handoff 5.6)
-- [ ] The user types back the comparison line (real images, both methods)
+- [x] First result on real images (user, 2026-11-13): odd; diagnosed in the section "outline_fit_fast on real
+      images" below
+- [ ] The user types back the line of `scripts\outline_fast_check.py` (and the comparison line of the report)
 - [ ] With the result on real images: the pair reach (30 px?) and whether the fit should try both of its ends
       (handoff 6.3, 6.13)
 - [ ] Phase 2 after the user's verdict: TIFF batch, areas (tiles or per-hole selection: handoff section 8)
 - [ ] Ask: are the real test images PNGs in a folder; does a kept tile always hold only the reference's pattern
 
-Review (2026-11-12, after the handoff's first version: the prototype run the way the reports will use it, with
-their seeds, on small images, and from 81 starts per page; notes 6.12-6.17, page section 5.5):
-- Defect, fixed in the prototype: a pitch of a whole number of pixels broke the first fit.
-- Defect, fixed in the prototype (`pipeline.in_order`): gauss2 could stop with its two Gaussians exchanged; on small
-  images the page CD then depended on the seeds handed in by 0.4-0.6 nm; 0.005 nm with the step. Full pages: 2 of
-  58 affected, the page's numbers unchanged (0.0004 nm).
-- Not a defect, stays: on some pages the fit has more than one end point and its start decides (lens: 7 of 10 full
-  pages, 0.02-0.65 nm apart; gauss2: 3 of 10). It belongs to the outline model. The lens errors first reported are
-  flattered: the generator's pupil (0.48) is where the fit starts (0.5); at the other end 100 nm circles read -0.17
-  instead of +0.01 nm.
-- Measured, not adopted: a pair reach of 30 px instead of 21 makes the generator's lens end the better fit on 3 of 4
-  generated pages; +5 to 12 ms per page.
-- Not found: why small images read 0.3-0.6 nm high at 135 holes (1 to 4 of the fit's own standard errors; the
-  image border is ruled out).
-- Withdrawn: "gauss2 depends on its start by 0.1 nm, lens is stable to 0.002 nm" (two start changes are not a map).
+The reviews of 2026-11-12 (the prototype run the way the reports use it) and of the phase 1 build (2026-11-13)
+are in `tasks/archive/todo-2026-11.md`.
 
-Review of the phase 1 build (2026-11-13). Plan = handoff section 5, built in its order; no plan-mode round (the
-handoff was the approved plan).
-- Built: `subpx/_outline/onepass.py` (Spec, Band, ShapeFitter, the gauss2 exchange helpers; NumPy or CuPy),
-  `subpx/_gpu/outline_onepass.py` (kernels, seed finder, GpuPage, driver `fit_images` in batch form),
-  `fit_outline_fast`, `blur_second`, `measure_outline_fast`, `fast_summary`, `fast_line` in `subpx/outline.py`,
-  `OutlineFastResult`, method `outline_fit_fast` in `measure_cds`, `--outline-fit-fast` in both reports,
-  `docs/outline_fit.md`, `tests/test_outline_fit_fast.py` (23 tests). A display name in the workbench's name table
-  (its test wants one per method); the method is not offered in the workbench.
-- Left out of the port, as the handoff says: the prototype's step D (noise line, per-hole results), the other stack
-  weightings, `recentre`, `Band.from_grid`. Added: `ShapeFitter.fit` reports per page whether a stage stopped by
-  its tolerance (for `converged`); errors instead of NaN when no hole can be stacked (the adapter turns them into
-  "not fitted" with the reason); `invert` (dark holes), tested against the bright image.
-- Port against the prototype (all generated data): the 40 hole pages of the test file with own seeds, largest
-  difference 0.0004 nm (gauss2, mean 100.799) and 0.0006 nm (lens, 100.743); 26 full generated pages: well
-  determined ones within 0.0007 nm, the pages with several ends within 0.006, the small dense patterns within
-  0.05; the three small images +0.63 / +0.31, +0.34 / +0.16, +0.09 / -0.06 nm as in the handoff. Steps A to C
-  alone, one full page per call: 178 to 241 ms gauss2, 112 to 123 ms lens.
-- Both reports on three pages of the test file as PNG, both flags: gauss2 `outline_fit_fast - outline_fit: mean
-  +0.09, largest 0.12 nm over 3 images; 0.29 s against 124 s per image`; lens `mean +0.09, largest 0.20 nm ...;
-  0.26 s against 268 s`. Between the three images the one-pass page CD spreads 3s 0.11 nm, outline_fit's 0.37 nm
-  (lens run).
-- Seen in those runs, not in the handoff:
-  - With the report's seeds the lens fit of the test file ends with the pupil cut-off on its bound (8 cycles/px,
-    the "pupil outside the band" end), not at 0.5 as with the method's own seeds; the page CD is the same to
-    0.01 nm on these pages (the handoff's two ends are 0.04 nm apart here). `outline_fit` ended at 1.5 on one page
-    and at 8 on the other two.
-  - gauss2, page 0 with the report's seeds: the final fit stopped at its 30-iteration cap with a second Gaussian
-    of 1 % of the light (undetermined); page CD equal to the own-seeds run (100.71). The line says "final fit NOT
-    converged", and the report adds a note.
-  - The first fit reads 0.4 to 0.6 nm higher with the report's seeds than with the method's own (101.15 against
-    100.57 nm on page 0); the final fit does not (centring removes it).
-- Whole suite: 598 pass; 9 failures in files this build did not touch fail the same way without it
-  (`test_isophote_curvature`, `test_pitch_gpu`, `test_radial_symmetry` x2, `test_tiled_gpu_pipeline` x5).
-- Not checked: anything on a real image or on the remote; the report's click panel in a browser (the method uses
-  the generic branch; the data files are written and the HTML is checked for its lines only).
+# outline_fit_fast on real images: one colour per image, never converged (2026-11-13)
 
+User, after the first run on real images (8 images of one area): the between-image 3 sigma is smaller than
+`outline_fit`'s, but every image is one colour on the map (colour bar 97.13 to 98.89 nm), the colours differ from
+image to image, and the final fit did not converge in 30 iterations on any image. "Diagnose what's happening and
+explain why this happened, and what can be done about it."
+
+- [x] One colour per image: by construction. Phase 1 gives one CD per image (the user's choice of 2026-11-12) and
+      `measure_cds` hands it to every hole; the report's map and its shared colour range (2 to 98 % of the pooled
+      values = lowest and highest image) then show exactly this. Not a fit of every hole to one value: no size per
+      hole is measured.
+- [x] The page CD moving 1.76 nm between images of one area, the cap hit on all 8: reproduced in kind on generated
+      images (8 noisy images of the same holes, the blur changing by +-2 nm). Two causes, both in the final fit
+      (`docs/outline_fit_one_pass.md` 6.18):
+      - its start is wherever the first fit left the blur's second part, which is anywhere; from some starts it
+        ends at another, worse-fitting outline (wide blur, gauss2: 2 of 8 images 0.9 nm low; 3 s over the images
+        1.13 nm, 0.20 nm with the best of 10 starts);
+      - its cap of 30 iterations: generated images need 3 to 40 iterations, some up to 99; one fit stood at
+        96.57 nm when the cap cut it (its end: 99.46, and 100.02 after the exchange step).
+      Which acts on the real images is not known (no real image here).
+- [x] `scripts/outline_fast_check.py` (+ `tests/test_outline_fast_check.py`): per image the report's reading, the
+      same start run to its end, the best of 10 starts (5 with lens); one line for the folder to type back. Its
+      reading guide was tested on planted folders (start, harmless cap, a blur the model cannot follow, nothing).
+      The library is unchanged.
+- [ ] The user runs the check on the 8 real images and types the line back
+- [ ] Then, by what the line shows: the final fit from several starts, each run to its end, the lowest leftover
+      kept (the check's `best`), inside `outline_fit_fast`'s final stage (`outline_fit` untouched); re-check the
+      port tables and the tests' brackets
+- [ ] The user's decision: a size per hole now (the prototype's step D), or only after the page value holds
+- [ ] Small images: the reports pass every seed (with the holes cut by the frame), the tests and notes 6.14 used
+      the reported holes only; on the library's test page the two lists end 0.4 nm apart (100.99 against 100.58)
+
+Review (2026-11-13). No library change, by choice: the cause on real images is not measured yet, and the remedy
+changes the method's numbers and its time. Scratch runs (session scratchpad, not kept): the final fit recorded
+iteration by iteration, 8-image series for 9 planted conditions, 27 and 10 starts per image, the same image five
+times, the stop rule against stricter ones.
+- What I got wrong before: phase 1 was checked on single pages and on the ends of the final fit from 81 starts
+  round the pipeline's own end, never as repeated images of the same holes with the blur changing a little, and
+  never with a blur wider than 72 nm. The cap of 30 was taken from the prototype without testing what the result
+  is when it is hit.
+- Not explained: why all 8 real images hit the cap (2 to 6 of 8 on generated ones); what the real leftover is.
