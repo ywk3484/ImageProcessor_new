@@ -383,6 +383,13 @@ Copy of the test file (100 nm circles, pitch 8.5 px, placement 3.6 nm, Gaussian 
       and with the list that `tests/test_outline_fit_fast.py` and 6.14 used (`measure_cds(...).seeds_xy`: the 187
       reported holes, without those cut by the frame) it ends 0.4 nm away, at 100.58 nm. The small-image numbers
       of 6.14 are therefore not what the reports give; not looked into further.
+    - **On the 8 real images the check gives** `check N=8 | rep 97.13-98.88 3s 2.01 nc 5 | end 3s 2.14 it<=56 | best 97.13-98.88 3s 2.14 moved 3 | ends 1-1 gap - | left 430.8-526.0 | rblur -0.21`.
+      Neither cause above is what separates them: one end per image from 10 starts, and the ends are as far apart
+      as the capped fits (3 s 2.14 against 2.01 nm; three images changed when run on). The model does not fit the
+      real average hole: leftover 431 to 526 chi-square per bin, a gap of 21 to 23 bin noises (generated: 1.3 to
+      2.0; the third row above 3 to 8). With N / 16 pixels per bin that is roughly 0.25 to 0.5 of one pixel's
+      noise for 109,000 to 30,000 holes (the images' hole count and noise are not known here). Where it misses is
+      not known. `outline_fit` has the same model and was not measured.
     - Remedy measured, not built: the final fit from several starts of the blur's second part, each run to its end,
       the end with the lowest leftover kept (the table's third column). Estimated cost: one more page fit per
       start (about 12 ms per page and start at 20 pages per call).

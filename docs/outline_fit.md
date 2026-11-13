@@ -189,8 +189,7 @@ CDs 97.13 to 98.89 nm), and the final fit stopped at its cap on all 8.
   where the first fit left the blur's second part, which is anywhere, and from
   some starts it ends at another, worse-fitting outline (0.9 nm away in one
   case); and the **cap** of 30 iterations can cut a slow fit nanometres from
-  its end. Which of them acts on real images is not known: no real image is on
-  the development PC.
+  its end. Neither is what separates the real images: the result is below.
 
 The check, on the folder the report was run on (GPU; the report's
 `--outline-blur`, `--seeds`, `--invert` apply):
@@ -232,6 +231,28 @@ with the blur changing by ±2 nm):
 
 The remedy the check measures as `best` (several starts, each run to its end,
 the lowest leftover kept) is not in the library yet.
+
+**Result on the 8 real images (2026-11-13):**
+
+```text
+check N=8 | rep 97.13-98.88 3s 2.01 nc 5 | end 3s 2.14 it<=56 | best 97.13-98.88 3s 2.14 moved 3 | ends 1-1 gap - | left 430.8-526.0 | rblur -0.21
+```
+
+- Not the start: from 10 starts every image reaches one end (`ends 1-1`).
+- Not the cap: run to their ends (56 iterations at most) the images are as far
+  apart as before, 3 s 2.14 nm against 2.01 nm; three images changed when
+  allowed to finish.
+- **The model does not describe the real average hole**: leftover 431 to 526,
+  a gap of 21 to 23 times the average hole's noise (generated images: 1.3 to
+  2.0; with a blur shape the model cannot follow 3 to 8, and the page CD was
+  then 1.2 nm off). Each image has one settled answer, but it is the best
+  compromise of a model that does not match, and it differs by up to 1.75 nm
+  between images of one area. The CD does not follow the fitted blur width
+  (`rblur -0.21`).
+- Not known from the line: where the model misses (the blur's shape, the
+  neighbours' light, holes that are not alike, holes missing from the seed
+  list), how large the gap is in grey levels, and whether `outline_fit`, which
+  has the same model, is affected in the same way (not measured).
 
 ```python
 fit = subpx.fit_outline_fast(image, pixel_size=21, unit="nm")          # own seed finder; or pass seeds_xy

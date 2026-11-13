@@ -84,7 +84,8 @@ General rules from past corrections, one or two lines each. Incident details are
   the user's case needs shown in the example itself.
 - Check every input before writing any state that a later run is compared with.
 - Console output: ASCII only (the user's Windows console is cp949).
-- For a "looks wrong / differs from before" report, ask which view and which image first. Compare what the user
+- For a "looks wrong / differs from before" report, ask which view and which image first, and for what the tool
+  itself printed about its fit on that data (leftover, counts), before reproducing anything on generated data. Compare what the user
   looked at (every stage, layer and overlay of the old UI), not the widget with the same name. A view for judging
   a result shows it on the image.
 

@@ -203,10 +203,18 @@ explain why this happened, and what can be done about it."
       same start run to its end, the best of 10 starts (5 with lens); one line for the folder to type back. Its
       reading guide was tested on planted folders (start, harmless cap, a blur the model cannot follow, nothing).
       The library is unchanged.
-- [ ] The user runs the check on the 8 real images and types the line back
-- [ ] Then, by what the line shows: the final fit from several starts, each run to its end, the lowest leftover
-      kept (the check's `best`), inside `outline_fit_fast`'s final stage (`outline_fit` untouched); re-check the
-      port tables and the tests' brackets
+- [x] The user ran the check on the 8 real images (2026-11-13):
+      `check N=8 | rep 97.13-98.88 3s 2.01 nc 5 | end 3s 2.14 it<=56 | best 97.13-98.88 3s 2.14 moved 3 | ends 1-1 gap - | left 430.8-526.0 | rblur -0.21`
+      Reading: not the start (one end per image from 10 starts), not the cap (the ends are as far apart, 3 s
+      2.14 against 2.01 nm; three images changed when run on). The model does not fit the real average hole:
+      leftover 431 to 526, a gap of 21 to 23 times the average's noise. My two causes from generated images do
+      not act on the real images. User: "Before fixing anything, explain what exactly is going on based on
+      this." Explained in chat; nothing built.
+- [ ] Not known, the next thing to measure if the user wants it: where the model misses the real average hole
+      (centre, edge, towards the neighbours), how large the gap is in grey levels, whether holes are missing
+      from the seed list, and the same number for `outline_fit` (same model, not measured)
+- [ ] On hold: the final fit from several starts, each run to its end (the check's `best`). It would not change
+      the real images' spread; the cap still moves single images (three of eight) and the generated cases stand
 - [ ] The user's decision: a size per hole now (the prototype's step D), or only after the page value holds
 - [ ] Small images: the reports pass every seed (with the holes cut by the frame), the tests and notes 6.14 used
       the reported holes only; on the library's test page the two lists end 0.4 nm apart (100.99 against 100.58)
