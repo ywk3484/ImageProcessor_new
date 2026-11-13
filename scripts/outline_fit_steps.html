@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title><link rel="icon" href="data:,">
+<style>
+:root{color-scheme:light;--plane:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;
+  --axis:#c3c2b7;--border:rgba(11,11,11,.10);--s1:#2a78d6;--s2:#eb6834;--mark:#eda100;--hatch:#e1e0d9;--warn:#d03b3b}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--plane:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;
+  --muted:#898781;--grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.10);--s1:#3987e5;--s2:#d95926;--mark:#c98500;
+  --hatch:#2c2c2a;--warn:#e66767}}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--plane);color:var(--ink)}
+header{position:sticky;top:0;z-index:5;background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px 8px}
+h1{font-size:18px;margin:0 0 2px}h2{font-size:17px;margin:0 0 6px}h3{font-size:14px;margin:18px 0 4px;font-weight:600}
+.meta{color:var(--muted);font-size:12px;margin:0 0 6px;overflow-wrap:anywhere}
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.controls select,.controls button{font:inherit;padding:3px 9px;color:var(--ink);background:var(--surface);
+  border:1px solid var(--axis);border-radius:5px;cursor:pointer}
+.controls button.on{border-color:var(--s1);box-shadow:inset 0 0 0 1px var(--s1);font-weight:600}
+.jump{display:flex;gap:3px}.jump button{padding:2px 8px;min-width:30px}
+main{padding:14px 20px 60px;max-width:1500px}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:14px}
+.does{margin:0 0 6px;max-width:105ch}.look{margin:0 0 10px;max-width:105ch;color:var(--ink2)}.look b{color:var(--ink)}
+.note{color:var(--ink2);margin:2px 0 8px;max-width:105ch;font-size:13px}
+table{border-collapse:collapse;margin:6px 0 4px}th,td{border-bottom:1px solid var(--grid);padding:4px 12px 4px 0;text-align:left;
+  vertical-align:top;font-variant-numeric:tabular-nums;max-width:46ch}th{color:var(--ink2);font-weight:600;font-size:12px}
+table.sum td:first-child{color:var(--muted);width:2.2em}table.sum tr{cursor:pointer}table.sum tr:hover td{background:var(--plane)}
+td.differs{box-shadow:inset 3px 0 0 var(--s2)}
+.wide{overflow-x:auto;max-width:100%}
+.fid{display:inline-block;min-width:2.4em;color:var(--muted);font-weight:600}
+.pics{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+figure.pic{margin:0}figure.pic figcaption{font-size:12px;color:var(--ink2);margin-bottom:3px;max-width:320px;overflow-wrap:anywhere}
+figure.pic figcaption .key{display:inline-block;width:14px;height:0;border-top:2px solid;vertical-align:middle;margin-right:5px}
+.frame{position:relative;border:1px solid var(--border);
+  background:repeating-linear-gradient(45deg,var(--hatch) 0 3px,transparent 3px 7px)}
+.frame canvas{position:absolute;left:0;top:0;display:block}.frame canvas.img{image-rendering:pixelated}
+.bar{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink2);margin-top:4px;font-variant-numeric:tabular-nums}
+.bar canvas{width:110px;height:8px;border-radius:2px;border:1px solid var(--border)}
+.read{font-size:11px;color:var(--muted);height:1.4em;font-variant-numeric:tabular-nums;white-space:nowrap}
+.chart{max-width:640px}.chart svg{display:block;width:100%;height:auto;overflow:visible}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--ink2);margin:2px 0}
+.legend .key{display:inline-block;width:18px;height:0;border-top:2px solid;vertical-align:middle;margin-right:5px}
+details{font-size:12px;color:var(--ink2);margin-top:2px}details table{font-size:12px}summary{cursor:pointer;color:var(--muted)}
+.tip{position:fixed;z-index:9;pointer-events:none;background:var(--surface);color:var(--ink);border:1px solid var(--axis);
+  border-radius:6px;padding:6px 9px;font-size:12px;box-shadow:0 2px 10px rgba(0,0,0,.15);max-width:340px}
+.tip .row{display:flex;gap:8px;align-items:baseline;white-space:nowrap}.tip .key{display:inline-block;width:14px;height:0;
+  border-top:2px solid;align-self:center}.tip b{font-variant-numeric:tabular-nums}.tip .name{color:var(--ink2)}
+.error{color:var(--warn)}body.nocopy .copyside{display:none}
+.legendbox{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px 28px;max-width:1300px;margin-bottom:10px}
+@media (max-width:900px){.legendbox{grid-template-columns:1fr}}
+.legendbox div{color:var(--ink2)}.legendbox b{color:var(--ink)}
+</style></head><body>
+<header>
+<h1>__TITLE__</h1><p class="meta" id="info"></p>
+<div class="controls">
+  <button id="view-one" class="on">One image, step by step</button><button id="view-all">All images</button>
+  <label id="chooser">Image <select id="image"></select></label>
+  <button id="prev" title="previous image">&lt;</button><button id="next" title="next image">&gt;</button>
+  <span class="jump" id="jump"></span>
+  <label id="copytoggle"><input type="checkbox" id="showcopy" checked> show the redrawn copy</label>
+</div>
+</header>
+<main>
+<section id="one">
+  <div class="panel"><h2 id="name"></h2><p class="meta" id="state"></p>
+    <div class="legendbox">
+      <div><b>Your image</b>: every step of the calculation as the program ran it on this image.</div>
+      <div><b>Redrawn copy</b>: an image drawn from the fit's own answer for your image (every hole with the one outline and
+        blur found, at its own position, brightness and level, plus your image's pixel noise, rounded like your file),
+        put through the same steps. It is what the method takes your image to be.</div>
+      <div><b>How to read</b>: where the two look alike, your image is what the method assumes there. Where they
+        differ, it is not. Pictures side by side share one colour scale. Move the mouse over a picture or a graph
+        to read its values.</div>
+    </div>
+    <div class="wide"><table class="sum" id="summary"></table></div>
+  </div>
+  <div id="steps"></div>
+</section>
+<section id="all" hidden><div class="panel"><h2>All images</h2><p class="does" id="headline"></p><div id="allfigs"></div></div></section>
+</main>
+<div class="tip" id="tip" hidden></div>
+<script>
+"use strict";
+window.OFS_DATA={};
+const ENTRIES=__ENTRIES__,INFO=__INFO__,$=id=>document.getElementById(id),SVG="http://www.w3.org/2000/svg";
+const SEQ=["#cde2fb","#b7d3f6","#9ec5f4","#86b6ef","#6da7ec","#5598e7","#3987e5","#2a78d6","#256abf","#1c5cab","#184f95","#104281","#0d366b"];
+const dark=()=>window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches;
+const css=name=>getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+function el(tag,attrs,...kids){const e=document.createElement(tag);for(const k in attrs||{}){if(k==="class")e.className=attrs[k];else if(k==="text")e.textContent=attrs[k];else e.setAttribute(k,attrs[k]);}for(const c of kids)if(c!=null)e.append(c);return e;}
+function sv(tag,attrs,text){const e=document.createElementNS(SVG,tag);for(const k in attrs||{})e.setAttribute(k,attrs[k]);if(text!=null)e.textContent=text;return e;}
+function unpack(s){const b=atob(s),u=new Uint8Array(b.length);for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return new Float32Array(u.buffer);}
+function hex(c){return [parseInt(c.slice(1,3),16),parseInt(c.slice(3,5),16),parseInt(c.slice(5,7),16)];}
+function ramp(stops){const s=stops.map(hex);return t=>{t=Math.min(1,Math.max(0,t))*(s.length-1);const i=Math.min(s.length-2,Math.floor(t)),f=t-i;return [s[i][0]+(s[i+1][0]-s[i][0])*f,s[i][1]+(s[i+1][1]-s[i][1])*f,s[i][2]+(s[i+1][2]-s[i][2])*f];};}
+function palette(name){const d=dark();
+  if(name==="grey")return t=>{const v=255*Math.min(1,Math.max(0,t));return [v,v,v];};
+  if(name==="sequential")return ramp(d?SEQ.slice().reverse():SEQ);
+  return ramp(d?["#3987e5","#383835","#e66767"]:["#2a78d6","#f0efec","#e34948"]);}
+function nice(v){if(v==null||!isFinite(v))return "-";const a=Math.abs(v);if(a===0)return "0";
+  if(a>=1000)return v.toLocaleString("en-US",{maximumFractionDigits:0});
+  const d=Math.max(0,3-Math.floor(Math.log10(a))-1);return v.toFixed(Math.min(d,6));}
+function slotColor(slot){return css(slot===2?"--s2":"--s1");}
+
+/* ---------- pictures ---------- */
+let STORE=null;  /* the arrays of the data file being shown; a picture names its array by its place in it */
+function stored(i){if(!STORE.cache)STORE.cache=[];if(!STORE.cache[i])STORE.cache[i]=unpack(STORE.list[i]);return STORE.cache[i];}
+function drawHeat(canvas,p){const n=p.w*p.h,ctx=canvas.getContext("2d"),im=ctx.createImageData(p.w,p.h),pal=palette(p.palette),k=1/(p.hi-p.lo),d=p.data,o=im.data;
+  for(let i=0;i<n;i++){const v=d[i];if(v!==v)continue;const c=pal((v-p.lo)*k);o[4*i]=c[0];o[4*i+1]=c[1];o[4*i+2]=c[2];o[4*i+3]=255;}
+  ctx.putImageData(im,0,0);}
+function drawBar(canvas,p){canvas.width=110;canvas.height=8;const ctx=canvas.getContext("2d"),pal=palette(p.palette);
+  for(let x=0;x<110;x++){const c=pal(x/109);ctx.fillStyle=`rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;ctx.fillRect(x,0,1,8);}}
+function drawMarks(canvas,p,scale,hover){const r=window.devicePixelRatio||1,W=p.w*scale,H=p.h*scale;
+  if(canvas.width!==Math.round(W*r)){canvas.width=Math.round(W*r);canvas.height=Math.round(H*r);}
+  const ctx=canvas.getContext("2d");ctx.setTransform(r,0,0,r,0,0);ctx.clearRect(0,0,W,H);
+  const X=x=>((x-p.x0)/p.dx+0.5)*scale,Y=y=>((y-p.y0)/p.dy+0.5)*scale,a=css("--s2"),b=css("--mark");
+  ctx.lineJoin="round";
+  if(p.rects)p.rects.forEach((q,i)=>{ctx.lineWidth=1.5;ctx.strokeStyle=i?b:a;ctx.strokeRect(X(q[0]),Y(q[1]),X(q[2])-X(q[0]),Y(q[3])-Y(q[1]));});
+  if(p.lineData)p.lineData.forEach((l,i)=>{ctx.beginPath();for(let k=0;k<l.length;k+=2){k?ctx.lineTo(X(l[k]),Y(l[k+1])):ctx.moveTo(X(l[k]),Y(l[k+1]));}ctx.lineWidth=1.5;ctx.strokeStyle=i?b:a;ctx.stroke();});
+  if(p.pointData){const l=p.pointData,rad=Math.max(1.5,Math.min(3,scale*0.9));ctx.lineWidth=1.2;ctx.strokeStyle=a;for(let k=0;k<l.length;k+=2){ctx.beginPath();ctx.arc(X(l[k]),Y(l[k+1]),rad,0,6.2832);ctx.stroke();}}
+  if(hover){ctx.lineWidth=1;ctx.strokeStyle=a;ctx.strokeRect(hover[0]*scale+0.5,hover[1]*scale+0.5,Math.max(scale-1,1),Math.max(scale-1,1));}}
+function picture(p,target,cell,isCopy){
+  if(!p.data){p.data=typeof p.d==="number"?stored(p.d):unpack(p.d);if(p.points)p.pointData=unpack(p.points);if(p.lines)p.lineData=p.lines.map(unpack);}
+  let scale=cell||(p.w<=target?Math.max(1,Math.floor(target/p.w)):target/p.w);
+  if(p.h*scale>1.7*target)scale=1.7*target/p.h;
+  const W=p.w*scale,H=p.h*scale;
+  const img=el("canvas",{class:"img",width:p.w,height:p.h}),over=el("canvas",{class:"over"});
+  img.style.width=over.style.width=W+"px";img.style.height=over.style.height=H+"px";if(scale<1)img.style.imageRendering="auto";
+  const frame=el("div",{class:"frame"},img,over);frame.style.width=W+"px";frame.style.height=H+"px";
+  const bar=el("canvas"),read=el("div",{class:"read"});
+  const cap=el("figcaption",{text:p.label});
+  const fig=el("figure",{class:"pic"+(isCopy?" copyside":"")},cap,frame,
+    el("div",{class:"bar"},el("span",{text:nice(p.lo)}),bar,el("span",{text:nice(p.hi)+" "+p.unit})),read);
+  const paint=()=>{drawHeat(img,p);drawBar(bar,p);drawMarks(over,p,scale,null);};
+  fig._paint=paint;paint();
+  frame.addEventListener("mousemove",e=>{const q=frame.getBoundingClientRect(),i=Math.min(p.w-1,Math.max(0,Math.floor((e.clientX-q.left)/scale))),j=Math.min(p.h-1,Math.max(0,Math.floor((e.clientY-q.top)/scale))),v=p.data[j*p.w+i];
+    read.textContent=`x ${nice(p.x0+i*p.dx)}, y ${nice(p.y0+j*p.dy)} (${p.axis}): ${v!==v?"no value":nice(v)+" "+p.unit}`;drawMarks(over,p,scale,[i,j]);});
+  frame.addEventListener("mouseleave",()=>{read.textContent="";drawMarks(over,p,scale,null);});
+  return fig;}
+function heatFigure(f){const many=f.panels.length>3,target=many?168:280,box=el("div",{class:"pics"});
+  f.panels.forEach((p,i)=>box.append(picture(p,target,f.cell,!many&&i>0&&/copy/.test(p.label))));return box;}
+
+/* ---------- graphs ---------- */
+function ticks(lo,hi,n){const span=hi-lo;if(!(span>0))return [{v:lo,t:nice(lo)}];const raw=span/n,mag=Math.pow(10,Math.floor(Math.log10(raw))),r=raw/mag,step=(r<1.5?1:r<3.5?2:r<7.5?5:10)*mag,out=[];
+  const d=Math.max(0,-Math.floor(Math.log10(step)+1e-9)),f=v=>v.toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
+  for(let v=Math.ceil(lo/step-1e-9)*step;v<=hi+1e-9*span;v+=step){const w=Math.abs(v)<1e-9*step?0:v;out.push({v:w,t:f(w)});}return out;}
+function logTicks(lo,hi){/* lo, hi: log10 of the values */const out=[];
+  if(hi-lo>=1.2){for(let k=Math.floor(lo);k<=Math.ceil(hi);k++)for(const m of (hi-lo>3?[1]:[1,2,5])){const v=Math.log10(m)+k;if(v>=lo&&v<=hi)out.push({v,t:nice(m*Math.pow(10,k))});}return out;}
+  return ticks(Math.pow(10,lo),Math.pow(10,hi),5).filter(q=>q.v>0).map(q=>({v:Math.log10(q.v),t:q.t}));}
+function countTicks(top,T){const out=[{v:T(0),t:"0"}];for(let c=top>=1000?10:1;c<=top;c*=10)out.push({v:T(c),t:c.toLocaleString("en-US")});return out;}
+const tip=()=>$("tip");
+function showTip(e,build){const t=tip();t.replaceChildren();build(t);t.hidden=false;const w=t.offsetWidth,h=t.offsetHeight;
+  let x=e.clientX+14,y=e.clientY+14;if(x+w>innerWidth-8)x=e.clientX-w-14;if(y+h>innerHeight-8)y=e.clientY-h-14;t.style.left=Math.max(4,x)+"px";t.style.top=Math.max(4,y)+"px";}
+function tipRow(color,value,name){return el("div",{class:"row"},Object.assign(el("span",{class:"key"}),{style:`border-color:${color}`}),el("b",{text:value}),el("span",{class:"name",text:name}));}
+function frameSvg(W,H,m,x0,x1,y0,y1,xlabel,ylabel,yticks){const svg=sv("svg",{viewBox:`0 0 ${W} ${H}`,role:"img"}),pw=W-m.l-m.r,ph=H-m.t-m.b;
+  const X=v=>m.l+(v-x0)/(x1-x0)*pw,Y=v=>m.t+ph-(v-y0)/(y1-y0)*ph,grid=css("--grid"),axis=css("--axis"),muted=css("--muted");
+  for(const q of yticks){svg.append(sv("line",{x1:m.l,x2:m.l+pw,y1:Y(q.v),y2:Y(q.v),stroke:grid,"stroke-width":1}));
+    svg.append(sv("text",{x:m.l-6,y:Y(q.v)+4,"text-anchor":"end","font-size":11,fill:muted},q.t));}
+  for(const q of ticks(x0,x1,7))svg.append(sv("text",{x:X(q.v),y:m.t+ph+15,"text-anchor":"middle","font-size":11,fill:muted},q.t));
+  svg.append(sv("line",{x1:m.l,x2:m.l+pw,y1:m.t+ph,y2:m.t+ph,stroke:axis,"stroke-width":1}));
+  svg.append(sv("text",{x:m.l+pw/2,y:H-4,"text-anchor":"middle","font-size":11,fill:muted},xlabel));
+  svg.append(sv("text",{x:m.l,y:11,"font-size":11,fill:muted},ylabel));
+  return {svg,X,Y,pw,ph};}
+function vlines(g,m,list,x0,x1){const axis=css("--ink2");list.forEach((v,i)=>{if(v.x<x0||v.x>x1)return;const x=g.X(v.x);
+  g.svg.append(sv("line",{x1:x,x2:x,y1:m.t,y2:m.t+g.ph,stroke:axis,"stroke-width":1}));
+  g.svg.append(sv("text",{x:x+4,y:m.t+10+12*(i%3),"font-size":10.5,fill:axis},v.label));});}
+function legend(series){if(series.length<2)return null;const box=el("div",{class:"legend"});
+  for(const s of series){const key=el("span",{class:"key"});key.style.borderColor=s.color;if(s.copy){key.style.borderTopWidth="5px";key.style.opacity=0.55;}box.append(el("span",{},key,document.createTextNode(s.name)));}return box;}
+function numbersTable(head,rows){const t=el("table");t.append(el("tr",{},...head.map(h=>el("th",{text:h}))));
+  for(const r of rows)t.append(el("tr",{},...r.map(c=>el("td",{text:c}))));return el("details",{},el("summary",{text:"the numbers of this graph"}),el("div",{class:"wide"},t));}
+function linesFigure(f){const W=620,H=250,m={l:58,r:26,t:20,b:36},box=el("div",{class:"chart"}),emph=!!f.emphasis;
+  const T=v=>f.log?(v>0?Math.log10(v):NaN):v;
+  const series=f.series.map(s=>({name:s.name,x:s.x,y:s.y.map(v=>v==null?NaN:T(v)),raw:s.y,color:emph?css("--muted"):slotColor(s.slot),copy:!emph&&s.slot===2}));
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+  for(const s of series)for(let i=0;i<s.x.length;i++){if(!(s.y[i]===s.y[i]))continue;x0=Math.min(x0,s.x[i]);x1=Math.max(x1,s.x[i]);y0=Math.min(y0,s.y[i]);y1=Math.max(y1,s.y[i]);}
+  for(const v of f.vlines||[]){x1=Math.max(x1,v.x);x0=Math.min(x0,v.x);}
+  if(!(x1>x0)){x0-=0.5;x1+=0.5;}if(!(y1>y0)){y0-=0.5;y1+=0.5;}const pad=0.07*(y1-y0);y0-=pad;y1+=pad;
+  const g=frameSvg(W,H,m,x0,x1,y0,y1,f.x,f.y+(f.log?" (logarithmic axis)":""),f.log?logTicks(y0,y1):ticks(y0,y1,5));vlines(g,m,f.vlines||[],x0,x1);
+  const paths=[];
+  for(const s of series.slice().sort((a,b)=>(b.copy?1:0)-(a.copy?1:0))){let d="",pen=false,last=null;for(let i=0;i<s.x.length;i++){if(!(s.y[i]===s.y[i])){pen=false;continue;}d+=(pen?"L":"M")+g.X(s.x[i]).toFixed(1)+" "+g.Y(s.y[i]).toFixed(1);pen=true;last=i;}
+    const grp=sv("g",s.copy?{class:"copyside"}:{});const path=sv("path",{d,fill:"none",stroke:s.color,"stroke-width":emph?1.5:s.copy?5:2,"stroke-linejoin":"round","stroke-linecap":"round",opacity:emph?0.75:s.copy?0.55:1});grp.append(path);
+    if(last!=null)grp.append(sv("circle",{cx:g.X(s.x[last]),cy:g.Y(s.y[last]),r:emph?3:s.copy?6:4,fill:s.color,stroke:css("--surface"),"stroke-width":2}));
+    g.svg.append(grp);s.grp=grp;}
+  for(const s of series)paths.push(s.grp);
+  const cross=sv("line",{y1:m.t,y2:m.t+g.ph,stroke:css("--ink2"),"stroke-width":1,visibility:"hidden"});g.svg.append(cross);
+  const hit=sv("rect",{x:m.l,y:m.t,width:g.pw,height:g.ph,fill:"transparent"});g.svg.append(hit);
+  hit.addEventListener("mousemove",e=>{const q=g.svg.getBoundingClientRect(),xv=x0+((e.clientX-q.left)/q.width*W-m.l)/g.pw*(x1-x0);
+    let best=null;for(const s of series)for(const v of s.x)if(best==null||Math.abs(v-xv)<Math.abs(best-xv))best=v;if(best==null)return;
+    cross.setAttribute("x1",g.X(best));cross.setAttribute("x2",g.X(best));cross.setAttribute("visibility","visible");
+    const yv=y0+(1-((e.clientY-q.top)/q.height*H-m.t)/g.ph)*(y1-y0);let near=-1,nd=Infinity;
+    const rows=series.map((s,k)=>{const i=s.x.indexOf(best),v=i<0?null:s.raw[i];if(v!=null&&isFinite(v)){const d=Math.abs(s.y[i]-yv);if(d<nd){nd=d;near=k;}}return [s,v];});
+    if(emph)paths.forEach((p,k)=>{const on=k===near;p.firstChild.setAttribute("stroke",on?css("--s1"):css("--muted"));p.firstChild.setAttribute("stroke-width",on?2.5:1.5);p.firstChild.setAttribute("opacity",on?1:0.5);if(p.lastChild!==p.firstChild)p.lastChild.setAttribute("fill",on?css("--s1"):css("--muted"));if(on)g.svg.insertBefore(p,cross);});
+    showTip(e,t=>{t.append(el("div",{class:"name",text:`${f.x}: ${nice(best)}`}));
+      const list=emph?rows.slice().sort((a,b)=>(b[1]==null?-1e300:b[1])-(a[1]==null?-1e300:a[1])):rows;
+      for(const [s,v] of list)if(v!=null&&!(s.copy&&document.body.classList.contains("nocopy")))t.append(tipRow(emph?(series[near]===s?css("--s1"):css("--muted")):s.color,nice(v),s.name));});});
+  hit.addEventListener("mouseleave",()=>{cross.setAttribute("visibility","hidden");tip().hidden=true;});
+  if(!emph){const lg=legend(series);if(lg)box.append(lg);}box.append(g.svg);
+  const xs=[...new Set(series.flatMap(s=>s.x))].sort((a,b)=>a-b);
+  box.append(numbersTable([f.x,...series.map(s=>s.name)],xs.map(x=>[nice(x),...series.map(s=>{const i=s.x.indexOf(x);return i<0?"":nice(s.raw[i]);})])));
+  return box;}
+function histFigure(f){const W=620,H=230,m={l:58,r:26,t:20,b:36},box=el("div",{class:"chart"}),e=f.edges,n=e.length-1;
+  const T=c=>f.log?Math.log10(c+1):c;
+  const series=f.series.map(s=>({name:s.name,counts:s.counts,color:slotColor(s.slot),copy:s.slot===2,outside:s.outside}));
+  let y1=0;for(const s of series)for(const c of s.counts)y1=Math.max(y1,T(c));if(!(y1>0))y1=1;y1*=1.06;
+  let top=0;for(const s of series)for(const c of s.counts)top=Math.max(top,c);
+  const g=frameSvg(W,H,m,e[0],e[n],0,y1,f.x,(f.count||"holes")+" per bin"+(f.log?" (logarithmic axis)":""),f.log?countTicks(top,T):ticks(0,y1,5));
+  vlines(g,m,f.vlines||[],e[0],e[n]);
+  series.slice().sort((a,b)=>(b.copy?1:0)-(a.copy?1:0)).forEach(s=>{const k=s.copy?1:0;let d=`M${g.X(e[0]).toFixed(1)} ${g.Y(0).toFixed(1)}`;for(let i=0;i<n;i++){const y=g.Y(T(s.counts[i])).toFixed(1);d+=`L${g.X(e[i]).toFixed(1)} ${y}L${g.X(e[i+1]).toFixed(1)} ${y}`;}d+=`L${g.X(e[n]).toFixed(1)} ${g.Y(0).toFixed(1)}`;
+    const grp=sv("g",s.copy?{class:"copyside"}:{});if(k===0)grp.append(sv("path",{d:d+"Z",fill:s.color,opacity:0.10,stroke:"none"}));
+    grp.append(sv("path",{d,fill:"none",stroke:s.color,"stroke-width":s.copy?5:2,"stroke-linejoin":"round",opacity:s.copy?0.55:1}));g.svg.append(grp);});
+  const band=sv("rect",{y:m.t,height:g.ph,fill:css("--ink2"),opacity:0.10,visibility:"hidden"});g.svg.append(band);
+  const hit=sv("rect",{x:m.l,y:m.t,width:g.pw,height:g.ph,fill:"transparent"});g.svg.append(hit);
+  hit.addEventListener("mousemove",ev=>{const q=g.svg.getBoundingClientRect(),xv=e[0]+((ev.clientX-q.left)/q.width*W-m.l)/g.pw*(e[n]-e[0]);
+    const i=Math.min(n-1,Math.max(0,Math.floor((xv-e[0])/(e[n]-e[0])*n)));band.setAttribute("x",g.X(e[i]));band.setAttribute("width",Math.max(1,g.X(e[i+1])-g.X(e[i])));band.setAttribute("visibility","visible");
+    showTip(ev,t=>{t.append(el("div",{class:"name",text:`${f.x}: ${nice(e[i])} to ${nice(e[i+1])}`}));
+      for(const s of series)if(!(s.copy&&document.body.classList.contains("nocopy")))t.append(tipRow(s.color,s.counts[i].toLocaleString("en-US"),s.name));});});
+  hit.addEventListener("mouseleave",()=>{band.setAttribute("visibility","hidden");tip().hidden=true;});
+  const lg=legend(series);if(lg)box.append(lg);box.append(g.svg);
+  const out=series.filter(s=>s.outside>0).map(s=>`${s.name}: ${s.outside.toLocaleString("en-US")}`);
+  if(out.length)box.append(el("div",{class:"note",text:"Outside the range shown: "+out.join("; ")}));
+  box.append(numbersTable([f.x+" from","to",...series.map(s=>s.name)],Array.from({length:n},(_,i)=>[nice(e[i]),nice(e[i+1]),...series.map(s=>String(s.counts[i]))])));
+  return box;}
+function tableFigure(f){const t=el("table");t.append(el("tr",{},...f.columns.map(c=>el("th",{text:c}))));
+  for(const r of f.rows)t.append(el("tr",{},...r.map((c,i)=>{const td=el("td",{text:c});if(/copy/.test(f.columns[i]||""))td.className="copyside";return td;})));
+  [...t.querySelectorAll("th")].forEach((th,i)=>{if(/copy/.test(f.columns[i]))th.className="copyside";});return el("div",{class:"wide"},t);}
+function figure(f){const box=el("div",{class:"fig",id:"fig-"+f.id});
+  box.append(el("h3",{},el("span",{class:"fid",text:f.id}),document.createTextNode(f.title)));
+  if(f.note)box.append(el("p",{class:"note",text:f.note}));
+  box.append(f.kind==="heat"?heatFigure(f):f.kind==="lines"?linesFigure(f):f.kind==="hist"?histFigure(f):tableFigure(f));return box;}
+
+/* ---------- the page ---------- */
+let current=null,view="one";
+function numbersBlock(rows,sides){const t=el("table");t.append(el("tr",{},el("th",{text:""}),el("th",{text:sides[0]||"your image"}),Object.assign(el("th",{text:sides[1]||""}),{className:"copyside"})));
+  for(const r of rows){const c=el("td",{text:r[2]});c.className="copyside";t.append(el("tr",{},el("td",{text:r[0]}),el("td",{text:r[1]}),c));}return el("div",{class:"wide"},t);}
+function showImage(id,step){const d=window.OFS_DATA[id],entry=ENTRIES.find(e=>e.id===id);current=id;$("image").value=id;
+  if(d){if(!d.box)d.box={list:d.store||[]};STORE=d.box;}
+  $("name").textContent=entry.name;const steps=$("steps"),sum=$("summary");steps.replaceChildren();sum.replaceChildren();$("jump").replaceChildren();
+  if(!d){$("state").textContent=entry.error||"no data";$("state").className="meta error";return;}
+  $("state").className="meta"+(d.reason?" error":"");
+  $("state").textContent=`${d.shape[1]} x ${d.shape[0]} px`+(d.reason?` | not fitted: ${d.reason}. The steps the calculation reached are shown.`:"")+(d.copy_error?` | no redrawn copy: ${d.copy_error}`:"");
+  sum.append(el("tr",{},el("th",{text:""}),el("th",{text:"step"}),el("th",{text:d.sides[0]}),Object.assign(el("th",{text:d.sides[1]||""}),{className:"copyside"})));
+  for(const r of d.summary){const c=el("td",{text:r[3]});c.className="copyside";const tr=el("tr",{},el("td",{text:String(r[0])}),el("td",{text:r[1]}),el("td",{text:r[2]}),c);tr.addEventListener("click",()=>go(r[0]));sum.append(tr);}
+  for(const s of d.steps){const sec=el("section",{class:"panel step",id:"step-"+s.n});
+    sec.append(el("h2",{text:`${s.n}  ${s.title}`}),el("p",{class:"does",text:s.does}));
+    const look=el("p",{class:"look"});look.append(el("b",{text:"Odd if you see: "}),document.createTextNode(s.look));sec.append(look);
+    if(s.numbers.length)sec.append(numbersBlock(s.numbers,d.sides));
+    if(s.note)sec.append(el("p",{class:"note",text:s.note}));
+    for(const f of s.figures)sec.append(figure(f));steps.append(sec);
+    const b=el("button",{text:String(s.n),title:s.title});b.addEventListener("click",()=>go(s.n));$("jump").append(b);}
+  if(step)go(step,true);else window.scrollTo(0,0);}
+function go(n,instant){const t=$("step-"+n);if(!t)return;const top=t.getBoundingClientRect().top+window.scrollY-document.querySelector("header").offsetHeight-8;window.scrollTo({top,behavior:instant?"auto":"smooth"});setHash(n);}
+function setHash(step){const parts=[];if(view==="all")parts.push("view=all");else{if(current)parts.push("image="+encodeURIComponent(current));if(step)parts.push("step="+step);}
+  if(document.body.classList.contains("nocopy"))parts.push("copy=0");history.replaceState(null,"","#"+parts.join("&"));}
+function load(id,step){const entry=ENTRIES.find(e=>e.id===id);if(!entry)return;
+  if(window.OFS_DATA[id]||!entry.data){showImage(id,step);return;}
+  $("name").textContent=entry.name;$("state").textContent="Loading...";$("steps").replaceChildren();
+  const s=document.createElement("script");s.src=entry.data;s.onload=()=>showImage(id,step);s.onerror=()=>{$("state").textContent="The data file "+entry.data+" could not be read.";$("state").className="meta error";};document.head.append(s);}
+function showAll(){const a=window.OFS_ALL,box=$("allfigs");box.replaceChildren();if(!a){$("headline").textContent="The file data/all.js could not be read.";return;}
+  if(!a.box)a.box={list:a.store||[]};STORE=a.box;$("headline").textContent=a.headline||"";for(const f of a.figures)box.append(figure(f));}
+function setView(v){view=v;$("one").hidden=v!=="one";$("all").hidden=v!=="all";$("view-one").className=v==="one"?"on":"";$("view-all").className=v==="all"?"on":"";
+  for(const id of ["chooser","prev","next","jump","copytoggle"])$(id).style.display=v==="one"?"":"none";
+  if(v==="all")showAll();setHash();}
+function step(by){const i=ENTRIES.findIndex(e=>e.id===current),j=Math.min(ENTRIES.length-1,Math.max(0,i+by));if(j!==i)load(ENTRIES[j].id);}
+function start(){$("info").textContent=INFO;const sel=$("image");
+  ENTRIES.forEach((e,i)=>sel.append(el("option",{value:e.id,text:`${i+1} of ${ENTRIES.length}: ${e.name}`+(e.error?" (failed)":e.reason?" (not fitted)":"")})));
+  sel.addEventListener("change",()=>load(sel.value));$("prev").addEventListener("click",()=>step(-1));$("next").addEventListener("click",()=>step(1));
+  $("view-one").addEventListener("click",()=>{setView("one");if(!current&&ENTRIES.length)load(ENTRIES[0].id);});$("view-all").addEventListener("click",()=>setView("all"));
+  $("showcopy").addEventListener("change",e=>{document.body.classList.toggle("nocopy",!e.target.checked);setHash();});
+  const read=()=>Object.fromEntries(location.hash.slice(1).split("&").filter(Boolean).map(p=>p.split("=").map(decodeURIComponent)));
+  const apply=args=>{const off=args.copy==="0";document.body.classList.toggle("nocopy",off);$("showcopy").checked=!off;
+    if(args.view==="all"){setView("all");return;}
+    if(view!=="one")setView("one");const first=ENTRIES.find(e=>e.id===args.image)||ENTRIES.find(e=>e.id===current)||ENTRIES[0];
+    if(first)load(first.id,args.step?parseInt(args.step,10):0);};
+  const args=read();
+  const all=document.createElement("script");all.src="data/all.js";all.onload=all.onerror=()=>{if(args.view==="all")apply(args);};document.head.append(all);
+  if(args.view!=="all")apply(args);
+  window.addEventListener("hashchange",()=>apply(read()));
+  if(window.matchMedia)window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if(view==="all")showAll();else if(current)showImage(current);});}
+start();
+</script>
+</body></html>

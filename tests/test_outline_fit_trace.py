@@ -18,8 +18,8 @@ from subpx._outline.onepass import ShapeFitter
 from subpx.synthetic_arrays import render_hole_array
 
 PIXEL_NM = 21.0
-STEPS = ("window", "average_all", "average_1", "fit_1", "holes", "kept_2", "average_2", "fit_2", "exchange",
-         "redrawn", "image")
+STEPS = ("window", "average_all", "average_1", "fit_1", "holes", "kept_2", "average_2", "average_2_parts", "fit_2",
+         "exchange", "redrawn", "image")
 
 
 # ------------------------------------------------------------------------------------------- no GPU needed
@@ -181,6 +181,13 @@ def test_every_step_is_recorded(fitted):
     np.testing.assert_array_equal(trace["average_2"]["kept"], traced.good)
     last = trace["exchange"] if trace["exchange"] and trace["exchange"]["kept"] else trace["fit_2"]
     np.testing.assert_array_equal(last["theta"], traced.theta)
+    # the nine parts of the image, stacked each by itself, add up to the whole image's stack
+    parts, whole = trace["average_2_parts"], trace["average_2"]
+    assert parts["stacks"].shape == (9, 69, 69) and parts["holes"].sum() == whole["kept"].sum() and parts["holes"].min() > 300
+    np.testing.assert_allclose(parts["pixels"].sum(axis=0), whole["pixels"])
+    total = np.nansum(parts["stacks"] * parts["pixels"], axis=0)
+    filled = whole["pixels"] > 0
+    np.testing.assert_allclose(total[filled] / whole["pixels"][filled], whole["stack"][filled], rtol=1e-9)
     assert trace["image"] == {"inverted": False, "top": float(image.max()), "own_seeds": False}
 
 

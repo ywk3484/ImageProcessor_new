@@ -641,6 +641,23 @@ class GpuPage:
         self.a_rel = self.a
         self.noise = float(cp.median(self.hole_rms[good]))
         self._keep("average_2", stack=self.stack, pixels=self.wsum, kept=good, noise=self.noise)
+        if self.trace is not None:  # not a step of the fit: the same stack of each ninth of the image by itself
+            self._keep("average_2_parts", **self.stack_parts(good))
+
+    def stack_parts(self, use, rows=3, cols=3):
+        """The plain stack of the holes ``use`` of each part of the image by itself (``rows`` x ``cols`` equal
+        parts, row by row): ``stacks`` and ``pixels`` (parts, Ms, Ms) and ``holes`` (parts,). The fit takes one
+        outline and one blur for the whole image; these show whether the average hole is the same everywhere."""
+        row = cp.clip((self.c[:, 1] * rows / self.h).astype(cp.int64), 0, rows - 1)
+        col = cp.clip((self.c[:, 0] * cols / self.w).astype(cp.int64), 0, cols - 1)
+        stacks, pixels, holes = [], [], []
+        for part in range(rows * cols):
+            mine = use & (row * cols + col == part)
+            stack, wsum, _, _ = self._stack(mine)
+            stacks.append(stack)
+            pixels.append(wsum)
+            holes.append(int(mine.sum()))
+        return dict(stacks=cp.stack(stacks), pixels=cp.stack(pixels), holes=np.array(holes), rows=rows, cols=cols)
 
     # ------------------------------------------------------------------------------------------ pair map
     def pair_map(self, sf, keep=None):
@@ -1039,7 +1056,8 @@ def fit_images(images, seeds=None, *, blur="gauss2", pair_reach_px=None, exchang
     the unusual holes: the first fit's data; per hole brightness, level, leftover against it; noise);
     ``fit_1`` (``page_fits``' record); ``holes`` (after the hole pass: centers_xy, brightness, level, leftover,
     passes, and ``picture``, the method's picture of the image, float32 (H, W)); ``kept_2`` (who is stacked
-    again, by reason); ``average_2``; ``fit_2``; ``exchange`` (the second fit of a gauss2 fit that ended
+    again, by reason); ``average_2``; ``average_2_parts`` (not a step: ``stack_parts``, the same stack of each
+    ninth of the image by itself); ``fit_2``; ``exchange`` (the second fit of a gauss2 fit that ended
     exchanged, with ``kept``, or None). With ``redrawn=True`` also ``redrawn``: ``redraw``'s picture of the image
     under the final answer, and the image's pixel noise."""
     started = time.perf_counter()
