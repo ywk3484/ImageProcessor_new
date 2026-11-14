@@ -30,7 +30,9 @@ General rules from past corrections, one or two lines each. Incident details are
 - Before quoting a fit's accuracy or stability, start it from many points on the same data and list where it ends
   (two changed starts are not a map), and check that no start value equals the value the test data were made with.
 - Define per-feature regions relative to the feature's own territory, never as a fixed fraction of the pitch.
-- Test a diagnostic's reading guide on planted causes: plant each candidate and check it names the right one.
+- Test a diagnostic's reading guide on planted causes: plant each candidate and check it names the right one, and
+  on data with nothing planted that it shows nothing. A view of a method's steps needs a reference for "normal"
+  made on the same data (the data redrawn from the method's own answer), or its usual patterns read as faults.
 - Comparisons: calibrate once and reuse it for every image compared (per-image calibration fakes repeatability); a
   smaller spread is better precision only if the method follows the true change at slope 1; a reference must not
   use the stop rule under test; show the physical floor in every comparison.

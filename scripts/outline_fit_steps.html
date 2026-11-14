@@ -28,7 +28,7 @@ td.differs{box-shadow:inset 3px 0 0 var(--s2)}
 .wide{overflow-x:auto;max-width:100%}
 .fid{display:inline-block;min-width:2.4em;color:var(--muted);font-weight:600}
 .pics{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
-figure.pic{margin:0}figure.pic figcaption{font-size:12px;color:var(--ink2);margin-bottom:3px;max-width:320px;overflow-wrap:anywhere}
+figure.pic{margin:0}figure.pic figcaption{font-size:12px;color:var(--ink2);margin-bottom:3px;max-width:560px;overflow-wrap:anywhere}
 figure.pic figcaption .key{display:inline-block;width:14px;height:0;border-top:2px solid;vertical-align:middle;margin-right:5px}
 .frame{position:relative;border:1px solid var(--border);
   background:repeating-linear-gradient(45deg,var(--hatch) 0 3px,transparent 3px 7px)}
@@ -97,6 +97,9 @@ function palette(name){const d=dark();
 function nice(v){if(v==null||!isFinite(v))return "-";const a=Math.abs(v);if(a===0)return "0";
   if(a>=1000)return v.toLocaleString("en-US",{maximumFractionDigits:0});
   const d=Math.max(0,3-Math.floor(Math.log10(a))-1);return v.toFixed(Math.min(d,6));}
+function fine(v){/* five figures, for a value read off a picture or a graph */if(v==null||!isFinite(v))return "-";
+  if(Number.isInteger(v)||Math.abs(v)>=10000)return v.toLocaleString("en-US",{maximumFractionDigits:0});if(v===0)return "0";
+  let t=v.toFixed(Math.max(0,Math.min(7,4-Math.floor(Math.log10(Math.abs(v))))));if(t.indexOf(".")>=0)t=t.replace(/0+$/,"").replace(/\.$/,"");return t;}
 function slotColor(slot){return css(slot===2?"--s2":"--s1");}
 
 /* ---------- pictures ---------- */
@@ -116,13 +119,13 @@ function drawMarks(canvas,p,scale,hover){const r=window.devicePixelRatio||1,W=p.
   if(p.lineData)p.lineData.forEach((l,i)=>{ctx.beginPath();for(let k=0;k<l.length;k+=2){k?ctx.lineTo(X(l[k]),Y(l[k+1])):ctx.moveTo(X(l[k]),Y(l[k+1]));}ctx.lineWidth=1.5;ctx.strokeStyle=i?b:a;ctx.stroke();});
   if(p.pointData){const l=p.pointData,rad=Math.max(1.5,Math.min(3,scale*0.9));ctx.lineWidth=1.2;ctx.strokeStyle=a;for(let k=0;k<l.length;k+=2){ctx.beginPath();ctx.arc(X(l[k]),Y(l[k+1]),rad,0,6.2832);ctx.stroke();}}
   if(hover){ctx.lineWidth=1;ctx.strokeStyle=a;ctx.strokeRect(hover[0]*scale+0.5,hover[1]*scale+0.5,Math.max(scale-1,1),Math.max(scale-1,1));}}
-function picture(p,target,cell,isCopy){
+function picture(p,room,cell,isCopy){
   if(!p.data){p.data=typeof p.d==="number"?stored(p.d):unpack(p.d);if(p.points)p.pointData=unpack(p.points);if(p.lines)p.lineData=p.lines.map(unpack);}
-  let scale=cell||(p.w<=target?Math.max(1,Math.floor(target/p.w)):target/p.w);
-  if(p.h*scale>1.7*target)scale=1.7*target/p.h;
+  /* as large as the room allows; whole display pixels per value where that is 2 or more */
+  let scale=cell;if(!scale){const fit=Math.min(room[0]/p.w,room[1]/p.h);scale=fit>=2?Math.floor(fit):fit;}
   const W=p.w*scale,H=p.h*scale;
   const img=el("canvas",{class:"img",width:p.w,height:p.h}),over=el("canvas",{class:"over"});
-  img.style.width=over.style.width=W+"px";img.style.height=over.style.height=H+"px";if(scale<1)img.style.imageRendering="auto";
+  img.style.width=over.style.width=W+"px";img.style.height=over.style.height=H+"px";if(!Number.isInteger(scale))img.style.imageRendering="auto";
   const frame=el("div",{class:"frame"},img,over);frame.style.width=W+"px";frame.style.height=H+"px";
   const bar=el("canvas"),read=el("div",{class:"read"});
   const cap=el("figcaption",{text:p.label});
@@ -131,11 +134,11 @@ function picture(p,target,cell,isCopy){
   const paint=()=>{drawHeat(img,p);drawBar(bar,p);drawMarks(over,p,scale,null);};
   fig._paint=paint;paint();
   frame.addEventListener("mousemove",e=>{const q=frame.getBoundingClientRect(),i=Math.min(p.w-1,Math.max(0,Math.floor((e.clientX-q.left)/scale))),j=Math.min(p.h-1,Math.max(0,Math.floor((e.clientY-q.top)/scale))),v=p.data[j*p.w+i];
-    read.textContent=`x ${nice(p.x0+i*p.dx)}, y ${nice(p.y0+j*p.dy)} (${p.axis}): ${v!==v?"no value":nice(v)+" "+p.unit}`;drawMarks(over,p,scale,[i,j]);});
+    read.textContent=`x ${fine(p.x0+i*p.dx)}, y ${fine(p.y0+j*p.dy)} (${p.axis}): ${v!==v?"no value":fine(v)+" "+p.unit}`;drawMarks(over,p,scale,[i,j]);});
   frame.addEventListener("mouseleave",()=>{read.textContent="";drawMarks(over,p,scale,null);});
   return fig;}
-function heatFigure(f){const many=f.panels.length>3,target=many?168:280,box=el("div",{class:"pics"});
-  f.panels.forEach((p,i)=>box.append(picture(p,target,f.cell,!many&&i>0&&/copy/.test(p.label))));return box;}
+function heatFigure(f){const many=f.panels.length>3,room=many?[300,200]:[560,300],box=el("div",{class:"pics"});
+  f.panels.forEach((p,i)=>box.append(picture(p,room,f.cell,!many&&i>0&&/copy/.test(p.label))));return box;}
 
 /* ---------- graphs ---------- */
 function ticks(lo,hi,n){const span=hi-lo;if(!(span>0))return [{v:lo,t:nice(lo)}];const raw=span/n,mag=Math.pow(10,Math.floor(Math.log10(raw))),r=raw/mag,step=(r<1.5?1:r<3.5?2:r<7.5?5:10)*mag,out=[];
@@ -187,13 +190,13 @@ function linesFigure(f){const W=620,H=250,m={l:58,r:26,t:20,b:36},box=el("div",{
     const yv=y0+(1-((e.clientY-q.top)/q.height*H-m.t)/g.ph)*(y1-y0);let near=-1,nd=Infinity;
     const rows=series.map((s,k)=>{const i=s.x.indexOf(best),v=i<0?null:s.raw[i];if(v!=null&&isFinite(v)){const d=Math.abs(s.y[i]-yv);if(d<nd){nd=d;near=k;}}return [s,v];});
     if(emph)paths.forEach((p,k)=>{const on=k===near;p.firstChild.setAttribute("stroke",on?css("--s1"):css("--muted"));p.firstChild.setAttribute("stroke-width",on?2.5:1.5);p.firstChild.setAttribute("opacity",on?1:0.5);if(p.lastChild!==p.firstChild)p.lastChild.setAttribute("fill",on?css("--s1"):css("--muted"));if(on)g.svg.insertBefore(p,cross);});
-    showTip(e,t=>{t.append(el("div",{class:"name",text:`${f.x}: ${nice(best)}`}));
+    showTip(e,t=>{t.append(el("div",{class:"name",text:`${f.x}: ${fine(best)}`}));
       const list=emph?rows.slice().sort((a,b)=>(b[1]==null?-1e300:b[1])-(a[1]==null?-1e300:a[1])):rows;
-      for(const [s,v] of list)if(v!=null&&!(s.copy&&document.body.classList.contains("nocopy")))t.append(tipRow(emph?(series[near]===s?css("--s1"):css("--muted")):s.color,nice(v),s.name));});});
+      for(const [s,v] of list)if(v!=null&&!(s.copy&&document.body.classList.contains("nocopy")))t.append(tipRow(emph?(series[near]===s?css("--s1"):css("--muted")):s.color,fine(v),s.name));});});
   hit.addEventListener("mouseleave",()=>{cross.setAttribute("visibility","hidden");tip().hidden=true;});
   if(!emph){const lg=legend(series);if(lg)box.append(lg);}box.append(g.svg);
   const xs=[...new Set(series.flatMap(s=>s.x))].sort((a,b)=>a-b);
-  box.append(numbersTable([f.x,...series.map(s=>s.name)],xs.map(x=>[nice(x),...series.map(s=>{const i=s.x.indexOf(x);return i<0?"":nice(s.raw[i]);})])));
+  box.append(numbersTable([f.x,...series.map(s=>s.name)],xs.map(x=>[fine(x),...series.map(s=>{const i=s.x.indexOf(x);return i<0?"":fine(s.raw[i]);})])));
   return box;}
 function histFigure(f){const W=620,H=230,m={l:58,r:26,t:20,b:36},box=el("div",{class:"chart"}),e=f.edges,n=e.length-1;
   const T=c=>f.log?Math.log10(c+1):c;
@@ -209,13 +212,13 @@ function histFigure(f){const W=620,H=230,m={l:58,r:26,t:20,b:36},box=el("div",{c
   const hit=sv("rect",{x:m.l,y:m.t,width:g.pw,height:g.ph,fill:"transparent"});g.svg.append(hit);
   hit.addEventListener("mousemove",ev=>{const q=g.svg.getBoundingClientRect(),xv=e[0]+((ev.clientX-q.left)/q.width*W-m.l)/g.pw*(e[n]-e[0]);
     const i=Math.min(n-1,Math.max(0,Math.floor((xv-e[0])/(e[n]-e[0])*n)));band.setAttribute("x",g.X(e[i]));band.setAttribute("width",Math.max(1,g.X(e[i+1])-g.X(e[i])));band.setAttribute("visibility","visible");
-    showTip(ev,t=>{t.append(el("div",{class:"name",text:`${f.x}: ${nice(e[i])} to ${nice(e[i+1])}`}));
+    showTip(ev,t=>{t.append(el("div",{class:"name",text:`${f.x}: ${fine(e[i])} to ${fine(e[i+1])}`}));
       for(const s of series)if(!(s.copy&&document.body.classList.contains("nocopy")))t.append(tipRow(s.color,s.counts[i].toLocaleString("en-US"),s.name));});});
   hit.addEventListener("mouseleave",()=>{band.setAttribute("visibility","hidden");tip().hidden=true;});
   const lg=legend(series);if(lg)box.append(lg);box.append(g.svg);
   const out=series.filter(s=>s.outside>0).map(s=>`${s.name}: ${s.outside.toLocaleString("en-US")}`);
   if(out.length)box.append(el("div",{class:"note",text:"Outside the range shown: "+out.join("; ")}));
-  box.append(numbersTable([f.x+" from","to",...series.map(s=>s.name)],Array.from({length:n},(_,i)=>[nice(e[i]),nice(e[i+1]),...series.map(s=>String(s.counts[i]))])));
+  box.append(numbersTable([f.x+" from","to",...series.map(s=>s.name)],Array.from({length:n},(_,i)=>[fine(e[i]),fine(e[i+1]),...series.map(s=>String(s.counts[i]))])));
   return box;}
 function tableFigure(f){const t=el("table");t.append(el("tr",{},...f.columns.map(c=>el("th",{text:c}))));
   for(const r of f.rows)t.append(el("tr",{},...r.map((c,i)=>{const td=el("td",{text:c});if(/copy/.test(f.columns[i]||""))td.className="copyside";return td;})));

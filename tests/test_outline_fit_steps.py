@@ -32,6 +32,8 @@ def test_numbers_are_written_plainly():
     assert steps.share(3, 200) == "1.50 %" and steps.share(1, 0) == "-"
     assert steps.settled([("round", 10, False), ("full", 12, True)]) == "12, settled"
     assert steps.settled([("full", 30, False)]) == "30, cut off at its limit"
+    assert steps.moved({"drift": -0.0001, "tail": 4}, "nm") == "+0.000 nm in its last 4 iterations"
+    assert steps.moved({"drift": -0.4521, "tail": 1}, "nm") == "-0.452 nm in its last iteration"
 
 
 def test_blocks_hold_the_median_of_their_holes():

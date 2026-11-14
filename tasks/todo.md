@@ -150,30 +150,35 @@ Not in it: the slow `outline_fit`, a workbench window, any fix.
       not the same from run to run even without recording (the device adds in another order: CD 3e-4 nm
       apart on a 4,400-hole image, 22 to 30 iterations of the final fit for the same image), so "unchanged"
       is tested within that width; under NumPy the page fit is bit-identical with and without it
-- [ ] 2 `scripts/outline_fit_steps.py` + `scripts/outline_fit_steps.html`: the 10 steps for one image (your-image
+- [x] 2 `scripts/outline_fit_steps.py` + `scripts/outline_fit_steps.html`: the 10 steps for one image (your-image
       column), data reduced to a few MB per image, offline from file://
-- [ ] 3 The redrawn copy (final outline and blur, every hole refitted, near and far light + level of the nearest
+- [x] 3 The redrawn copy (final outline and blur, every hole refitted, near and far light + level of the nearest
       hole + noise, rounded like the file), the second column, "your image minus copy"
-- [ ] 4 All-images view (`data/all.js`): the steps' numbers in one table, one row of small pictures per step
-- [ ] 5 Planted-fault folders (nothing; a blur form the model cannot describe; tops cut off; two hole sizes; blur
+- [x] 4 All-images view (`data/all.js`): the steps' numbers in one table, one row of small pictures per step
+- [x] 5 Planted-fault folders (nothing; a blur form the model cannot describe; tops cut off; two hole sizes; blur
       changing across the image; 5 % of the holes not found; coarse grey steps on a quiet image; 8 repeats with the
       blur changing): each must show at its step; screenshots looked at; `docs/outline_fit_steps.md` with the
       gallery; pointer in `docs/outline_fit.md`
-- [ ] 6 Tests (`tests/test_outline_fit_trace.py`, `tests/test_outline_fit_steps.py`), whole suite, time per image
+- [x] 6 Tests (`tests/test_outline_fit_trace.py`, `tests/test_outline_fit_steps.py`), whole suite, time per image
       at 2048 x 1378 and 2048 x 5408, commit and push after each stage
+- [ ] The user runs it on the 8 real images and names the step that looks odd; nothing is fixed before that
 
-State 2026-11-13 (session cut off by the usage limit; continue from here):
-- Done and pushed: items 1 to 4 (recording, script, page, redrawn copy, all-images view) and the tests of item 6
-  (tests/test_outline_fit_trace.py 9, tests/test_outline_fit_steps.py 12; 54 outline tests pass). Added beyond the plan:
-  the copy takes its noise from the pixel-to-pixel jitter of image minus picture; picture 8e (average hole of each
-  ninth of the image against the whole image); graph 9e (difference averaged round the centre).
-- Looked at in a browser on generated 600 x 800 folders: nothing planted (image and copy alike), blur form (9e wave;
-  CD 1.5 nm off at 1.13 x the noise), tops cut off (step 1, 4a, 9d), two sizes and blur changing across the image
-  (8e, 7e), holes not found (2a, 7a, 7e), coarse grey steps (image and copy both 4.6 to 4.9 x), 8 repeats (A4).
-- Time: 3.3 s per 1378 x 2048 image, 8 s per 2048 x 5408 image (104,000 holes) with its copy, RTX 4060 Ti; 4 to 5 MB of
-  page data per image.
-- LEFT: the full-size page not yet looked at in a browser; docs/outline_fit_steps.md with the gallery and the pointer
-  in docs/outline_fit.md (item 5); the whole test suite; notes 6.20 in docs/outline_fit_one_pass.md (the fit is not
-  the same from run to run: 22 to 30 iterations and up to 0.04 nm for one image; a perfect copy can hit the limit of
-  30; the lens form reads its own copies 0.1 to 0.3 nm low; holes cut by the frame are placed poorly); the memory
-  note; giving the user the command.
+Review (2026-11-14). Built as planned, nothing in the method changed (the record is optional; under NumPy the page
+fit is bit-identical with and without it, on the GPU within the run-to-run width).
+- Added beyond the plan: the copy's noise is the pixel-to-pixel jitter of image minus picture (the fit's own noise
+  figure holds hole-to-hole differences); 8e (average hole of each ninth against the whole); 9e (difference
+  averaged round the centre); a hole-density map; the CD's drift over the fit's last iterations (a fit cut off at
+  30 is not always still moving: a fault-free image hit 30 with the CD flat).
+- Each planted fault shows at its step on generated 600 x 800 folders, and the fault-free folder shows image and
+  copy alike: blur form (9e wave; CD 1.5 nm off at 1.13 x the noise), tops cut off (1e, 4a, 9d), two sizes (8e,
+  0.43 against the copy's 0.32), blur varying (7e, 8e, 0.56 against 0.32), holes missed (2a, 7a, 7e), coarse grey
+  steps (both sides 4.6 to 4.9 x the noise), 8 repeats (A4). Dark holes, a 16 bit PNG, a TIFF page and a staggered
+  array run. Screenshots in `docs/outline_fit_steps.md`.
+- Time on the RTX 4060 Ti with the copy: 3.2 to 3.3 s per 1378 x 2048 image, 7 to 8 s per 2048 x 5408 image
+  (104,000 holes); 4 to 5 MB of page data per image. The 8-image page opens from file:// (headless Edge: every
+  picture and graph drawn).
+- Tests: 21 in the two files pass; the whole suite passes except four files that failed before this work
+  (test_isophote_curvature, test_pitch_gpu, test_radial_symmetry, test_tiled_gpu_pipeline).
+- Not covered: real images (none here), the slow `outline_fit` (same model, other steps). Notes 6.20 in
+  `docs/outline_fit_one_pass.md`: the fit differs from run to run (22 to 30 iterations, up to 0.04 nm for one
+  image); a perfect copy can hit the limit of 30; holes cut by the frame are placed poorly.

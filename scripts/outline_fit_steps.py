@@ -368,6 +368,8 @@ def fit_reading(record, template, blur, pixel) -> dict:
     rings = np.bincount(ring[used], weights=(count * np.nan_to_num(apart))[used]) / np.maximum(weight, 1e-12)
     keep = (weight > 0) & (np.arange(len(weight)) <= 4 * half / record["bins_per_px"])
     course = []
+    tail = min(5, max(1, record["stages"][-1][1] // 3))  # the fit's last iterations: a third of its last stage, 5 at most
+    tail = min(tail, len(record["iterations"]) - 1) if len(record["iterations"]) > 1 else 0
     for r in record["iterations"]:
         width = template.blur_fwhm_px(r["theta"])
         course.append(dict(stage=r["stage"], iteration=r["iteration"], cd=template.cd_px(r["theta"]) * pixel,
@@ -378,13 +380,13 @@ def fit_reading(record, template, blur, pixel) -> dict:
                 scale=record["scale"], level=record["const"], apart=apart, rms=rms, largest=float(np.nanmax(np.abs(apart))),
                 hole=float(inside.max() - inside.min()), noise_alone=alone, times=rms / alone if alone > 0 else float("nan"),
                 ring_px=np.flatnonzero(keep) / 4.0, ring_apart=rings[keep],
+                drift=course[-1]["cd"] - course[-1 - tail]["cd"], tail=tail,
                 stages=record["stages"], course=course, bins=int(used.sum()), per_bin=float(count.sum()) / max(int(used.sum()), 1))
 
 
 def parameter_rows(theta, template, pixel, unit):
     """Every fitted number in plain words with its value and its limits: (name, value, lowest, highest, at a limit)."""
     lo, hi = template.bounds()
-    j = template.n_shape
     names = [("outline: half width along x", "len"), ("outline: half width along y", "len"),
              ("outline: corner sharpness p (2 = ellipse, large = box)", "p"), ("outline: turned by", "deg")]
     names += [(f"outline: finer shape, term {k} ({part})", "plain") for k in template.ks for part in ("cos", "sin")]
@@ -413,7 +415,6 @@ def parameter_rows(theta, template, pixel, unit):
     for k, (name, kind) in enumerate(names[:len(theta)]):
         at = "at its lowest" if theta[k] <= lo[k] + 1e-4 else "at its highest" if theta[k] >= hi[k] - 1e-4 else ""
         rows.append((name, shown(theta[k], kind), shown(lo[k], kind), shown(hi[k], kind), at))
-    assert j <= len(rows)
     return rows
 
 
@@ -462,9 +463,8 @@ def material(side: dict, blur: str, pixel: float, unit: str, places, block: int)
     m.update(all_stack=a["stack"], all_pixels=a["pixels"], inside=int(inside.sum()), kept_1=int(kept.sum()),
              inside_mask=inside,
              near_frame=int((~inside).sum()), dim_1=int(dim.sum()), loud_1=int(loud.sum()),
-             other_1=int((inside & ~kept & ~dim & ~loud).sum()),
              brightness_1=np.where(inside, a["brightness"], np.nan), level_1=np.where(inside, a["level"], np.nan),
-             leftover_1=np.where(inside, a["leftover"], np.nan), limits_1=(low, high),
+             leftover_1=np.where(inside, a["leftover"], np.nan),
              leftover_limit_1=a["leftover_limit"] * a["typical_leftover"])
     for key in ("brightness_1", "level_1", "leftover_1"):
         m[key + "_map"] = blocks(seeds, m[key], shape, block)
@@ -473,16 +473,16 @@ def material(side: dict, blur: str, pixel: float, unit: str, places, block: int)
         return m
     m.update(stack_1=t["average_1"]["stack"], pixels_1=t["average_1"]["pixels"], noise_1=float(t["average_1"]["noise"]))
     reading, sharp = templates(blur)
-    nb_half = None
     for name, key in (("fit_1", "first"), ("fit_2", "final")):
         record = t.get(name)
         if key == "final" and record is not None and t.get("exchange"):
-            m["exchange"] = dict(kept=bool(t["exchange"]["kept"]), cost_first=float(record["cost"]),
-                                 cost_second=float(t["exchange"]["cost"]),
-                                 iterations=int(t["exchange"]["stages"][-1][1]))
-            m["first_end"] = fit_reading(record, reading, blur, pixel)
-            if t["exchange"]["kept"]:
-                record = t["exchange"]
+            second = t["exchange"]  # the fit run once more with the blur's two parts exchanged
+            m["exchange"] = dict(kept=bool(second["kept"]), cost_first=float(record["cost"]),
+                                 cost_second=float(second["cost"]), iterations=int(second["stages"][-1][1]),
+                                 cd_first=reading.cd_px(record["theta"]) * pixel,
+                                 cd_second=reading.cd_px(second["theta"]) * pixel)
+            if second["kept"]:
+                record = second
         if record is None:
             break
         r = fit_reading(record, reading, blur, pixel)
@@ -571,6 +571,14 @@ def text_of(m, key, form, default="-"):
     return form(m[key]) if m is not None and key in m else default
 
 
+def moved(q, unit) -> str:
+    """'+0.012 nm in its last 5 iterations': how far a fit's CD went at its end."""
+    if not q["tail"]:
+        return "no iteration"
+    span = f"{q['tail']} iterations" if q["tail"] > 1 else "iteration"
+    return f"{round(q['drift'], 3) + 0.0:+.3f} {unit} in its last {span}"
+
+
 def settled(stages):
     """'12, settled' or '30, cut off' for a fit's last stage."""
     _, count, stopped = stages[-1]
@@ -602,7 +610,6 @@ def image_page(real: dict, copy: dict | None, places, pixel: float, unit: str, b
         return (x, 1.0, y, 1.0, "image px")
 
     grey = "grey levels"
-    v = real["values"]
     turned = (" Dark holes: the image is turned over first (its highest value minus the image), so that holes are "
               "bright in everything below.") if real["inverted"] else ""
     # ---- 1
@@ -833,6 +840,7 @@ def image_page(real: dict, copy: dict | None, places, pixel: float, unit: str, b
             ("iterations", key, lambda q: "; ".join(f"{STAGES.get(name, name)}: {count}, "
                                                     f"{'settled' if ok else 'cut off at its limit'}"
                                                     for name, count, ok in q["stages"])),
+            ("CD moved at the end", key, lambda q: moved(q, unit)),
             ("brightness of an open area above the level", key, lambda q: f"{sig(q['scale'])} grey levels"),
             ("level", key, lambda q: f"{sig(q['level'])} grey levels"),
             ("average hole, brightest minus darkest bin", key, lambda q: f"{sig(q['hole'])} grey levels"),
@@ -935,8 +943,10 @@ def image_page(real: dict, copy: dict | None, places, pixel: float, unit: str, b
                   note="Not a step of the calculation: the method takes one outline and one blur for the whole "
                        "image, and this shows whether that holds. The nine pictures lie as the ninths lie in the "
                        "image; brightness and level are matched before the difference is taken. An even image "
-                       "gives nine pictures of fine grain. A spot or a ring that changes from one ninth to the "
-                       "next means that the hole size or the blur changes across the image.")])
+                       "gives nine pictures alike: fine grain, with a faint checker in the middle of each that "
+                       "the copy has too (the quarter-pixel bins of a ninth are filled differently from the whole "
+                       "image's). A spot or a ring that changes from one ninth to the next, and is not in the "
+                       "copy, means that the hole size or the blur changes across the image.")])
         line(8, "Second average hole", "kept_2", lambda q: f"{fmt(q, 0)} holes averaged")
         for row, side in zip(summary[-1][2:], sides):  # and how far the ninths of the image are from the whole
             if "parts_worst" in side:
@@ -944,8 +954,9 @@ def image_page(real: dict, copy: dict | None, places, pixel: float, unit: str, b
     # ---- 9
     if has("final"):
         def exchange_text(q):
-            return (f"run ({q['iterations']} iterations); its end was {'taken' if q['kept'] else 'not taken'}: cost "
-                    f"{sig(q['cost_second'], 5)} against {sig(q['cost_first'], 5)}")
+            return (f"run ({q['iterations']} iterations) and {'taken' if q['kept'] else 'not taken'}: it ended at "
+                    f"{q['cd_second']:.2f} {unit} with a cost of {sig(q['cost_second'], 5)}, the first run at "
+                    f"{q['cd_first']:.2f} {unit} with {sig(q['cost_first'], 5)}")
 
         rows = fit_numbers("final") + numbers(
             ("second run with the blur's two parts exchanged", "exchange", exchange_text),
@@ -968,10 +979,13 @@ def image_page(real: dict, copy: dict | None, places, pixel: float, unit: str, b
             f"number free (also the outline's finer shape), for at most {LIMIT} iterations. With the two-part blur, a "
             "fit that ends with the second part the narrower one is run once more with the two parts exchanged, and "
             "the better end is taken. What this fit ends with is the image's result.",
-            fit_look + " A fit that was cut off at its limit was still moving: its CD is wherever it happened to be.",
+            fit_look + " A fit that was cut off at its limit had not met its own stop rule; graphs 9a to 9c show "
+            "whether it was still moving then (a flat end: it had arrived; a slope: its CD is wherever it happened "
+            "to be).",
             rows, figures)
         line(9, "Final fit", "final",
-             lambda q: f"{settled(q['stages'])}; best match {sig(q['rms'])} grey levels off = {sig(q['times'])} x the noise")
+             lambda q: f"{settled(q['stages'])} (CD moved {moved(q, unit)}); best match "
+                       f"{sig(q['rms'])} grey levels off = {sig(q['times'])} x the noise")
     # ---- 10
     if has("result"):
         def circle(s):

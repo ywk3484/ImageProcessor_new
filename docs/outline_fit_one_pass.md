@@ -417,12 +417,42 @@ Copy of the test file (100 nm circles, pitch 8.5 px, placement 3.6 nm, Gaussian 
     - For the real images' 431 to 526 this leaves three readings that the number cannot separate: a real miss of
       the model, a quiet image with many holes, or coarse grey steps (only if the PNGs hold 8 bit content). The
       line of `image_values.py` separates them; not yet run there.
+20. **Every step recorded and drawn** (2026-11-13/14; the user asked for a visual debugger instead of more
+    typed-back checks). `fit_outline_fast(trace={}, redrawn=True)` records what each step produced;
+    `scripts/outline_fit_steps.py` draws it as a page, the image beside a copy redrawn from the fit's answer
+    (`docs/outline_fit_steps.md`). Seen with it on generated images (pitch 10.3 px, noise 1.2 grey levels, 8 bit):
+    - **The copy as a reference.** The redrawn picture is within 0.22 grey levels (rms, away from the frame) of
+      the generator's noise-free image; the pixel noise read from image minus picture is 1.235 for 1.2 put in plus
+      the rounding's twelfth; a copy reads back the CD it was drawn with to 0.00 to 0.10 nm with gauss2 (4,300 to
+      104,000 holes). With the lens form on an image with a size spread and a lens blur it comes back 0.1 to
+      0.3 nm low (4 of 4 noise draws): the lens form does not return its own answer there.
+    - **Run to run.** The same 600 x 800 image in eight runs: 22 to 30 iterations of the final fit, CDs 0.0003 nm
+      apart. Another: 100.00 nm after 7 iterations in one run and 100.04 nm after 27 in the next, both stopped by
+      the tolerance. The stop rule can end a fit at two points of a flat stretch 0.04 nm apart (17's 0.0003 nm
+      is not the rule).
+    - **The cap without a move.** A fault-free 1378 x 2048 image (26,000 holes) ran its final fit to the cap of
+      30 with the CD at 100.00 nm from the second iteration on; its copy stopped after 8 to 10. One of eight
+      copies of the 600 x 800 repeats also ran to the cap. "Not converged" therefore also occurs where the CD
+      has arrived.
+    - **The first fit's distance is not small.** Before the holes are centred the best match is 3.2 to 4.8 times
+      the noise off at 4,300 holes and 17 to 18 times at 104,000, in image and copy alike; the final fit is at
+      1.0 to 1.1.
+    - **Holes cut by the frame** get their seed on the frame's first pixel, move the 0.5 px they may, and are
+      then drawn 5 grey levels too bright in the second and third pixel column; holes beyond the frame are not in
+      the model at all. The stacked holes are a window away, so only their windows' outer bins see it: no effect
+      seen in the final fit at 4,300 holes or more.
+    - **What the final fit does not see.** Two hole sizes in one image (100 and 106 nm by halves) and a blur
+      running from 58 to 72 nm across the image both leave the final fit at 1.03 to 1.06 times the noise; the
+      average hole of each ninth of the image against the whole image's shows them (0.43 and 0.56 grey levels
+      against 0.32 in the copy). A blur form the model lacks (60 nm lens in 70 nm) costs 1.5 nm of CD at 1.13
+      times the noise with 4,300 holes: visible only when the difference is averaged round the centre.
 
 ## 7. Not done
 
 - Nothing was run on real pages by me, on the remote, or on more than one GPU. The user's first run on real images
-  (2026-11-13) is in 6.18; `scripts/outline_fast_check.py` is the check to run there, `scripts/image_values.py`
-  the one that puts its leftover into grey levels (6.19).
+  (2026-11-13) is in 6.18. What is wrong there is to be seen with `scripts/outline_fit_steps.py` (6.20), not yet
+  run on the remote; the one-line checks (`scripts/outline_fast_check.py`, `scripts/image_values.py`, 6.19) are
+  not to be offered again.
 - Generated pages at pitches that are not a whole number of pixels as the standard test (6.19): the measurements of
   section 5 and 6.1 to 6.18 are at whole-pixel pitches, where the average hole is sampled at one sub-pixel position.
 - The final fit from several starts, each run to its end, the lowest leftover kept (6.18): measured by the check,

@@ -141,8 +141,26 @@ Reading the line:
 - *final fit NOT converged in 30 iterations*: the final fit was cut at its cap
   of 30 iterations; the report adds a note. The message alone does not say how
   far the CD is from the fit's end: on generated images it is usually within
-  0.02 nm, but one fit stood 2.9 nm from its end at iteration 30. The check
-  below measures it on a folder.
+  0.02 nm (one fault-free image was cut at 30 with its CD flat since the second
+  iteration), but one fit stood 2.9 nm from its end at iteration 30. The
+  step-by-step page below shows the CD after every iteration.
+
+### Looking at every step
+
+When an image's reading looks odd, look at the calculation itself instead of
+at single numbers:
+
+```bat
+python scripts\outline_fit_steps.py D:\data\png_images --output D:\data\steps --pixel-size 21 --unit nm
+```
+
+It writes a page for the browser with every step of `outline_fit_fast` as
+pictures (image as read, holes found, average hole, first fit, each hole fitted,
+second average hole, final fit, result), your image beside a copy redrawn from
+the fit's own answer, and all images of the folder side by side. How to read
+it, and what planted faults look like: **`docs/outline_fit_steps.md`**. The two
+checks further down (`outline_fast_check.py`, `image_values.py`) each answer
+one question with one line; the page is the tool for finding out what is wrong.
 
 Limits (all numbers are from generated images; nothing has been run on a real
 one):
@@ -349,6 +367,8 @@ Method, settings and every measurement: `docs/outline_fit_one_pass.md` (page:
 `docs/outline_fit_one_pass.html`). Code: `fit_outline_fast` and the adapter in
 `subpx/outline.py`, the page fit in `subpx/_outline/onepass.py`, the GPU steps
 in `subpx/_gpu/outline_onepass.py`. Tests: `tests/test_outline_fit_fast.py`.
+`fit_outline_fast(..., trace={}, redrawn=True)` records what every step
+produced (for `scripts/outline_fit_steps.py`; `tests/test_outline_fit_trace.py`).
 
 ## Workbench
 
